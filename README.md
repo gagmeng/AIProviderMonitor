@@ -109,8 +109,8 @@
 │ │ 服务商 2 │  │ 🟢 在线 │ │ 🟠 异常 │ │ 🔴 离线 │ │ ⚡ 模型 │   │
 │ │ 通知     │  └────────┘ └────────┘ └────────┘ └────────┘   │
 │ │ 日志     │  最近检测                                       │
-│ ├─────────┤  ● Unittec        8/8 模型可用      在线 10:35   │
-│ │ 运行检测 │  ● justwoker      0/3 模型可用      异常 10:36   │
+│ ├─────────┤  ● Provider A     8/8 模型可用      在线 10:35   │
+│ │ 运行检测 │  ● Provider B     0/3 模型可用      异常 10:36   │
 │ │ 数据目录 │                                                  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -213,7 +213,7 @@ applyResult(provider, result):
 
 ```
 【AI Provider 模型变动】
-服务商：justwoker
+服务商：Provider B
 状态：up → degraded　可用模型 0/3
 失去可用：gpt-5.6-terra, gpt-5.6-luna
 时间：2026/9/11 10:56:03
@@ -310,7 +310,7 @@ npm run dist
 1. 切换到「服务商」页签，点击右上角 **新增服务商**
 2. 填写：
    - **供应商名称**：如 `OpenAI` / `内部网关`
-   - **URL**：API 根地址，如 `https://api.openai.com` 或 `http://10.255.114.31:3000`
+   - **URL**：API 根地址，如 `https://api.openai.com` 或 `http://192.168.1.100:3000`
    - **API Key**：服务方的密钥（本地 Ollama 等无鉴权服务可留空）
    - **轮循周期**：默认 60 秒
    - **模型变化时上报**：开启后模型变动会推送通知
@@ -433,8 +433,8 @@ AIProviderMonitor/
   "providers": [
     {
       "id": 1789094153749,
-      "name": "Unittec",
-      "url": "http://10.255.114.31:3000",
+      "name": "xxx",
+      "url": "http://xxx.xxx.xxx.xxx:3000",
       "apiKey": "sk-...",
       "intervalSec": 300,
       "notifyOnModelChange": true,
@@ -442,7 +442,7 @@ AIProviderMonitor/
       "enabled": true,
       "status": "up",
       "modelsTotal": 8,
-      "modelsAvailable": ["deepseek-r1-671b", "glm-5.3-flash"],
+      "modelsAvailable": ["model-a", "model-b"],
       "modelsUnavailable": [],
       "modelDetails": [{ "id": "dead-model", "ok": false, "note": "模型不存在（HTTP 404）" }],
       "checkedAt": 1789094153726,
