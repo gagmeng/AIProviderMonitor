@@ -1,0 +1,58 @@
+{
+  "name": "ai-provider-monitor",
+  "productName": "AI Provider Monitor",
+  "version": "1.0.0",
+  "description": "AI Provider 状态与可用模型监控",
+  "main": "main.js",
+  "author": "AIProviderMonitor",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node tests/smoke.js",
+    "smoke": "electron . --smoke-test",
+    "app-test": "electron tests/app-runner.js",
+    "gen-icons": "node scripts/gen-icons.js",
+    "dist": "electron-builder --win nsis portable",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.aiprovider.monitor",
+    "productName": "AI Provider Monitor",
+    "copyright": "Copyright © 2026",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "build/icon.ico"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "artifactName": "AIProviderMonitor-${version}.${ext}",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Provider Monitor"
+    },
+    "portable": {
+      "artifactName": "AIProviderMonitor-Portable-${version}.${ext}"
+    }
+  }
+}

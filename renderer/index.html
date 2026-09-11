@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>AI Provider Monitor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="brand-mark" id="brandMark"></div>
+        <div class="brand-text">
+          <div class="brand-name">Provider Monitor</div>
+          <div class="brand-sub">AI 服务状态监控</div>
+        </div>
+      </div>
+      <nav id="nav">
+        <button class="nav-item active" data-view="dashboard" id="nav-dashboard">
+          <span class="nav-ic" data-icon="gauge"></span><span>仪表盘</span>
+        </button>
+        <button class="nav-item" data-view="providers" id="nav-providers">
+          <span class="nav-ic" data-icon="server"></span><span>服务商</span>
+          <span class="nav-badge" id="navProviderCount">0</span>
+        </button>
+        <button class="nav-item" data-view="notify" id="nav-notify">
+          <span class="nav-ic" data-icon="bell"></span><span>通知</span>
+        </button>
+        <button class="nav-item" data-view="backup" id="nav-backup">
+          <span class="nav-ic" data-icon="archive"></span><span>备份</span>
+        </button>
+        <button class="nav-item" data-view="logs" id="nav-logs">
+          <span class="nav-ic" data-icon="terminal"></span><span>日志</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="foot-row"><span class="foot-label">运行检测</span><span class="foot-val" id="footRunning">0</span></div>
+        <div class="foot-row"><span class="foot-label">数据目录</span><button class="link-btn" id="openDataDir">打开</button></div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <!-- 仪表盘 -->
+      <section class="view active" id="view-dashboard">
+        <header class="view-head">
+          <h1>仪表盘</h1>
+          <div class="head-actions">
+            <button class="btn ghost" id="dashCheckAll"></button>
+          </div>
+        </header>
+        <div class="stat-grid">
+          <div class="stat-card">
+            <div class="stat-top"><span class="stat-ic ok" data-icon="signal"></span><span class="stat-label">在线</span></div>
+            <div class="stat-num" id="statUp">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-top"><span class="stat-ic warn" data-icon="warning"></span><span class="stat-label">异常</span></div>
+            <div class="stat-num" id="statDegraded">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-top"><span class="stat-ic bad" data-icon="close"></span><span class="stat-label">离线</span></div>
+            <div class="stat-num" id="statDown">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-top"><span class="stat-ic accent" data-icon="bolt"></span><span class="stat-label">可用模型</span></div>
+            <div class="stat-num" id="statModels">0</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>最近检测</h2><span class="panel-hint" id="dashUpdated"></span></div>
+          <div class="activity-list" id="recentList"></div>
+        </div>
+      </section>
+
+      <!-- 服务商 -->
+      <section class="view" id="view-providers">
+        <header class="view-head">
+          <h1>服务商</h1>
+          <div class="head-actions">
+            <button class="btn primary" id="btnAdd"></button>
+          </div>
+        </header>
+
+        <div class="toolbar">
+          <label class="checkbox">
+            <input type="checkbox" id="selAll" />
+            <span class="box" data-icon=""></span>
+            <span>全选</span>
+          </label>
+          <button class="btn small ghost" id="btnInvert">反选</button>
+          <span class="toolbar-sep"></span>
+          <button class="btn small" id="btnCheckSel" disabled></button>
+          <button class="btn small danger" id="btnDelSel" disabled>删除</button>
+          <div class="toolbar-spacer"></div>
+          <div class="search-wrap">
+            <span class="search-ic" data-icon="search"></span>
+            <input id="searchInput" type="text" placeholder="搜索名称 / URL / 备注" />
+          </div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-head row">
+            <div class="col-sel"></div>
+            <div class="col-name">服务商</div>
+            <div class="col-status">状态</div>
+            <div class="col-models">可用模型</div>
+            <div class="col-latency">延迟</div>
+            <div class="col-cycle">周期</div>
+            <div class="col-notify">变动上报</div>
+            <div class="col-checked">最近检测</div>
+            <div class="col-ops"></div>
+          </div>
+          <div id="providerList"></div>
+        </div>
+      </section>
+
+      <!-- 通知 -->
+      <section class="view" id="view-notify">
+        <header class="view-head"><h1>通知</h1></header>
+        <div class="notify-grid">
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="wechat"></span>微信（企业微信群机器人）</h2>
+              <label class="switch"><input type="checkbox" id="wxEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Webhook 地址</label>
+                <input type="text" id="wxWebhook" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="wxTest">发送测试消息</button>
+                <span class="hint" id="wxHint"></span>
+              </div>
+              <div class="guide">
+                <button class="guide-toggle" data-guide="wxGuide">
+                  <span>如何获取微信 Webhook 地址？</span>
+                  <span class="guide-arrow" data-icon="chevronDown"></span>
+                </button>
+                <ol class="guide-body" id="wxGuide">
+                  <li>在 PC 端微信中打开任意一个<strong>企业微信群</strong>（没有可先自行创建一个内部群）；</li>
+                  <li>点击群右上角 <strong>「…」→ 群机器人 → 添加机器人</strong>，创建一个机器人并自定义名称（如“状态监控”）；</li>
+                  <li>创建完成后复制弹出的 <strong>Webhook 地址</strong>（形如 <code>https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx</code>）；</li>
+                  <li>将地址粘贴到上方输入框，打开开关并点击「发送测试消息」验证。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="qq"></span>QQ（机器人 HTTP 上报）</h2>
+              <label class="switch"><input type="checkbox" id="qqEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>QQ 号（上报目标）</label>
+                <input type="text" id="qqTarget" placeholder="接收消息的 QQ 号或群号，例如 123456789" />
+              </div>
+              <div class="field-inline" style="margin-bottom:14px;">
+                <div class="field" style="margin-bottom:0;">
+                  <label>上报类型</label>
+                  <select id="qqTargetType" class="select-input">
+                    <option value="private">私聊（个人 QQ 号）</option>
+                    <option value="group">群聊（群号）</option>
+                  </select>
+                </div>
+                <div class="field" style="flex:2; margin-bottom:0;">
+                  <label>Access Token（可选）</label>
+                  <input type="password" id="qqToken" placeholder="机器人端配置的 access_token，未设置可留空" />
+                </div>
+              </div>
+              <div class="field">
+                <label>机器人 HTTP 服务地址</label>
+                <input type="text" id="qqWebhook" placeholder="http://127.0.0.1:5700  （NapCat / Lagrange / go-cqhttp 的 HTTP 服务）" />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="qqTest">发送测试消息</button>
+                <span class="hint" id="qqHint"></span>
+              </div>
+              <div class="guide">
+                <button class="guide-toggle" data-guide="qqGuide">
+                  <span>如何配置 QQ 机器人上报？</span>
+                  <span class="guide-arrow" data-icon="chevronDown"></span>
+                </button>
+                <ol class="guide-body" id="qqGuide">
+                  <li>准备一个 QQ 小号作为机器人，部署一个 OneBot v11 标准协议实现，推荐任选其一：
+                    <ul class="guide-sub">
+                      <li><strong>NapCat</strong>（github.com/NapNeko/NapCatQQ）—— 免费开箱即用，支持 Windows；</li>
+                      <li><strong>Lagrange.OneBot</strong>（github.com/LagrangeDev/Lagrange.Core）—— 轻量 .NET 实现；</li>
+                      <li><strong>go-cqhttp</strong>（已停止维护但仍有大量用户）。</li>
+                    </ul>
+                  </li>
+                  <li>在机器人配置中<strong>开启 HTTP 服务端</strong>（如 NapCat 的 <code>servers.httpServers</code>，go-cqhttp 的 <code>servers.http</code>），设置监听端口（默认 <code>5700</code>），本程序将调用其 <code>/send_private_msg</code> 与 <code>/send_group_msg</code> 接口；</li>
+                  <li>若配置文件中设置了 <code>access_token</code>，请同步填写到上方「Access Token」，本程序会以 <code>Authorization: Bearer</code> 头携带；</li>
+                  <li>机器人登录成功后，在上方填入<strong>机器人 HTTP 服务地址</strong>（如 <code>http://127.0.0.1:5700</code>）、<strong>上报目标</strong>（接收消息的 QQ 号或群号）与上报类型，打开开关并点击「发送测试消息」验证。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="dingtalk"></span>钉钉（群机器人 Webhook）</h2>
+              <label class="switch"><input type="checkbox" id="dtEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Webhook 地址</label>
+                <input type="text" id="dtWebhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+              </div>
+              <div class="field">
+                <label>加签密钥 SECRET（可选）</label>
+                <input type="password" id="dtSecret" placeholder="SEC 开头的密钥，安全设置未开启加签可留空" />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="dtTest">发送测试消息</button>
+                <span class="hint" id="dtHint"></span>
+              </div>
+              <div class="guide">
+                <button class="guide-toggle" data-guide="dtGuide">
+                  <span>如何获取钉钉 Webhook 地址？</span>
+                  <span class="guide-arrow" data-icon="chevronDown"></span>
+                </button>
+                <ol class="guide-body" id="dtGuide">
+                  <li>在钉钉中打开一个<strong>群聊</strong>（没有可先创建一个内部群），点击群右上角 <strong>「…」群设置 → 机器人</strong>；</li>
+                  <li>选择 <strong>添加机器人 → 自定义（通过 Webhook 接入）</strong>；</li>
+                  <li>安全设置任选其一（推荐<strong>加签</strong>）：
+                    <ul class="guide-sub">
+                      <li><strong>加签</strong>：创建后复制 <code>SEC</code> 开头的密钥，填到上方「加签密钥」；</li>
+                      <li><strong>自定义关键词</strong>：填入 <code>监控</code>（本程序消息包含该词，可直接命中）；</li>
+                      <li><strong>IP 地址段</strong>：填写本机公网 IP。</li>
+                    </ul>
+                  </li>
+                  <li>完成后复制 <strong>Webhook 地址</strong>（形如 <code>https://oapi.dingtalk.com/robot/send?access_token=xxxx</code>），粘贴到上方输入框，打开开关并点击「发送测试消息」验证。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="settings"></span>检测选项</h2></div>
+            <div class="panel-body">
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">启动时自动开始检测</div>
+                  <div class="opt-sub">应用启动后立即按各服务商周期开始轮循</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="autoStart" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">并发检测数</div>
+                  <div class="opt-sub">同时检测的服务商数量上限</div>
+                </div>
+                <input type="number" id="concurrency" min="1" max="16" class="num-input" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 备份 -->
+      <section class="view" id="view-backup">
+        <header class="view-head">
+          <h1>备份与还原</h1>
+          <div class="head-actions">
+            <button class="btn ghost" id="bkOpenDir">打开备份目录</button>
+          </div>
+        </header>
+
+        <div class="notify-grid">
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="archive"></span>创建备份</h2></div>
+            <div class="panel-body">
+              <p class="bk-desc">将当前全部服务商配置与通知设置导出为一个 JSON 备份文件。自动备份每日生成一次，保留最近 10 份；也可随时手动创建。</p>
+              <div class="field-row" style="margin-top:12px;">
+                <button class="btn small" id="bkSaveAs">备份保存到…</button>
+                <button class="btn small ghost" id="bkQuick">立即备份到备份目录</button>
+                <span class="hint" id="bkHint"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="refresh"></span>从备份还原</h2></div>
+            <div class="panel-body">
+              <p class="bk-desc">选择一个备份文件后按所选方式还原。「覆盖」将整体替换当前全部数据；「合并」仅把备份中的服务商并入当前列表（按 URL 去重），通知设置保持不变。</p>
+              <div class="field-row" style="margin:12px 0 6px;">
+                <label class="radio"><input type="radio" name="bkMode" value="overwrite" checked /><span class="radio-dot"></span><span>覆盖还原（整体替换）</span></label>
+                <label class="radio"><input type="radio" name="bkMode" value="merge" /><span class="radio-dot"></span><span>合并还原（并入列表）</span></label>
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="bkPick">选择备份文件…</button>
+                <button class="btn small primary" id="bkRestore" disabled>开始还原</button>
+              </div>
+              <div class="bk-picked" id="bkPicked" style="display:none;"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="clock"></span>自动备份记录</h2>
+              <button class="btn small ghost" id="bkRefresh">刷新</button>
+            </div>
+            <div class="panel-body" style="padding-top:6px;">
+              <div id="bkList"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 日志 -->
+      <section class="view" id="view-logs">
+        <header class="view-head">
+          <h1>日志</h1>
+          <div class="head-actions">
+            <div class="search-wrap">
+              <span class="search-ic" data-icon="search"></span>
+              <input id="logFilter" type="text" placeholder="过滤：服务商名 / 关键字" />
+            </div>
+            <label class="switch small-switch"><input type="checkbox" id="autoScroll" checked /><span class="knob"></span></label>
+            <span class="switch-label">自动滚动</span>
+            <button class="btn small ghost" id="openLogDir">打开日志目录</button>
+          </div>
+        </header>
+        <div class="log-card" id="logCard"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 新增/编辑弹窗 -->
+  <div class="modal-mask" id="providerModal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="pmTitle">新增服务商</h3>
+        <button class="icon-btn" id="pmClose"></button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>供应商名称 <i>*</i></label>
+          <input type="text" id="fName" placeholder="例如：OpenAI / 本地 Ollama" />
+        </div>
+        <div class="field">
+          <label>URL <i>*</i></label>
+          <input type="text" id="fUrl" placeholder="https://api.openai.com" />
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input type="password" id="fKey" placeholder="sk-..." />
+        </div>
+        <div class="field-inline">
+          <div class="field">
+            <label>轮循周期（秒）</label>
+            <input type="number" id="fInterval" min="5" value="60" />
+          </div>
+          <div class="field">
+            <label>模型变化时上报</label>
+            <label class="switch"><input type="checkbox" id="fNotify" /><span class="knob"></span></label>
+          </div>
+        </div>
+        <div class="field">
+          <label>备注</label>
+          <input type="text" id="fNote" placeholder="可选" />
+        </div>
+        <div class="form-error" id="fError"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="pmCancel">取消</button>
+        <button class="btn primary" id="pmSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 详情弹窗 -->
+  <div class="modal-mask" id="detailModal">
+    <div class="modal wide">
+      <div class="modal-head">
+        <h3 id="dmTitle">详情</h3>
+        <button class="icon-btn" id="dmClose"></button>
+      </div>
+      <div class="modal-body">
+        <div class="dm-banner" id="dmBanner"></div>
+        <div class="detail-meta" id="dmMeta"></div>
+        <div class="dm-section">
+          <div class="dm-sec-title">可用模型 <span id="dmAvailCount" class="count-pill"></span></div>
+          <div class="model-tags" id="dmAvail"></div>
+        </div>
+        <div class="dm-section">
+          <div class="dm-sec-title">不可用 / 未探测 <span id="dmUnavailCount" class="count-pill gray"></span></div>
+          <div class="model-tags" id="dmUnavail"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认弹窗 -->
+  <div class="modal-mask" id="confirmModal">
+    <div class="modal slim">
+      <div class="modal-body confirm-body">
+        <div class="confirm-ic" id="cfIcon"></div>
+        <div class="confirm-title" id="cfTitle">确认</div>
+        <div class="confirm-text" id="cfText"></div>
+      </div>
+      <div class="modal-foot center">
+        <button class="btn ghost" id="cfCancel">取消</button>
+        <button class="btn danger solid" id="cfOk">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastWrap"></div>
+
+  <script src="icons.js"></script>
+  <script src="app.js"></script>
+
+</body>
+</html>
