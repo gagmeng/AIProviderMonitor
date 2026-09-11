@@ -30,6 +30,9 @@
         <button class="nav-item" data-view="backup" id="nav-backup">
           <span class="nav-ic" data-icon="archive"></span><span>备份</span>
         </button>
+        <button class="nav-item" data-view="settings" id="nav-settings">
+          <span class="nav-ic" data-icon="settings"></span><span>设置</span>
+        </button>
         <button class="nav-item" data-view="logs" id="nav-logs">
           <span class="nav-ic" data-icon="terminal"></span><span>日志</span>
         </button>
@@ -37,6 +40,7 @@
       <div class="sidebar-foot">
         <div class="foot-row"><span class="foot-label">运行检测</span><span class="foot-val" id="footRunning">0</span></div>
         <div class="foot-row"><span class="foot-label">数据目录</span><button class="link-btn" id="openDataDir">打开</button></div>
+        <div class="foot-row"><span class="foot-label">版本</span><span class="foot-val" id="appVersion">—</span></div>
       </div>
     </aside>
 
@@ -93,6 +97,9 @@
           <span class="toolbar-sep"></span>
           <button class="btn small" id="btnCheckSel" disabled></button>
           <button class="btn small danger" id="btnDelSel" disabled>删除</button>
+          <span class="toolbar-sep"></span>
+          <button class="btn small ghost" id="btnImport"></button>
+          <button class="btn small ghost" id="btnExport"></button>
           <div class="toolbar-spacer"></div>
           <div class="search-wrap">
             <span class="search-ic" data-icon="search"></span>
@@ -237,6 +244,13 @@
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="view" id="view-settings">
+        <header class="view-head"><h1>设置</h1></header>
+        <div class="settings-grid">
           <div class="panel">
             <div class="panel-head"><h2><span class="panel-ic" data-icon="settings"></span>检测选项</h2></div>
             <div class="panel-body">
@@ -253,6 +267,16 @@
                   <div class="opt-sub">同时检测的服务商数量上限</div>
                 </div>
                 <input type="number" id="concurrency" min="1" max="16" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">点击关闭按钮时</div>
+                  <div class="opt-sub">「隐藏到托盘」后程序在后台继续监控，可从托盘图标退出</div>
+                </div>
+                <select id="closeAction" class="select-input opt-select">
+                  <option value="tray">隐藏到托盘</option>
+                  <option value="exit">退出程序</option>
+                </select>
               </div>
             </div>
           </div>
@@ -320,6 +344,7 @@
             </div>
             <label class="switch small-switch"><input type="checkbox" id="autoScroll" checked /><span class="knob"></span></label>
             <span class="switch-label">自动滚动</span>
+            <button class="btn small" id="logClear"></button>
             <button class="btn small ghost" id="openLogDir">打开日志目录</button>
           </div>
         </header>
@@ -350,8 +375,11 @@
         </div>
         <div class="field-inline">
           <div class="field">
-            <label>轮循周期（秒）</label>
-            <input type="number" id="fInterval" min="5" value="60" />
+            <label>轮循周期</label>
+            <div class="interval-row">
+              <input type="number" id="fInterval" min="1" value="5" />
+              <select id="fIntervalUnit" class="select-input unit-select"></select>
+            </div>
           </div>
           <div class="field">
             <label>模型变化时上报</label>
@@ -393,8 +421,105 @@
     </div>
   </div>
 
-  <!-- 确认弹窗 -->
-  <div class="modal-mask" id="confirmModal">
+  <!-- 导出弹窗 -->
+  <div class="modal-mask" id="exportModal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>导出服务商</h3>
+        <button class="icon-btn" id="emClose"></button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>导出格式</label>
+          <div class="seg" id="emFormat">
+            <button class="seg-item active" data-fmt="json">JSON</button>
+            <button class="seg-item" data-fmt="csv">CSV</button>
+            <button class="seg-item" data-fmt="text">文本</button>
+          </div>
+        </div>
+        <div class="field" id="emDelimField" style="display:none;">
+          <label>文本分隔符</label>
+          <div class="seg" id="emDelim">
+            <button class="seg-item active" data-d="tab">Tab 制表符</button>
+            <button class="seg-item" data-d="comma">逗号 ,</button>
+            <button class="seg-item" data-d="pipe">竖线 |</button>
+            <button class="seg-item" data-d="semicolon">分号 ;</button>
+          </div>
+        </div>
+        <div class="opt-row" style="border-top:1px solid var(--sep); border-bottom:none; padding:10px 0;">
+          <div>
+            <div class="opt-title">包含 API Key</div>
+            <div class="opt-sub">导出文件将包含明文密钥，请妥善保管</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="emWithKey" checked /><span class="knob"></span></label>
+        </div>
+        <div class="field" style="margin-top:6px;">
+          <label>预览</label>
+          <pre class="io-preview" id="emPreview"></pre>
+        </div>
+        <div class="form-error" id="emError"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="emCancel">取消</button>
+        <button class="btn" id="emCopy">复制到剪贴板</button>
+        <button class="btn primary" id="emSave">保存到文件…</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导入弹窗 -->
+  <div class="modal-mask" id="importModal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>导入服务商</h3>
+        <button class="icon-btn" id="imClose"></button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>导入格式</label>
+          <div class="seg" id="imFormat">
+            <button class="seg-item active" data-fmt="json">JSON</button>
+            <button class="seg-item" data-fmt="csv">CSV</button>
+            <button class="seg-item" data-fmt="text">文本</button>
+          </div>
+        </div>
+        <div class="field" id="imDelimField" style="display:none;">
+          <label>文本分隔符</label>
+          <div class="seg" id="imDelim">
+            <button class="seg-item active" data-d="tab">Tab 制表符</button>
+            <button class="seg-item" data-d="comma">逗号 ,</button>
+            <button class="seg-item" data-d="pipe">竖线 |</button>
+            <button class="seg-item" data-d="semicolon">分号 ;</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>粘贴内容或选择文件</label>
+          <textarea class="io-textarea" id="imText" rows="7" placeholder="JSON：[{ name, url, apiKey, intervalSec, notifyOnModelChange, note }]&#10;CSV：表头 name,url,apiKey,intervalSec,notifyOnModelChange,note&#10;文本：名称&lt;分隔符&gt;URL&lt;分隔符&gt;APIKey&lt;分隔符&gt;周期秒&lt;分隔符&gt;上报(1/0)&lt;分隔符&gt;备注（后四列可省略）"></textarea>
+        </div>
+        <div class="field-row">
+          <button class="btn small" id="imPick">从文件读取…</button>
+          <button class="btn small" id="imPreviewBtn">解析预览</button>
+          <span class="hint" id="imHint"></span>
+        </div>
+        <div class="io-result" id="imResult" style="display:none;"></div>
+        <div class="field" style="margin-top:12px;">
+          <label>导入方式</label>
+          <div class="field-row">
+            <label class="radio"><input type="radio" name="imMode" value="merge" checked /><span class="radio-dot"></span><span>合并（按 URL 去重更新）</span></label>
+            <label class="radio"><input type="radio" name="imMode" value="append" /><span class="radio-dot"></span><span>追加（全部新增）</span></label>
+          </div>
+        </div>
+        <div class="form-error" id="imError"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="imCancel">取消</button>
+        <button class="btn primary" id="imApply" disabled>开始导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认弹窗（置于最后，保证显示在其它弹窗之上） -->
+  <div class="modal-mask top" id="confirmModal">
     <div class="modal slim">
       <div class="modal-body confirm-body">
         <div class="confirm-ic" id="cfIcon"></div>
@@ -403,7 +528,7 @@
       </div>
       <div class="modal-foot center">
         <button class="btn ghost" id="cfCancel">取消</button>
-        <button class="btn danger solid" id="cfOk">删除</button>
+        <button class="btn danger solid" id="cfOk">确定</button>
       </div>
     </div>
   </div>

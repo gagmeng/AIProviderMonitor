@@ -26,7 +26,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| 新增 / 编辑 | 供应商名称、URL、API Key、轮循周期、模型变化上报开关、备注 |
+| 新增 / 编辑 | 供应商名称、URL、API Key、轮循周期（数值 + 单位下拉）、模型变化上报开关、备注 |
 | 删除 | 单个删除（带确认弹窗） |
 | 全选 / 反选 | 一键全选、反选当前筛选结果 |
 | 批量删除 | 多选后批量删除，带确认提示 |
@@ -42,7 +42,7 @@
 | 供应商名称 | ✅ | 自定义显示名称 |
 | URL | ✅ | API 根地址（自动补全 `https://`，去除尾部 `/`），如 `https://api.openai.com` |
 | API Key | ❌ | Bearer Token，用于 `/v1/models` 与 `/v1/chat/completions` 鉴权 |
-| 轮循周期 | ✅ | 秒为单位（最低 5 秒），到达周期自动检测 |
+| 轮循周期 | ✅ | 数值 + 单位（秒/分/时/天/周/月/年，最低 5 秒），到达周期自动检测 |
 | 模型变化上报 | ✅ | 开启后，模型数量或可用状态变化时触发通知 |
 | 备注 | ❌ | 自由文本 |
 
@@ -170,7 +170,8 @@ iOS 风格设计语言：SF 系统字体栈、毛玻璃侧栏、圆角卡片（1
 | `provider:toggleEnabled` | R→M | 启用/停用轮循 |
 | `global:set` | R→M | 全局通知与检测选项 |
 | `notify:test` | R→M | 通道测试消息 |
-| `logs:get` / `log:line` | R→M / M→R | 日志拉取与实时推送 |
+| `logs:get` / `logs:clear` / `log:line` | R→M / M→R | 日志拉取、清除与实时推送 |
+| `app:version` | R→M | 读取应用版本号 |
 | `open:path` | R→M | 打开数据/日志目录 |
 
 ---
@@ -273,13 +274,13 @@ applyResult(provider, result):
 
 ### 方式一：安装版（推荐）
 
-1. 运行 `dist/AIProviderMonitor-1.0.0.exe`
+1. 运行 `dist/AIProviderMonitor-1.0.2.exe`
 2. 按向导选择安装目录（默认安装到用户目录）
 3. 完成后从桌面 / 开始菜单启动「AI Provider Monitor」
 
 ### 方式二：便携版
 
-直接运行 `dist/AIProviderMonitor-Portable-1.0.0.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
+直接运行 `dist/AIProviderMonitor-Portable-1.0.2.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
 
 ### 方式三：开发模式
 
@@ -312,7 +313,7 @@ npm run dist
    - **供应商名称**：如 `OpenAI` / `内部网关`
    - **URL**：API 根地址，如 `https://api.openai.com` 或 `http://192.168.1.100:3000`
    - **API Key**：服务方的密钥（本地 Ollama 等无鉴权服务可留空）
-   - **轮循周期**：默认 60 秒
+   - **轮循周期**：默认 5 分钟，数值 + 单位（秒/分/时/天/周/月/年）
    - **模型变化时上报**：开启后模型变动会推送通知
    - **备注**：可选
 3. 保存后立即纳入轮循
@@ -364,20 +365,22 @@ npm run dist
 
 > 三种通知通道相互独立，可同时启用；某通道故障不影响其它通道推送。服务商必须单独打开「模型变化时上报」开关才会推送。
 
-### 8. 检测选项
+### 8. 检测选项（设置页签）
 
 - **启动时自动开始检测**：应用启动即按各服务商周期开始轮循
 - **并发检测数**：同时检测的服务商数量上限（1–16），服务商多且周期短时可调大
+- **点击关闭按钮时**：隐藏到托盘（默认，后台继续监控）或直接退出程序
 
 ### 9. 日志
 
-- 切换到「日志」页签实时查看运行日志，右上角可关闭自动滚动、打开日志目录
+- 切换到「日志」页签实时查看运行日志，右上角可过滤、关闭自动滚动、清除日志、打开日志目录
+- 「清除」仅清空界面显示，磁盘日志文件保留
 - 日志文件按天滚动：`%APPDATA%/ai-provider-monitor/logs/aipm-YYYYMMDD.log`
 
 ### 10. 托盘与退出
 
-- 点击窗口 ✕ 仅隐藏到系统托盘（后台持续轮循），托盘双击或右键「显示主界面」恢复
-- 真正退出：托盘右键 → 退出，或菜单 文件 → 退出（`Ctrl+Q`）
+- 点击窗口 ✕ 的行为由 设置 → 点击关闭按钮时 决定：默认隐藏到系统托盘（后台持续轮循），托盘双击或右键「显示主界面」恢复
+- 真正退出：托盘右键 → 退出，或菜单 文件 → 退出（`Ctrl+Q`）；若关闭行为设为「退出程序」，点 ✕ 即退出
 
 ---
 
@@ -393,9 +396,12 @@ AIProviderMonitor/
 │   ├── scheduler.js         #   周期调度器（定时器 + 并发池）
 │   ├── detector.js          #   检测引擎（模型列表 + 逐模型探测）
 │   ├── notifier.js          #   微信 / QQ / 钉钉 通知
+│   ├── durfmt.js            #   周期时长工具（单位换算 + 智能格式化）
+│   ├── transfer.js          #   服务商批量导入 / 导出（JSON/CSV/文本）
+│   ├── backup.js            #   备份与还原（手动 + 每日自动）
 │   └── logger.js            #   日志（内存缓冲 + 按天落盘 + 订阅）
 ├── renderer/                # 渲染进程（无框架 SPA）
-│   ├── index.html           #   四视图布局 + 三个弹窗
+│   ├── index.html           #   六视图布局 + 五个弹窗
 │   ├── styles.css           #   iOS 风格设计系统
 │   ├── app.js               #   状态渲染与交互逻辑
 │   └── icons.js             #   手绘 SVG 图标集（25+）
@@ -408,8 +414,8 @@ AIProviderMonitor/
 │   ├── icon.ico             # 多尺寸应用图标
 │   └── icon.png             # 256×256 PNG
 └── dist/                    # 打包产物
-    ├── AIProviderMonitor-1.0.0.exe          # NSIS 安装包
-    └── AIProviderMonitor-Portable-1.0.0.exe # 便携版
+    ├── AIProviderMonitor-1.0.2.exe          # NSIS 安装包
+    └── AIProviderMonitor-Portable-1.0.2.exe # 便携版
 ```
 
 ## 数据文件格式
@@ -428,7 +434,8 @@ AIProviderMonitor/
     "dingtalkWebhook": "https://oapi.dingtalk.com/robot/send?access_token=xxx",
     "dingtalkSecret": "SECxxx",
     "autoStartCheckOnLaunch": true,
-    "concurrency": 4
+    "concurrency": 4,
+    "closeAction": "tray"
   },
   "providers": [
     {
@@ -470,7 +477,7 @@ AIProviderMonitor/
 确认 OneBot 实现的 HTTP 服务已开启且端口正确；`access_token` 两端一致；上报目标 QQ 号/群号正确且机器人有权限发送。
 
 **Q: 关闭窗口后程序还在运行？**
-是有意设计——关闭仅隐藏到托盘，后台轮循继续。彻底退出请使用托盘菜单或 `Ctrl+Q`。
+默认行为——关闭隐藏到托盘，后台轮循继续。可在 设置 → 点击关闭按钮时 改为「退出程序」；随时可通过托盘菜单或 `Ctrl+Q` 退出。
 
 **Q: 数据备份与迁移？**
 复制 `%APPDATA%/ai-provider-monitor/` 整个目录（便携版为 exe 同级 `AIPM-Data/`），包含全部配置与日志。

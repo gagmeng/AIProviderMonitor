@@ -45,6 +45,7 @@ module.exports = {
   error: (m) => write('error', m),
   debug: (m) => write('debug', m),
   recent: () => buffer.slice(),
+  clear() { buffer.length = 0; },
   subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
   LOG_DIR
 };

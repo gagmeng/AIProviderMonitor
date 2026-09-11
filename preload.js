@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('aipm', {
   getState: () => ipcRenderer.invoke('state:get'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
+  clearLogs: () => ipcRenderer.invoke('logs:clear'),
+  getAppVersion: () => ipcRenderer.invoke('app:version'),
   addProvider: (data) => ipcRenderer.invoke('provider:add', data),
   updateProvider: (id, data) => ipcRenderer.invoke('provider:update', { id, data }),
   deleteProvider: (id) => ipcRenderer.invoke('provider:delete', id),
@@ -20,6 +22,10 @@ contextBridge.exposeInMainWorld('aipm', {
   backupRestore: (filePath, mode) => ipcRenderer.invoke('backup:restore', { filePath, mode }),
   backupListAuto: () => ipcRenderer.invoke('backup:listAuto'),
   backupRunAuto: () => ipcRenderer.invoke('backup:runAuto'),
+  transferExport: (opts) => ipcRenderer.invoke('transfer:export', opts),
+  transferExportSaveAs: (opts) => ipcRenderer.invoke('transfer:exportSaveAs', opts),
+  transferParse: (opts) => ipcRenderer.invoke('transfer:parse', opts),
+  transferApply: (opts) => ipcRenderer.invoke('transfer:apply', opts),
   onStateChanged: (fn) => { const h = (_e, s) => fn(s); ipcRenderer.on('state-changed', h); return () => ipcRenderer.removeListener('state-changed', h); },
   onLogLine: (fn) => { const h = (_e, l) => fn(l); ipcRenderer.on('log:line', h); return () => ipcRenderer.removeListener('log:line', h); }
 });

@@ -41,9 +41,19 @@ function escapeHtml(s) {
 
 // ---------- 确认弹窗 ----------
 let confirmCb = null;
-function confirmDialog(title, text, cb) {
+/**
+ * 确认弹窗。
+ * opts.okText：确认按钮文字（默认"确定"）；opts.danger：危险操作红色样式（默认 true）。
+ */
+function confirmDialog(title, text, cb, opts = {}) {
   $('#cfTitle').textContent = title;
   $('#cfText').textContent = text;
+  $('#cfIcon').innerHTML = icon(opts.danger === false ? 'info' : 'trash');
+  const okBtn = $('#cfOk');
+  okBtn.textContent = opts.okText || '确定';
+  okBtn.classList.toggle('danger', opts.danger !== false);
+  okBtn.classList.toggle('solid', opts.danger !== false);
+  okBtn.classList.toggle('primary', opts.danger === false);
   confirmCb = cb;
   $('#confirmModal').classList.add('show');
 }
@@ -60,6 +70,7 @@ $$('.nav-item').forEach((btn) => {
     if (view === 'notify') renderNotify();
     if (view === 'dashboard') renderDashboard();
     if (view === 'providers') renderProviders();
+    if (view === 'settings') renderNotify();
   });
 });
 
@@ -81,6 +92,28 @@ function fmtDate(ts) {
   const d = new Date(ts);
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getMonth() + 1}/${p(d.getDate())} ${fmtTime(ts)}`;
+}
+// 周期智能格式化（与主进程 durfmt.js 同规则；列表空间有限，分钟/小时用短单位）
+const DUR_UNITS = [
+  { label: '秒', factor: 1 }, { label: '分', factor: 60 }, { label: '时', factor: 3600 },
+  { label: '天', factor: 86400 }, { label: '周', factor: 604800 },
+  { label: '月', factor: 2592000 }, { label: '年', factor: 31536000 }
+];
+function fmtDuration(sec) {
+  sec = Math.max(1, Math.round(Number(sec) || 0));
+  let bi = 0;
+  for (let i = DUR_UNITS.length - 1; i >= 0; i--) { if (sec >= DUR_UNITS[i].factor) { bi = i; break; } }
+  const u = DUR_UNITS[bi];
+  if (sec % u.factor === 0) {
+    const v = sec / u.factor;
+    if (u.label === '月' && v % 12 === 0) return `${v / 12} 年`;
+    return `${v} ${u.label}`;
+  }
+  if (bi === 0) return `${sec} 秒`;
+  const major = Math.floor(sec / u.factor);
+  const minor = Math.round((sec % u.factor) / DUR_UNITS[bi - 1].factor);
+  if (minor > 0) return `${major} ${u.label} ${minor} ${DUR_UNITS[bi - 1].label}`;
+  return `${major} ${u.label}`;
 }
 
 function render() {
@@ -156,7 +189,7 @@ function renderProviders() {
       const total = p.modelsTotal || 0;
       const avail = (p.modelsAvailable || []).length;
       const pct = total > 0 ? Math.round((avail / total) * 100) : 0;
-      const cycleMin = p.intervalSec >= 60 ? `${Math.round(p.intervalSec / 60)} 分钟` : `${p.intervalSec} 秒`;
+      const cycleMin = fmtDuration(p.intervalSec);
       const checked = p.checkedAt ? fmtTime(p.checkedAt) : '未检测';
       return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''}" data-id="${p.id}">
         <div class="col-sel"><label class="checkbox"><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
@@ -249,6 +282,37 @@ $('#btnDelSel').addEventListener('click', () => {
 $('#dashCheckAll').addEventListener('click', () => { window.aipm.checkAll(); toast('已触发全部检测'); });
 
 // ---------- 新增/编辑弹窗 ----------
+// 周期单位（与主进程 durfmt.js 保持一致）
+const INTERVAL_UNITS = [
+  { key: 'sec', label: '秒', factor: 1 },
+  { key: 'min', label: '分', factor: 60 },
+  { key: 'hour', label: '时', factor: 3600 },
+  { key: 'day', label: '天', factor: 86400 },
+  { key: 'week', label: '周', factor: 604800 },
+  { key: 'month', label: '月', factor: 2592000 },
+  { key: 'year', label: '年', factor: 31536000 }
+];
+function toSecondsUI(value, unitKey) {
+  const u = INTERVAL_UNITS.find((x) => x.key === unitKey) || INTERVAL_UNITS[0];
+  return Math.max(5, Math.round((Number(value) || 0) * u.factor));
+}
+function fromSecondsUI(sec) {
+  sec = Math.max(1, Math.round(Number(sec) || 0));
+  for (let i = INTERVAL_UNITS.length - 1; i >= 0; i--) {
+    const u = INTERVAL_UNITS[i];
+    if (sec >= u.factor && sec % u.factor === 0) {
+      if (u.key === 'month' && (sec / u.factor) % 12 === 0) return { value: sec / 31536000, unit: 'year' };
+      return { value: sec / u.factor, unit: u.key };
+    }
+  }
+  return { value: sec, unit: 'sec' };
+}
+// 填充单位下拉
+(function initIntervalUnitSelect() {
+  const sel = $('#fIntervalUnit');
+  sel.innerHTML = INTERVAL_UNITS.map((u) => `<option value="${u.key}">${u.label}</option>`).join('');
+})();
+
 function openProviderModal(id = null) {
   editingId = id;
   $('#pmTitle').textContent = id ? '编辑服务商' : '新增服务商';
@@ -258,7 +322,9 @@ function openProviderModal(id = null) {
   $('#fUrl').value = p ? p.url : '';
   $('#fKey').value = '';
   $('#fKey').placeholder = p && p.hasApiKey ? `已保存（${p.apiKeyMasked}），留空则不修改` : 'sk-...';
-  $('#fInterval').value = p ? p.intervalSec : 60;
+  const iv = fromSecondsUI(p ? p.intervalSec : 300);
+  $('#fInterval').value = iv.value;
+  $('#fIntervalUnit').value = iv.unit;
   $('#fNotify').checked = p ? Boolean(p.notifyOnModelChange) : false;
   $('#fNote').value = p ? (p.note || '') : '';
   $('#providerModal').classList.add('show');
@@ -271,7 +337,7 @@ $('#pmCancel').addEventListener('click', () => $('#providerModal').classList.rem
 $('#pmSave').addEventListener('click', async () => {
   const name = $('#fName').value.trim();
   let url = $('#fUrl').value.trim();
-  const interval = Number($('#fInterval').value) || 60;
+  const interval = toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value);
   if (!name) { $('#fError').textContent = '请输入供应商名称'; return; }
   if (!url) { $('#fError').textContent = '请输入 URL'; return; }
   if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
@@ -322,7 +388,7 @@ function openDetail(id) {
   $('#dmMeta').innerHTML = `
     <div class="dm-item"><span>URL</span><b>${escapeHtml(p.url)}</b></div>
     <div class="dm-item"><span>API Key</span><b>${p.apiKeyMasked || '未配置'}</b></div>
-    <div class="dm-item"><span>轮循周期</span><b>${p.intervalSec >= 60 ? Math.round(p.intervalSec / 60) + ' 分钟' : p.intervalSec + ' 秒'}</b></div>
+    <div class="dm-item"><span>轮循周期</span><b>${fmtDuration(p.intervalSec)}</b></div>
     <div class="dm-item"><span>最近检测</span><b>${p.checkedAt ? new Date(p.checkedAt).toLocaleString('zh-CN') : '—'}</b></div>
     ${p.note ? `<div class="dm-item wide"><span>备注</span><b>${escapeHtml(p.note)}</b></div>` : ''}
     ${p.lastError ? `<div class="dm-item wide"><span>连接信息</span><b class="st-down">${escapeHtml(p.lastError)}</b></div>` : ''}`;
@@ -367,6 +433,7 @@ function renderNotify() {
   $('#qqToken').value = g.qqToken || '';
   $('#autoStart').checked = g.autoStartCheckOnLaunch !== false;
   $('#concurrency').value = g.concurrency || 4;
+  $('#closeAction').value = g.closeAction === 'exit' ? 'exit' : 'tray';
 }
 let notifySaveTimer = null;
 function saveNotify() {
@@ -384,13 +451,15 @@ function saveNotify() {
       dingtalkWebhook: $('#dtWebhook').value.trim(),
       dingtalkSecret: $('#dtSecret').value.trim(),
       autoStartCheckOnLaunch: $('#autoStart').checked,
-      concurrency: Math.max(1, Math.min(16, Number($('#concurrency').value) || 4))
+      concurrency: Math.max(1, Math.min(16, Number($('#concurrency').value) || 4)),
+      closeAction: $('#closeAction').value === 'exit' ? 'exit' : 'tray'
     });
   }, 350);
 }
 ['wxEnable', 'qqEnable', 'dtEnable', 'autoStart'].forEach((id) => $('#' + id).addEventListener('change', saveNotify));
 ['wxWebhook', 'qqWebhook', 'qqTarget', 'qqToken', 'dtWebhook', 'dtSecret', 'concurrency'].forEach((id) => $('#' + id).addEventListener('input', saveNotify));
 $('#qqTargetType').addEventListener('change', saveNotify);
+$('#closeAction').addEventListener('change', saveNotify);
 
 // 指引折叠
 $$('.guide-toggle').forEach((btn) => {
@@ -460,6 +529,17 @@ $('#logFilter').addEventListener('input', () => {
   const card = $('#logCard');
   card.innerHTML = '';
   appendLogLines(logLines, true);
+});
+
+// 清除日志（仅清空界面与内存缓冲，不删除磁盘日志文件）
+$('#logClear').innerHTML = icon('trash') + '<span>清除</span>';
+$('#logClear').addEventListener('click', () => {
+  confirmDialog('清除日志', '确定清除当前显示的日志吗？（磁盘日志文件保留）', async () => {
+    await window.aipm.clearLogs();
+    logLines = [];
+    $('#logCard').innerHTML = '';
+    toast('日志已清除');
+  }, { okText: '清除', danger: true });
 });
 
 // ---------- 备份与还原 ----------
@@ -563,6 +643,161 @@ $('#bkList').addEventListener('click', (e) => {
   );
 });
 
+// ---------- 服务商批量导入 / 导出 ----------
+let emState = { format: 'json', delimiter: 'tab' };
+let imState = { format: 'json', delimiter: 'tab', items: null, errors: [] };
+
+$('#btnImport').innerHTML = icon('inbox') + '<span>导入</span>';
+$('#btnExport').innerHTML = icon('copy') + '<span>导出</span>';
+$('#emClose').innerHTML = icon('close');
+$('#imClose').innerHTML = icon('close');
+
+function bindSeg(segId, onPick) {
+  const seg = $('#' + segId);
+  seg.addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-item');
+    if (!btn) return;
+    $$('.seg-item', seg).forEach((b) => b.classList.toggle('active', b === btn));
+    onPick(btn);
+  });
+}
+
+// ----- 导出 -----
+$('#btnExport').addEventListener('click', () => {
+  if (state.providers.length === 0) { toast('暂无服务商可导出', 'err'); return; }
+  emState = { format: 'json', delimiter: 'tab' };
+  $$('#emFormat .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.fmt === 'json'));
+  $$('#emDelim .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.d === 'tab'));
+  $('#emDelimField').style.display = 'none';
+  $('#emWithKey').checked = true;
+  $('#emError').textContent = '';
+  refreshExportPreview();
+  $('#exportModal').classList.add('show');
+});
+$('#emClose').addEventListener('click', () => $('#exportModal').classList.remove('show'));
+$('#emCancel').addEventListener('click', () => $('#exportModal').classList.remove('show'));
+$('#exportModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
+
+bindSeg('emFormat', (btn) => {
+  emState.format = btn.dataset.fmt;
+  $('#emDelimField').style.display = emState.format === 'text' ? '' : 'none';
+  refreshExportPreview();
+});
+bindSeg('emDelim', (btn) => { emState.delimiter = btn.dataset.d; refreshExportPreview(); });
+$('#emWithKey').addEventListener('change', refreshExportPreview);
+
+async function refreshExportPreview() {
+  const r = await window.aipm.transferExport({ format: emState.format, delimiter: emState.delimiter, withKey: $('#emWithKey').checked });
+  if (r.ok) {
+    $('#emPreview').textContent = r.content.length > 2000 ? r.content.slice(0, 2000) + '\n…' : r.content;
+    $('#emError').textContent = '';
+  } else {
+    $('#emError').textContent = r.error;
+  }
+}
+
+$('#emCopy').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('#emPreview').textContent);
+  toast('已复制到剪贴板');
+});
+
+$('#emSave').addEventListener('click', async () => {
+  const r = await window.aipm.transferExportSaveAs({ format: emState.format, delimiter: emState.delimiter, withKey: $('#emWithKey').checked });
+  if (r.canceled) return;
+  if (r.ok) { toast('已导出到文件'); $('#exportModal').classList.remove('show'); }
+  else $('#emError').textContent = r.error;
+});
+
+// ----- 导入 -----
+let imParsed = null;
+$('#btnImport').addEventListener('click', () => {
+  imParsed = null;
+  imState = { format: 'json', delimiter: 'tab', items: null, errors: [] };
+  $$('#imFormat .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.fmt === 'json'));
+  $$('#imDelim .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.d === 'tab'));
+  $('#imDelimField').style.display = 'none';
+  $('#imText').value = '';
+  $('#imResult').style.display = 'none';
+  $('#imError').textContent = '';
+  $('#imHint').textContent = '';
+  $('#imApply').disabled = true;
+  document.querySelector('input[name="imMode"][value="merge"]').checked = true;
+  $('#importModal').classList.add('show');
+});
+$('#imClose').addEventListener('click', () => $('#importModal').classList.remove('show'));
+$('#imCancel').addEventListener('click', () => $('#importModal').classList.remove('show'));
+$('#importModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
+
+bindSeg('imFormat', (btn) => {
+  imState.format = btn.dataset.fmt;
+  $('#imDelimField').style.display = imState.format === 'text' ? '' : 'none';
+});
+bindSeg('imDelim', (btn) => { imState.delimiter = btn.dataset.d; });
+
+$('#imPick').addEventListener('click', async () => {
+  // 复用隐藏 file input 读取文本
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,.csv,.txt,text/plain,application/json';
+  input.onchange = async () => {
+    if (!input.files.length) return;
+    const f = input.files[0];
+    const text = await f.text();
+    $('#imText').value = text;
+    // 按扩展名自动猜测格式
+    if (/\.csv$/i.test(f.name)) { imState.format = 'csv'; $$('#imFormat .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.fmt === 'csv')); $('#imDelimField').style.display = 'none'; }
+    else if (/\.txt$/i.test(f.name)) { imState.format = 'text'; $$('#imFormat .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.fmt === 'text')); $('#imDelimField').style.display = ''; }
+    else { imState.format = 'json'; $$('#imFormat .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.fmt === 'json')); $('#imDelimField').style.display = 'none'; }
+    parseAndPreviewImport();
+  };
+  input.click();
+});
+
+$('#imPreviewBtn').addEventListener('click', parseAndPreviewImport);
+
+async function parseAndPreviewImport() {
+  const text = $('#imText').value;
+  if (!text.trim()) { $('#imError').textContent = '请先粘贴内容或选择文件'; return; }
+  $('#imError').textContent = '';
+  const r = await window.aipm.transferParse({ text, format: imState.format, delimiter: imState.delimiter });
+  if (!r.ok) { $('#imError').textContent = r.error; $('#imApply').disabled = true; imParsed = null; return; }
+  imParsed = r;
+  const box = $('#imResult');
+  box.style.display = '';
+  if (r.items.length === 0) {
+    box.innerHTML = `<span class="io-err">未解析到有效条目</span>` +
+      (r.errors.length ? `<ul>${r.errors.map((e) => `<li>第 ${e.line} 行：${escapeHtml(e.msg)}</li>`).join('')}</ul>` : '');
+    $('#imApply').disabled = true;
+    return;
+  }
+  const errHtml = r.errors.length
+    ? `<div class="io-err">${r.errors.length} 条已跳过：</div><ul>${r.errors.slice(0, 5).map((e) => `<li>第 ${e.line} 行：${escapeHtml(e.msg)}</li>`).join('')}${r.errors.length > 5 ? `<li>… 共 ${r.errors.length} 条</li>` : ''}</ul>`
+    : '';
+  box.innerHTML = `<span class="io-ok">解析成功：${r.items.length} 条服务商</span>${errHtml}
+    <ul>${r.items.slice(0, 5).map((p) => `<li>${escapeHtml(p.name)} — ${escapeHtml(p.url)}（周期 ${fmtDuration(p.intervalSec)}，上报 ${p.notifyOnModelChange ? '开' : '关'}）</li>`).join('')}${r.items.length > 5 ? `<li>… 共 ${r.items.length} 条</li>` : ''}</ul>`;
+  $('#imApply').disabled = false;
+}
+
+$('#imApply').addEventListener('click', async () => {
+  if (!imParsed || !imParsed.items.length) return;
+  const mode = document.querySelector('input[name="imMode"]:checked').value;
+  const modeText = mode === 'append' ? '追加' : '合并';
+  confirmDialog(
+    `确认${modeText}导入`,
+    `将${modeText}导入 ${imParsed.items.length} 条服务商${mode === 'append' ? '（URL 重复也会新增）' : '（URL 相同的现有服务商将被更新）'}。确定继续吗？`,
+    async () => {
+      const r = await window.aipm.transferApply({ items: imParsed.items, mode });
+      if (r.ok) {
+        toast(`导入完成：新增 ${r.added}${r.updated ? `，更新 ${r.updated}` : ''}`);
+        $('#importModal').classList.remove('show');
+      } else {
+        $('#imError').textContent = '导入失败: ' + r.error;
+      }
+    },
+    { okText: '开始导入', danger: false }
+  );
+});
+
 // ---------- 其它 ----------
 $('#openDataDir').addEventListener('click', () => window.aipm.openPath(state.dataFile ? require('path').dirname(state.dataFile) : ''));
 $('#openLogDir').addEventListener('click', () => window.aipm.openPath(state.logDir || ''));
@@ -570,5 +805,6 @@ $('#openLogDir').addEventListener('click', () => window.aipm.openPath(state.logD
 // ---------- 启动 ----------
 window.aipm.onStateChanged((s) => { state = s; render(); });
 window.aipm.getState().then((s) => { state = s; render(); });
+window.aipm.getAppVersion().then((v) => { $('#appVersion').textContent = 'V' + v; }).catch(() => {});
 initStaticIcons();
 render();

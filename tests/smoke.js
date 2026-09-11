@@ -292,6 +292,92 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     assert.strictEqual(pushes.length, 2, '开关关闭不应推送');
   });
 
+  // 5.8 导入导出模块
+  await test('transfer: 三种格式导出', async () => {
+    const { exportProviders } = require('../src/transfer');
+    const providers = [
+      { name: 'A 甲', url: 'http://a', apiKey: 'k1', intervalSec: 60, notifyOnModelChange: true, note: 'note,1' },
+      { name: 'B', url: 'http://b', apiKey: '', intervalSec: 30, notifyOnModelChange: false, note: '' }
+    ];
+    const j = JSON.parse(exportProviders(providers, { format: 'json' }));
+    assert.strictEqual(j.length, 2);
+    assert.strictEqual(j[0].apiKey, 'k1');
+
+    const csv = exportProviders(providers, { format: 'csv' });
+    assert.ok(csv.startsWith('name,url,apiKey,intervalSec,notifyOnModelChange,note'));
+    assert.ok(csv.includes('"note,1"'), '含逗号字段应加引号转义');
+
+    const t1 = exportProviders(providers, { format: 'text', delimiter: 'pipe' });
+    assert.ok(t1.split('\n')[0].includes('|'));
+    const t2 = exportProviders(providers, { format: 'text', delimiter: 'tab' });
+    assert.ok(t2.split('\n')[0].includes('\t'));
+
+    const nk = JSON.parse(exportProviders(providers, { format: 'json', withKey: false }));
+    assert.strictEqual(nk[0].apiKey, '', 'withKey=false 应剥离密钥');
+  });
+
+  await test('transfer: 三种格式解析 + 分隔符 + 错误行', async () => {
+    const { parseImport } = require('../src/transfer');
+    // JSON（数组与 {providers} 两种包裹）
+    let r = parseImport('[{"name":"A","url":"http://a","apiKey":"k","intervalSec":30,"notifyOnModelChange":true}]', { format: 'json' });
+    assert.strictEqual(r.items.length, 1);
+    assert.strictEqual(r.items[0].intervalSec, 30);
+    assert.strictEqual(r.items[0].notifyOnModelChange, true);
+    r = parseImport('{"providers":[{"name":"B","url":"b.com"}]}', { format: 'json' });
+    assert.strictEqual(r.items.length, 1);
+    assert.strictEqual(r.items[0].url, 'http://b.com', 'host:port 简写应补 http://');
+
+    // CSV（含引号转义与中文表头）
+    const csv = 'name,url,apiKey,intervalSec,notifyOnModelChange,note\n"A,1",http://a,k1,60,1,"备注""引" "\nB,http://b,,30,0,x"';
+    r = parseImport(csv, { format: 'csv' });
+    assert.strictEqual(r.items.length, 2, 'CSV 应解析两行');
+    assert.strictEqual(r.items[0].name, 'A,1');
+    assert.strictEqual(r.items[1].intervalSec, 30);
+
+    // 文本 + 各种分隔符
+    r = parseImport('A\thttp://a\tk1\t60\t1\t备注', { format: 'text', delimiter: 'tab' });
+    assert.strictEqual(r.items.length, 1);
+    assert.strictEqual(r.items[0].name, 'A');
+    assert.strictEqual(r.items[0].note, '备注');
+    r = parseImport('A | http://a | k1 | 60 | 1', { format: 'text', delimiter: 'pipe' });
+    assert.strictEqual(r.items.length, 1);
+    r = parseImport('A,http://a,,60,0,备注,含,逗号', { format: 'text', delimiter: 'comma' });
+    assert.strictEqual(r.items[0].note, '备注,含,逗号', '逗号分隔时多余列应并回备注');
+    r = parseImport('A;http://a', { format: 'text', delimiter: 'semicolon' });
+    assert.strictEqual(r.items.length, 1);
+    // 简写：只有 名称+URL
+    r = parseImport('C http://c'.replace(' ', '\t'), { format: 'text', delimiter: 'tab' });
+    assert.strictEqual(r.items.length, 1);
+
+    // 错误处理：缺 URL、空行、坏 JSON
+    r = parseImport('A\thttp://a\n\n只有名字', { format: 'text', delimiter: 'tab' });
+    assert.strictEqual(r.items.length, 1);
+    assert.strictEqual(r.errors.length, 1);
+    r = parseImport('{bad json', { format: 'json' });
+    assert.strictEqual(r.items.length, 0);
+    assert.ok(r.errors[0].msg);
+  });
+
+  await test('transfer: applyImport 合并与追加', async () => {
+    const { applyImport } = require('../src/transfer');
+    const db = { providers: [{ id: 1, name: 'Old', url: 'http://a/', apiKey: '', intervalSec: 99, notifyOnModelChange: false, note: '' }] };
+    const items = [
+      { name: 'A-new', url: 'http://a', apiKey: 'k', intervalSec: 30, notifyOnModelChange: true, note: 'n' },
+      { name: 'B', url: 'http://b', apiKey: '', intervalSec: 60, notifyOnModelChange: false, note: '' }
+    ];
+    const r1 = applyImport(db, items, 'merge');
+    assert.strictEqual(r1.added, 1);
+    assert.strictEqual(r1.updated, 1);
+    assert.strictEqual(db.providers.length, 2);
+    const merged = db.providers.find((p) => p.url === 'http://a');
+    assert.strictEqual(merged.name, 'A-new');
+    assert.strictEqual(merged.intervalSec, 30);
+    // 追加模式：URL 重复也新增
+    const r2 = applyImport(db, items, 'append');
+    assert.strictEqual(r2.added, 2);
+    assert.strictEqual(db.providers.length, 4);
+  });
+
   // 6. 备份/还原模块
   await test('backup: 导出、校验、覆盖还原、合并还原', async () => {
     const backup = require('../src/backup');

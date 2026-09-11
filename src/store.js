@@ -18,7 +18,8 @@ const DEFAULT_GLOBAL = {
   dingtalkWebhook: '',
   dingtalkSecret: '',
   autoStartCheckOnLaunch: true,
-  concurrency: 4
+  concurrency: 4,
+  closeAction: 'tray'   // 'tray'：点关闭隐藏到托盘；'exit'：点关闭直接退出
 };
 
 function ensureDir() {

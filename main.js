@@ -7,6 +7,8 @@ const logger = require('./src/logger');
 const { Scheduler } = require('./src/scheduler');
 const { notifyModelChange, sendTest } = require('./src/notifier');
 const backup = require('./src/backup');
+const transfer = require('./src/transfer');
+const { formatDuration } = require('./src/durfmt');
 
 let db = { global: { ...DEFAULT_GLOBAL }, providers: [] };
 let win = null;
@@ -126,6 +128,7 @@ function send(channel, payload) {
 
 ipcMain.handle('state:get', () => publicState());
 ipcMain.handle('logs:get', () => logger.recent());
+ipcMain.handle('logs:clear', () => { logger.clear(); return { ok: true }; });
 logger.subscribe((line) => send('log:line', line));
 
 ipcMain.handle('provider:add', (e, data) => {
@@ -171,7 +174,7 @@ ipcMain.handle('provider:update', (e, { id, data }) => {
   // 仅在周期变化时重排定时器（schedule 内部也会保护未变化的定时器），
   // 避免编辑名称/备注等操作把轮循从头计时
   if (p.enabled !== false && periodChanged) scheduler.schedule(p);
-  logger.info(`更新 Provider [${p.name}]${periodChanged ? `（周期调整为 ${p.intervalSec}s，已重新调度）` : ''}`);
+  logger.info(`更新 Provider [${p.name}]${periodChanged ? `（周期调整为 ${formatDuration(p.intervalSec)}，已重新调度）` : ''}`);
   send('state-changed', publicState());
   return { ok: true };
 });
@@ -249,6 +252,8 @@ ipcMain.handle('notify:test', async (e, channel) => {
 
 ipcMain.handle('open:path', (e, p) => { shell.openPath(p); return { ok: true }; });
 
+ipcMain.handle('app:version', () => app.getVersion());
+
 // ---------- 备份 / 还原 ----------
 ipcMain.handle('backup:export', async (e, filePath) => {
   try {
@@ -324,6 +329,70 @@ ipcMain.handle('backup:runAuto', () => {
   }
 });
 
+// ---------- 服务商批量导入 / 导出 ----------
+ipcMain.handle('transfer:export', (e, { format, delimiter, withKey, filePath }) => {
+  try {
+    const content = transfer.exportProviders(db.providers, { format, delimiter, withKey });
+    const ext = format === 'csv' ? 'csv' : format === 'text' ? 'txt' : 'json';
+    if (!filePath) {
+      // 无路径：写入数据目录并返回（供前端复制到剪贴板）
+      const safe = `providers-${new Date().toISOString().slice(0, 10)}.${ext}`;
+      const out = path.join(DATA_DIR, safe);
+      fs.writeFileSync(out, content, 'utf8');
+      return { ok: true, path: out, content };
+    }
+    fs.writeFileSync(filePath, content, 'utf8');
+    logger.info(`[导入导出] 已导出到 ${filePath}`);
+    return { ok: true, path: filePath, content };
+  } catch (err) {
+    logger.error(`[导入导出] 导出失败: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('transfer:exportSaveAs', async (e, { format, delimiter, withKey }) => {
+  const r = await dialog.showSaveDialog(win, {
+    title: '导出服务商到…',
+    defaultPath: `providers-${new Date().toISOString().slice(0, 10)}.${format === 'csv' ? 'csv' : format === 'text' ? 'txt' : 'json'}`,
+    filters: [{ name: format === 'csv' ? 'CSV 文件' : format === 'text' ? '文本文件' : 'JSON 文件', extensions: [format === 'csv' ? 'csv' : format === 'text' ? 'txt' : 'json'] }]
+  });
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  try {
+    const content = transfer.exportProviders(db.providers, { format, delimiter, withKey });
+    fs.writeFileSync(r.filePath, content, 'utf8');
+    logger.info(`[导入导出] 已导出到 ${r.filePath}`);
+    return { ok: true, path: r.filePath, content };
+  } catch (err) {
+    logger.error(`[导入导出] 导出失败: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('transfer:parse', (e, { text, format, delimiter }) => {
+  try {
+    return { ok: true, ...transfer.parseImport(text, { format, delimiter }) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('transfer:apply', (e, { items, mode }) => {
+  try {
+    const res = transfer.applyImport(db, items || [], mode === 'append' ? 'append' : 'merge');
+    persist();
+    // 新增的服务商加入轮循
+    const known = new Set(res._knownIds || []);
+    for (const p of db.providers) {
+      if (p.enabled !== false && !scheduler.timers.has(p.id)) scheduler.schedule(p);
+    }
+    send('state-changed', publicState());
+    return { ok: true, ...res };
+  } catch (err) {
+    logger.error(`[导入导出] 导入失败: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
 // ---------- 窗口 / 托盘 ----------
 function createWindow() {
   win = new BrowserWindow({
@@ -364,7 +433,12 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.once('ready-to-show', () => { win.show(); });
   win.on('close', (ev) => {
-    if (!quitting) {
+    if (quitting) return;
+    // closeAction = 'tray'（默认）：隐藏到托盘继续监控；'exit'：直接退出
+    if (db.global.closeAction === 'exit') {
+      quitting = true;
+      app.quit();
+    } else {
       ev.preventDefault();
       win.hide();
     }
