@@ -38,17 +38,27 @@ function fmtProvider(p) {
   return `${p.name || 'Provider#' + p.id}`;
 }
 
+function statusText(s) {
+  return { up: '在线', degraded: '异常', down: '离线', unknown: '待检测' }[s] || String(s || '未知');
+}
+
 function buildModelChangeText(provider, prev, next) {
   const lines = [];
   lines.push(`【AI Provider 模型变动】`);
   lines.push(`服务商：${fmtProvider(provider)}`);
-  lines.push(`状态：${prev ? prev.status : '-'} → ${next.status}　可用模型 ${next.modelsAvailable.length}/${next.modelsTotal}`);
+  const prevStatus = prev ? statusText(prev.status) : '未知';
+  const statusChanged = !prev || prev.status !== next.status;
+  const totalChanged = prev && prev.modelsTotal !== next.modelsTotal;
+  const parts = [`状态：${prevStatus} → ${statusText(next.status)}`, `可用模型 ${next.modelsAvailable.length}/${next.modelsTotal}`];
+  lines.push(parts.join('　'));
   const prevSet = new Set((prev?.modelsAvailable) || []);
   const nextSet = new Set(next.modelsAvailable || []);
   const added = next.modelsAvailable.filter((m) => !prevSet.has(m));
   const removed = (prev?.modelsAvailable || []).filter((m) => !nextSet.has(m));
   if (added.length) lines.push(`新增可用：${added.join(', ')}`);
   if (removed.length) lines.push(`失去可用：${removed.join(', ')}`);
+  if (totalChanged && !added.length && !removed.length) lines.push(`模型清单发生变化（总数 ${prev.modelsTotal} → ${next.modelsTotal}）`);
+  if (statusChanged) lines.push(`状态变化：${prevStatus} → ${statusText(next.status)}`);
   lines.push(`时间：${new Date().toLocaleString('zh-CN')}`);
   return lines.join('\n');
 }

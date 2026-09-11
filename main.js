@@ -45,32 +45,41 @@ function applyResult(provider, result, reason) {
   provider.checkedAt = result.checkedAt;
   provider.lastError = result.error || null;
 
-  const prevKey = prev ? `${prev.status}|${[...prev.modelsAvailable].sort().join(',')}` : null;
-  const nextKey = `${result.status}|${[...(result.modelsAvailable || [])].sort().join(',')}`;
-  const modelChanged = prevKey !== nextKey;
+  // 变动判定：状态 + 可用模型集合 + 模型总数 任一变化即视为变动
+  const prevKey = prev ? `${prev.status}|${prev.modelsTotal}|${[...prev.modelsAvailable].sort().join(',')}` : null;
+  const nextKey = `${result.status}|${result.modelsTotal}|${[...(result.modelsAvailable || [])].sort().join(',')}`;
+  // 首次检测（此前从未成功检测过）：仅建立基准，不算变动、不推送
+  const firstRealCheck = !prev || prev.status === 'unknown';
+  const modelChanged = !firstRealCheck && prevKey !== nextKey;
   provider.modelChanged = modelChanged;
 
   // 变动详情日志：明确列出新增/失去与状态翻转
-  if (modelChanged && prev) {
+  if (firstRealCheck) {
+    logger.info(`[变动] [${provider.name}] 首次检测，基准已建立: ${result.status}，可用 ${provider.modelsAvailable.length}/${result.modelsTotal}（不计变动、不推送）`);
+  } else if (modelChanged) {
     const prevSet = new Set(prev.modelsAvailable);
     const nextSet = new Set(provider.modelsAvailable);
     const added = provider.modelsAvailable.filter((m) => !prevSet.has(m));
     const removed = prev.modelsAvailable.filter((m) => !nextSet.has(m));
     const parts = [];
-    if (prev.status !== provider.status) parts.push(`状态翻转 ${prev.status} → ${provider.status}`);
+    if (prev.status !== provider.status) parts.push(`状态翻转 ${statusText(prev.status)} → ${statusText(provider.status)}`);
+    if (prev.modelsTotal !== result.modelsTotal) parts.push(`模型总数 ${prev.modelsTotal} → ${result.modelsTotal}`);
     if (added.length) parts.push(`新增可用 ${added.length} 个: ${added.join(', ')}`);
     if (removed.length) parts.push(`失去可用 ${removed.length} 个: ${removed.join(', ')}`);
-    if (!added.length && !removed.length) parts.push('可用模型集合未变但状态键变化');
+    if (!added.length && !removed.length && prev.status === provider.status) parts.push('模型清单变化');
     logger.warn(`[变动] [${provider.name}] ${parts.join('；')}`);
-  } else if (modelChanged && !prev) {
-    logger.info(`[变动] [${provider.name}] 首次检测基准已建立: ${result.status}，可用 ${provider.modelsAvailable.length}/${result.modelsTotal}`);
   }
 
   logger.info(`检测完成 [${provider.name}] ${result.status} 可用 ${provider.modelsAvailable.length}/${result.modelsTotal} (来源:${reason})${modelChanged ? ' · 模型已变化' : ''}`);
 
-  if (modelChanged && provider.notifyOnModelChange && prev) {
+  if (modelChanged && provider.notifyOnModelChange) {
     notifyModelChange(db.global, provider, prev, provider).catch((e) => logger.error(`通知失败: ${e.message}`));
   }
+}
+
+/** 状态中英文映射（日志与通知文案用） */
+function statusText(s) {
+  return { up: '在线', degraded: '异常', down: '离线', unknown: '待检测' }[s] || s;
 }
 
 scheduler.on('result', (provider, result, reason) => {
@@ -140,7 +149,7 @@ ipcMain.handle('provider:add', (e, data) => {
   };
   db.providers.push(p);
   persist();
-  if (p.enabled) scheduler.schedule(p);
+  if (p.enabled !== false) scheduler.schedule(p);
   logger.info(`新增 Provider [${p.name}] ${p.url}`);
   send('state-changed', publicState());
   return { ok: true, id };
@@ -159,8 +168,10 @@ ipcMain.handle('provider:update', (e, { id, data }) => {
     note: String(data.note ?? p.note).trim()
   });
   persist();
-  if (periodChanged || p.enabled !== false) scheduler.schedule(p);
-  logger.info(`更新 Provider [${p.name}]`);
+  // 仅在周期变化时重排定时器（schedule 内部也会保护未变化的定时器），
+  // 避免编辑名称/备注等操作把轮循从头计时
+  if (p.enabled !== false && periodChanged) scheduler.schedule(p);
+  logger.info(`更新 Provider [${p.name}]${periodChanged ? `（周期调整为 ${p.intervalSec}s，已重新调度）` : ''}`);
   send('state-changed', publicState());
   return { ok: true };
 });
@@ -204,7 +215,13 @@ ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
   const p = db.providers.find((x) => x.id === Number(id));
   if (!p) return { ok: false };
   p.enabled = Boolean(enabled);
-  if (p.enabled) scheduler.schedule(p); else scheduler.cancel(p.id);
+  if (p.enabled) {
+    // 重新启用：以当前时间基线立即调度（schedule 内部会按 checkedAt 判断是否补检）
+    scheduler.schedule(p);
+  } else {
+    scheduler.cancel(p.id);
+    p.modelChanged = false;   // 停用时清除"变动"徽标，避免永久残留
+  }
   persist();
   send('state-changed', publicState());
   return { ok: true };

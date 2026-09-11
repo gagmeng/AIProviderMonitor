@@ -1,7 +1,7 @@
 {
   "name": "ai-provider-monitor",
   "productName": "AI Provider Monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI Provider 状态与可用模型监控",
   "main": "main.js",
   "author": "AIProviderMonitor",

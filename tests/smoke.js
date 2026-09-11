@@ -239,6 +239,59 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     s.stop();
   });
 
+  // 5.5 变动判定逻辑（直接运行 main.js 的判定核心，剥离 electron 依赖）
+  await test('change-detect: 首次检测建立基准、不标记变动', async () => {
+    // 从 main.js 提取 applyResult 的核心判定（以函数注入方式测试真实实现）
+    const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+    const m = src.match(/function applyResult[\s\S]*?\n}/);
+    assert.ok(m, 'main.js 应包含 applyResult');
+    const snapshot = (p) => p ? { status: p.status || 'unknown', modelsTotal: p.modelsTotal || 0, modelsAvailable: [...(p.modelsAvailable || [])] } : null;
+    const logs = [];
+    const logger = { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) };
+    const pushes = [];
+    const notifierStub = { notifyModelChange: async (cfg, p, prev, next) => { pushes.push({ p, prev, next }); } };
+    const statusText = (s) => ({ up: '在线', degraded: '异常', down: '离线', unknown: '待检测' }[s] || s);
+    // 构造隔离环境执行真实 applyResult
+    const fn = new Function('snapshot', 'logger', 'notifyModelChange', 'statusText', 'db', `
+      ${m[0]}
+      return applyResult;
+    `);
+    const applyResult = fn(snapshot, logger, notifierStub.notifyModelChange, statusText, { global: {}, providers: [] });
+
+    // 首次检测（status=unknown 基线）
+    const p = { id: 1, name: 'A', status: 'unknown', modelsAvailable: [], modelsTotal: 0, notifyOnModelChange: true };
+    applyResult(p, { status: 'up', modelsTotal: 2, modelsAvailable: ['a', 'b'], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: null }, 'manual');
+    assert.strictEqual(p.modelChanged, false, '首次检测不应标记变动');
+    assert.strictEqual(pushes.length, 0, '首次检测不应推送');
+
+    // 第二次相同结果 → 无变动
+    applyResult(p, { status: 'up', modelsTotal: 2, modelsAvailable: ['a', 'b'], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: null }, 'auto');
+    assert.strictEqual(p.modelChanged, false);
+    assert.strictEqual(pushes.length, 0);
+
+    // 第三次失去一个模型 → 变动 + 推送
+    applyResult(p, { status: 'up', modelsTotal: 2, modelsAvailable: ['a'], modelsUnavailable: ['b'], modelDetails: [], checkedAt: Date.now(), error: null }, 'auto');
+    assert.strictEqual(p.modelChanged, true, '失去模型应标记变动');
+    assert.strictEqual(pushes.length, 1, '变动且开关开启应推送');
+
+    // 状态翻转（模型不变不可能 up→down，用 up→degraded+清空）
+    applyResult(p, { status: 'down', modelsTotal: 2, modelsAvailable: [], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: '连接失败' }, 'auto');
+    assert.strictEqual(p.modelChanged, true);
+    assert.strictEqual(pushes.length, 2);
+
+    // 连续 down（无变化）→ 不推送
+    applyResult(p, { status: 'down', modelsTotal: 2, modelsAvailable: [], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: '连接失败' }, 'auto');
+    assert.strictEqual(p.modelChanged, false);
+    assert.strictEqual(pushes.length, 2, '连续相同结果不应重复推送');
+
+    // 开关关闭 → 变动但不推送
+    p.status = 'up'; p.modelsAvailable = ['a']; p.modelsTotal = 2;
+    p.notifyOnModelChange = false;
+    applyResult(p, { status: 'up', modelsTotal: 3, modelsAvailable: ['a', 'x'], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: null }, 'auto');
+    assert.strictEqual(p.modelChanged, true, '模型总数+可用变化应标记变动');
+    assert.strictEqual(pushes.length, 2, '开关关闭不应推送');
+  });
+
   // 6. 备份/还原模块
   await test('backup: 导出、校验、覆盖还原、合并还原', async () => {
     const backup = require('../src/backup');
