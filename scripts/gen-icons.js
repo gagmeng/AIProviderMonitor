@@ -55,6 +55,7 @@ function strokePolyline(cv, pts, w, scale = 1, dx = 0, dy = 0) {
 }
 
 // 圆点
+// eslint-disable-next-line no-unused-vars -- 备用图元，供后续图标样式调整使用
 function fillCircle(cv, cx, cy, r) {
   const { size, data } = cv;
   for (let y = 0; y < size; y++) {

@@ -22,6 +22,7 @@ class Scheduler {
     this.handlers = {};           // onResult / onState
     this.stopped = false;
     this.getProvider = null;      // (id) => provider
+    this.getGlobal = null;        // () => globalCfg，用于把超时/重试/代理等配置透传给 detector
   }
 
   setConcurrency(n) { this.concurrency = Math.max(1, n | 0 || 1); }
@@ -143,7 +144,8 @@ class Scheduler {
     if (!provider) { job.resolve(null); return; }
     logger.info(`开始检测 [${provider.name}] (${job.reason})`);
     try {
-      const result = await detect(provider);
+      const globalCfg = this.getGlobal ? this.getGlobal() : {};
+      const result = await detect(provider, { globalCfg });
       this.emit('result', provider, result, job.reason);
       job.resolve(result);
     } catch (e) {

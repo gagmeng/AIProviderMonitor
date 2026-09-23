@@ -192,36 +192,46 @@ function parseImport(text, opts = {}) {
  * 返回 { added, updated, skipped }
  */
 function applyImport(db, items, mode = 'merge') {
-  let added = 0, updated = 0;
+  let added = 0, updated = 0, skipped = 0;
+  const norm = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
   if (mode === 'append') {
     for (const it of items) {
+      // 无法识别的空 URL 不入库，计为跳过
+      if (!norm(it.url)) { skipped++; continue; }
       db.providers.push(sanitize({ ...it, id: undefined }));
       added++;
     }
   } else {
-    const norm = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
     const urlIndex = new Map(db.providers.map((p) => [norm(p.url), p]));
     for (const it of items) {
-      const exist = urlIndex.get(norm(it.url));
+      const key = norm(it.url);
+      if (!key) { skipped++; continue; }
+      const exist = urlIndex.get(key);
       if (exist) {
-        exist.name = it.name || exist.name;
-        if (it.apiKey) exist.apiKey = it.apiKey;
-        exist.intervalSec = it.intervalSec || exist.intervalSec;
-        exist.notifyOnModelChange = it.notifyOnModelChange;
-        exist.note = it.note ?? exist.note;
-        // URL 存储格式归一（去尾部斜杠），与导入条目一致
-        exist.url = norm(it.url);
+        const next = {
+          name: it.name || exist.name,
+          // 导入条目未带密钥时保留原密钥
+          apiKey: it.apiKey ? it.apiKey : exist.apiKey,
+          intervalSec: it.intervalSec || exist.intervalSec,
+          notifyOnModelChange: it.notifyOnModelChange,
+          note: it.note ?? exist.note,
+          // URL 存储格式归一（去尾部斜杠），与导入条目一致
+          url: key
+        };
+        // 与现有记录逐字段一致 => 记为跳过，避免「更新数」虚高
+        if (!Object.keys(next).some((k) => exist[k] !== next[k])) { skipped++; continue; }
+        Object.assign(exist, next);
         updated++;
       } else {
         const p = sanitize({ ...it, id: undefined });
         db.providers.push(p);
-        urlIndex.set(norm(p.url), p);
+        urlIndex.set(key, p);
         added++;
       }
     }
   }
-  logger.info(`[导入导出] 导入完成（${mode}）：新增 ${added}，更新 ${updated}`);
-  return { added, updated, skipped: items.length - added - updated };
+  logger.info(`[导入导出] 导入完成（${mode}）：新增 ${added}，更新 ${updated}，跳过 ${skipped}`);
+  return { added, updated, skipped };
 }
 
 module.exports = { exportProviders, parseImport, applyImport, TEXT_DELIMITERS };

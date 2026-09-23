@@ -1,4 +1,5 @@
 'use strict';
+/* global window */
 
 /**
  * 周期时长工具：单位换算 + 智能格式化
@@ -74,4 +75,8 @@ function fromSeconds(sec) {
   return { value: sec, unit: 'sec' };
 }
 
-module.exports = { UNITS, EDITABLE_UNITS, formatDuration, toSeconds, fromSeconds };
+// 双模导出：主进程用 require() 取 CommonJS；渲染进程以 <script> 引入时挂到 window.durfmt。
+// 渲染层 nodeIntegration=false，无 module 对象，故两处均做存在性判断。
+const durfmt = { UNITS, EDITABLE_UNITS, formatDuration, toSeconds, fromSeconds };
+if (typeof module !== 'undefined' && module.exports) module.exports = durfmt;
+if (typeof window !== 'undefined') window.durfmt = durfmt;

@@ -5,10 +5,12 @@ const fs = require('fs');
 const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL } = require('./src/store');
 const logger = require('./src/logger');
 const { Scheduler } = require('./src/scheduler');
-const { notifyModelChange, sendTest } = require('./src/notifier');
+const { notifyModelChange, notifyAlert, sendTest } = require('./src/notifier');
 const backup = require('./src/backup');
 const transfer = require('./src/transfer');
 const { formatDuration } = require('./src/durfmt');
+const history = require('./src/history');
+const alerts = require('./src/alerts');
 
 let db = { global: { ...DEFAULT_GLOBAL }, providers: [] };
 let win = null;
@@ -25,6 +27,8 @@ function persist() {
 function load() {
   db = loadAll();
   scheduler.setConcurrency(db.global.concurrency || 4);
+  logger.configure(db.global);
+  applyLoginItem(db.global);
 }
 
 function snapshot(provider) {
@@ -36,6 +40,17 @@ function snapshot(provider) {
   };
 }
 
+/** 开机自启：按全局配置同步到系统登录项 */
+function applyLoginItem(g) {
+  try {
+    if (process.platform === 'linux') return;
+    app.setLoginItemSettings({
+      openAtLogin: Boolean(g && g.launchAtLogin),
+      openAsHidden: Boolean(g && g.launchMinimized)
+    });
+  } catch (e) { logger.warn(`开机自启设置失败: ${e.message}`); }
+}
+
 function applyResult(provider, result, reason) {
   const prev = snapshot(provider);
   provider.status = result.status;
@@ -43,13 +58,16 @@ function applyResult(provider, result, reason) {
   provider.modelsTotal = result.modelsTotal;
   provider.modelsAvailable = result.modelsAvailable || [];
   provider.modelsUnavailable = result.modelsUnavailable || [];
+  provider.modelsUnprobed = result.modelsUnprobed || [];
   provider.modelDetails = result.modelDetails || [];
   provider.checkedAt = result.checkedAt;
   provider.lastError = result.error || null;
 
-  // 变动判定：状态 + 可用模型集合 + 模型总数 任一变化即视为变动
-  const prevKey = prev ? `${prev.status}|${prev.modelsTotal}|${[...prev.modelsAvailable].sort().join(',')}` : null;
-  const nextKey = `${result.status}|${result.modelsTotal}|${[...(result.modelsAvailable || [])].sort().join(',')}`;
+  // 变动判定：状态 + 可用模型集合。
+  // 注意：不再把 modelsTotal 纳入指纹——超出探测上限的模型属于「未探测」，
+  // 上游列表顺序抖动会让每轮探测到的子集不同，把总数计入会造成误报。
+  const prevKey = prev ? `${prev.status}|${[...prev.modelsAvailable].sort().join(',')}` : null;
+  const nextKey = `${result.status}|${[...(result.modelsAvailable || [])].sort().join(',')}`;
   // 首次检测（此前从未成功检测过）：仅建立基准，不算变动、不推送
   const firstRealCheck = !prev || prev.status === 'unknown';
   const modelChanged = !firstRealCheck && prevKey !== nextKey;
@@ -74,14 +92,122 @@ function applyResult(provider, result, reason) {
 
   logger.info(`检测完成 [${provider.name}] ${result.status} 可用 ${provider.modelsAvailable.length}/${result.modelsTotal} (来源:${reason})${modelChanged ? ' · 模型已变化' : ''}`);
 
-  if (modelChanged && provider.notifyOnModelChange) {
-    notifyModelChange(db.global, provider, prev, provider).catch((e) => logger.error(`通知失败: ${e.message}`));
+  // 历史时序落盘（供可用率/延迟统计）
+  if (db.global.historyEnabled !== false) {
+    history.append(DATA_DIR, provider, result);
   }
+
+  // 告警策略引擎：消抖 / 恢复通知 / 静默时段 / 冷却去重
+  const decision = alerts.evaluate(db.global, provider, prev, { modelChanged, firstCheck: firstRealCheck });
+  provider.consecutiveFail = decision.consecutiveFail;
+  for (const a of decision.alerts) {
+    if (a.kind === 'modelChange') {
+      notifyModelChange(db.global, provider, prev, provider).catch((e) => logger.error(`通知失败: ${e.message}`));
+      logger.warn(`[告警] [${provider.name}] 模型变动已推送`);
+    } else {
+      notifyAlert(db.global, provider, a).catch((e) => logger.error(`通知失败: ${e.message}`));
+      logger.warn(`[告警] [${provider.name}] ${a.title}：${a.reason}`);
+    }
+  }
+  updateTrayStatus();
 }
 
 /** 状态中英文映射（日志与通知文案用） */
 function statusText(s) {
   return { up: '在线', degraded: '异常', down: '离线', unknown: '待检测' }[s] || s;
+}
+
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fmtMs(ms) {
+  const s = Math.floor((Number(ms) || 0) / 1000);
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+  return `${Math.floor(s / 3600)} 时 ${Math.floor((s % 3600) / 60)} 分`;
+}
+
+/** 状态报告：CSV */
+function buildReportCSV(sum) {
+  const head = ['服务商', '样本数', '可用率(%)', '在线次数', '异常次数', '离线次数', '累计故障时长', '平均延迟(ms)', 'P50(ms)', 'P95(ms)', '最大延迟(ms)', '最后状态'];
+  const esc = (v) => { const s = String(v ?? ''); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const rows = sum.perProvider.map((p) => [
+    p.name, p.samples, p.uptime, p.upCount, p.degCount, p.downCount,
+    fmtMs(p.downMs), p.latencyAvg ?? '', p.latencyP50 ?? '', p.latencyP95 ?? '', p.latencyMax ?? '', statusText(p.lastStatus)
+  ].map(esc).join(','));
+  return [head.join(','), ...rows].join('\r\n');
+}
+
+/** 状态报告：自包含 HTML（内联样式，可直接发邮件/存档） */
+function buildReportHTML(sum) {
+  const o = sum.overall;
+  const rows = sum.perProvider.map((p) => {
+    const color = p.uptime >= 99 ? '#34c759' : p.uptime >= 90 ? '#ff9500' : '#ff3b30';
+    return `<tr>
+      <td>${escHtml(p.name)}</td>
+      <td style="text-align:right">${p.samples}</td>
+      <td style="text-align:right;color:${color};font-weight:600">${p.uptime}%</td>
+      <td style="text-align:right">${p.upCount}/${p.degCount}/${p.downCount}</td>
+      <td style="text-align:right">${fmtMs(p.downMs)}</td>
+      <td style="text-align:right">${p.latencyAvg ?? '—'}</td>
+      <td style="text-align:right">${p.latencyP95 ?? '—'}</td>
+      <td>${statusText(p.lastStatus)}</td>
+    </tr>`;
+  }).join('');
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/>
+<title>AI Provider Monitor 状态报告</title></head>
+<body style="font-family:-apple-system,'Segoe UI',sans-serif;background:#f2f2f7;margin:0;padding:32px;color:#1c1c1e">
+<div style="max-width:1000px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 2px 12px rgba(0,0,0,.06)">
+  <h1 style="margin:0 0 6px;font-size:24px">AI Provider 状态报告</h1>
+  <p style="margin:0 0 24px;color:#8e8e93;font-size:13px">统计区间：最近 ${sum.rangeHours} 小时 · 生成于 ${new Date().toLocaleString('zh-CN')}</p>
+  <div style="display:flex;gap:16px;margin-bottom:28px;flex-wrap:wrap">
+    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
+      <div style="font-size:12px;color:#8e8e93">整体可用率</div>
+      <div style="font-size:28px;font-weight:700">${o.uptime}%</div></div>
+    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
+      <div style="font-size:12px;color:#8e8e93">服务商数</div>
+      <div style="font-size:28px;font-weight:700">${o.providers}</div></div>
+    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
+      <div style="font-size:12px;color:#8e8e93">检测样本</div>
+      <div style="font-size:28px;font-weight:700">${o.samples}</div></div>
+    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
+      <div style="font-size:12px;color:#8e8e93">延迟 P95</div>
+      <div style="font-size:28px;font-weight:700">${o.latencyP95 ?? '—'}<span style="font-size:14px"> ms</span></div></div>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="background:#f2f2f7">
+      <th style="text-align:left;padding:10px">服务商</th>
+      <th style="text-align:right;padding:10px">样本</th>
+      <th style="text-align:right;padding:10px">可用率</th>
+      <th style="text-align:right;padding:10px">在线/异常/离线</th>
+      <th style="text-align:right;padding:10px">故障时长</th>
+      <th style="text-align:right;padding:10px">平均延迟</th>
+      <th style="text-align:right;padding:10px">P95</th>
+      <th style="text-align:left;padding:10px">最后状态</th>
+    </tr></thead>
+    <tbody>${rows || '<tr><td colspan="8" style="padding:24px;text-align:center;color:#8e8e93">暂无数据</td></tr>'}</tbody>
+  </table>
+</div></body></html>`;
+}
+
+/** 托盘图标提示：汇总整体健康度 */
+function updateTrayStatus() {
+  if (!tray) return;
+  try {
+    const up = db.providers.filter((p) => p.status === 'up').length;
+    const deg = db.providers.filter((p) => p.status === 'degraded').length;
+    const down = db.providers.filter((p) => p.status === 'down').length;
+    const bad = deg + down;
+    const mark = down > 0 ? '●' : deg > 0 ? '▲' : '✓';
+    tray.setToolTip(`AI Provider Monitor ${mark}\n在线 ${up} · 异常 ${deg} · 离线 ${down}`);
+    if (process.platform === 'win32') {
+      tray.setTitle && tray.setTitle('');
+    }
+    if (bad > 0 && win && !win.isDestroyed()) {
+      win.setOverlayIcon && win.setOverlayIcon(null, `${bad} 个服务商异常`);
+    }
+  } catch (e) { /* ignore */ }
 }
 
 scheduler.on('result', (provider, result, reason) => {
@@ -91,6 +217,7 @@ scheduler.on('result', (provider, result, reason) => {
 });
 scheduler.on('state', () => send('state-changed', publicState()));
 scheduler.getProvider = (id) => db.providers.find((p) => p.id === id);
+scheduler.getGlobal = () => db.global;
 
 // ---------- 自动启动检测 ----------
 function startAutoChecks() {
@@ -119,6 +246,7 @@ function publicState() {
     global: db.global,
     running: scheduler.runningList(),
     dataFile: DATA_FILE,
+    dataDir: DATA_DIR,
     logDir: logger.LOG_DIR
   };
 }
@@ -141,10 +269,19 @@ ipcMain.handle('provider:add', (e, data) => {
     intervalSec: Math.max(5, Number(data.intervalSec) || 60),
     notifyOnModelChange: Boolean(data.notifyOnModelChange),
     note: String(data.note || '').trim(),
+    group: String(data.group || '').trim(),
+    tags: Array.isArray(data.tags) ? data.tags.map((t) => String(t).trim()).filter(Boolean) : [],
+    probeMode: String(data.probeMode || 'chat'),
+    probePath: String(data.probePath || '').trim(),
+    probeBody: String(data.probeBody || '').trim(),
+    probeLimit: Number(data.probeLimit) > 0 ? Number(data.probeLimit) : null,
+    proxyUrl: String(data.proxyUrl || '').trim(),
+    useProxy: data.useProxy !== false,
     enabled: true,
     status: 'unknown',
     modelsAvailable: [],
     modelsUnavailable: [],
+    modelsUnprobed: [],
     modelDetails: [],
     modelsTotal: 0,
     checkedAt: null,
@@ -168,7 +305,15 @@ ipcMain.handle('provider:update', (e, { id, data }) => {
     apiKey: String(data.apiKey ?? p.apiKey).trim(),
     intervalSec: Math.max(5, Number(data.intervalSec) || p.intervalSec),
     notifyOnModelChange: Boolean(data.notifyOnModelChange),
-    note: String(data.note ?? p.note).trim()
+    note: String(data.note ?? p.note).trim(),
+    group: String(data.group ?? p.group ?? '').trim(),
+    tags: Array.isArray(data.tags) ? data.tags.map((t) => String(t).trim()).filter(Boolean) : (p.tags || []),
+    probeMode: String(data.probeMode || p.probeMode || 'chat'),
+    probePath: String(data.probePath ?? p.probePath ?? '').trim(),
+    probeBody: String(data.probeBody ?? p.probeBody ?? '').trim(),
+    probeLimit: Number(data.probeLimit) > 0 ? Number(data.probeLimit) : (p.probeLimit || null),
+    proxyUrl: String(data.proxyUrl ?? p.proxyUrl ?? '').trim(),
+    useProxy: data.useProxy !== undefined ? data.useProxy !== false : (p.useProxy !== false)
   });
   persist();
   // 仅在周期变化时重排定时器（schedule 内部也会保护未变化的定时器），
@@ -224,15 +369,23 @@ ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
   } else {
     scheduler.cancel(p.id);
     p.modelChanged = false;   // 停用时清除"变动"徽标，避免永久残留
+    // 停用后旧状态不再代表现实：回到待检测，避免列表里显示成"在线"
+    p.status = 'unknown';
+    p.latency = null;
+    p.lastError = null;
+    alerts.resetState(p.id);
   }
   persist();
   send('state-changed', publicState());
+  updateTrayStatus();
   return { ok: true };
 });
 
 ipcMain.handle('global:set', (e, patch) => {
   db.global = { ...db.global, ...patch };
   scheduler.setConcurrency(db.global.concurrency || 4);
+  logger.configure(db.global);
+  applyLoginItem(db.global);
   persist();
   logger.info('全局配置已更新');
   send('state-changed', publicState());
@@ -253,6 +406,61 @@ ipcMain.handle('notify:test', async (e, channel) => {
 ipcMain.handle('open:path', (e, p) => { shell.openPath(p); return { ok: true }; });
 
 ipcMain.handle('app:version', () => app.getVersion());
+
+// ---------- 历史统计 ----------
+ipcMain.handle('history:summary', (e, { hours, providerId } = {}) => {
+  try { return { ok: true, ...history.summarize(DATA_DIR, { hours: Number(hours) || 24, providerId }) }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('history:series', (e, { hours, providerId, buckets } = {}) => {
+  try { return { ok: true, ...history.series(DATA_DIR, { hours: Number(hours) || 24, providerId, buckets: Number(buckets) || 48 }) }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('history:exportCSV', async (e, { hours, providerId } = {}) => {
+  try {
+    const content = history.exportCSV(DATA_DIR, { hours: Number(hours) || 24, providerId });
+    const r = await dialog.showSaveDialog(win, {
+      title: '导出历史记录',
+      defaultPath: `aipm-history-${new Date().toISOString().slice(0, 10)}.csv`,
+      filters: [{ name: 'CSV 文件', extensions: ['csv'] }]
+    });
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(r.filePath, '\ufeff' + content, 'utf8');
+    logger.info(`[历史] 已导出 ${r.filePath}`);
+    return { ok: true, path: r.filePath };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('history:prune', (e, days) => {
+  try { return { ok: true, removed: history.prune(DATA_DIR, Number(days) || 30) }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+// ---------- 日志文件管理 ----------
+ipcMain.handle('logs:files', () => {
+  try { return { ok: true, list: logger.listFiles(), dir: logger.LOG_DIR }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+// ---------- 状态报告导出 ----------
+ipcMain.handle('report:export', async (e, { format = 'html', hours = 24 } = {}) => {
+  try {
+    const sum = history.summarize(DATA_DIR, { hours: Number(hours) || 24 });
+    const content = format === 'csv' ? buildReportCSV(sum) : buildReportHTML(sum);
+    const ext = format === 'csv' ? 'csv' : 'html';
+    const r = await dialog.showSaveDialog(win, {
+      title: '导出状态报告',
+      defaultPath: `aipm-report-${new Date().toISOString().slice(0, 10)}.${ext}`,
+      filters: [{ name: ext.toUpperCase() + ' 文件', extensions: [ext] }]
+    });
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(r.filePath, ext === 'csv' ? '\ufeff' + content : content, 'utf8');
+    logger.info(`[报告] 已导出 ${r.filePath}`);
+    return { ok: true, path: r.filePath };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
 
 // ---------- 备份 / 还原 ----------
 ipcMain.handle('backup:export', async (e, filePath) => {
@@ -381,7 +589,6 @@ ipcMain.handle('transfer:apply', (e, { items, mode }) => {
     const res = transfer.applyImport(db, items || [], mode === 'append' ? 'append' : 'merge');
     persist();
     // 新增的服务商加入轮循
-    const known = new Set(res._knownIds || []);
     for (const p of db.providers) {
       if (p.enabled !== false && !scheduler.timers.has(p.id)) scheduler.schedule(p);
     }
@@ -483,6 +690,12 @@ if (process.argv.includes('--smoke-test') && fs.existsSync(path.join(__dirname, 
       // 每日自动备份（保留最近 10 份）
       const f = backup.autoBackup({ global: db.global, providers: db.providers }, DATA_DIR, { keep: 10 });
       if (f) logger.info(`[备份] 已生成每日自动备份: ${path.basename(f)}`);
+      // 清理过期历史分片（默认保留 30 天）
+      try {
+        const days = Number(db.global.historyKeepDays) > 0 ? Number(db.global.historyKeepDays) : 30;
+        history.prune(DATA_DIR, days);
+      } catch (e) { logger.warn(`[历史] 清理失败: ${e.message}`); }
+      updateTrayStatus();
     });
 
     app.on('before-quit', () => { quitting = true; scheduler.stop(); });

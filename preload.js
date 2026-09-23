@@ -26,6 +26,12 @@ contextBridge.exposeInMainWorld('aipm', {
   transferExportSaveAs: (opts) => ipcRenderer.invoke('transfer:exportSaveAs', opts),
   transferParse: (opts) => ipcRenderer.invoke('transfer:parse', opts),
   transferApply: (opts) => ipcRenderer.invoke('transfer:apply', opts),
+  historySummary: (opts) => ipcRenderer.invoke('history:summary', opts),
+  historySeries: (opts) => ipcRenderer.invoke('history:series', opts),
+  historyExportCSV: (opts) => ipcRenderer.invoke('history:exportCSV', opts),
+  historyPrune: (days) => ipcRenderer.invoke('history:prune', days),
+  logFiles: () => ipcRenderer.invoke('logs:files'),
+  reportExport: (opts) => ipcRenderer.invoke('report:export', opts),
   onStateChanged: (fn) => { const h = (_e, s) => fn(s); ipcRenderer.on('state-changed', h); return () => ipcRenderer.removeListener('state-changed', h); },
   onLogLine: (fn) => { const h = (_e, l) => fn(l); ipcRenderer.on('log:line', h); return () => ipcRenderer.removeListener('log:line', h); }
 });

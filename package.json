@@ -1,7 +1,7 @@
 {
   "name": "ai-provider-monitor",
   "productName": "AI Provider Monitor",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "AI Provider 状态与可用模型监控",
   "main": "main.js",
   "author": "AIProviderMonitor",
@@ -11,14 +11,21 @@
     "start": "electron .",
     "test": "node tests/smoke.js",
     "smoke": "electron . --smoke-test",
-    "app-test": "electron tests/app-runner.js",
+    "app-test": "electron . --smoke-test",
+    "renderer-test": "electron tests/renderer-check.js",
+    "ui-check": "electron tests/ui-check.js",
     "gen-icons": "node scripts/gen-icons.js",
+    "lint": "eslint main.js preload.js src renderer scripts tests",
+    "lint:fix": "eslint --fix main.js preload.js src renderer scripts tests",
+    "format": "prettier --write \"**/*.{js,json,css,html}\"",
     "dist": "electron-builder --win nsis portable",
     "postinstall": "electron-builder install-app-deps"
   },
   "devDependencies": {
     "electron": "33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3"
   },
   "build": {
     "appId": "com.aiprovider.monitor",
@@ -39,8 +46,18 @@
       "icon": "build/icon.ico",
       "artifactName": "AIProviderMonitor-${version}.${ext}",
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {

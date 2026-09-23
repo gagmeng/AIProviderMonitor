@@ -24,6 +24,9 @@
           <span class="nav-ic" data-icon="server"></span><span>服务商</span>
           <span class="nav-badge" id="navProviderCount">0</span>
         </button>
+        <button class="nav-item" data-view="stats" id="nav-stats">
+          <span class="nav-ic" data-icon="chart"></span><span>统计</span>
+        </button>
         <button class="nav-item" data-view="notify" id="nav-notify">
           <span class="nav-ic" data-icon="bell"></span><span>通知</span>
         </button>
@@ -88,12 +91,11 @@
         </header>
 
         <div class="toolbar">
-          <label class="checkbox">
+          <label class="checkbox" id="selAllLabel" title="全选 / 取消全选">
             <input type="checkbox" id="selAll" />
             <span class="box" data-icon=""></span>
-            <span>全选</span>
+            <span id="selAllText">全选</span>
           </label>
-          <button class="btn small ghost" id="btnInvert">反选</button>
           <span class="toolbar-sep"></span>
           <button class="btn small" id="btnCheckSel" disabled></button>
           <button class="btn small danger" id="btnDelSel" disabled>删除</button>
@@ -101,9 +103,19 @@
           <button class="btn small ghost" id="btnImport"></button>
           <button class="btn small ghost" id="btnExport"></button>
           <div class="toolbar-spacer"></div>
+          <select id="groupFilter" class="select-input filter-select">
+            <option value="">全部分组</option>
+          </select>
+          <select id="statusFilter" class="select-input filter-select">
+            <option value="">全部状态</option>
+            <option value="up">在线</option>
+            <option value="degraded">异常</option>
+            <option value="down">离线</option>
+            <option value="unknown">待检测</option>
+          </select>
           <div class="search-wrap">
             <span class="search-ic" data-icon="search"></span>
-            <input id="searchInput" type="text" placeholder="搜索名称 / URL / 备注" />
+            <input id="searchInput" class="search-input" type="text" placeholder="搜索名称 / URL / 备注 / 标签" />
           </div>
         </div>
 
@@ -244,10 +256,210 @@
               </div>
             </div>
           </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="bell"></span>Telegram（Bot）</h2>
+              <label class="switch"><input type="checkbox" id="tgEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Bot Token</label>
+                <input type="password" id="tgToken" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxx" />
+              </div>
+              <div class="field">
+                <label>Chat ID</label>
+                <input type="text" id="tgChatId" placeholder="个人为数字 ID，频道可用 @channelname" />
+              </div>
+              <div class="field">
+                <label>API 地址（可选，反代时填写）</label>
+                <input type="text" id="tgApiBase" placeholder="https://api.telegram.org" />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="tgTest">发送测试消息</button>
+                <span class="hint" id="tgHint"></span>
+              </div>
+              <div class="guide">
+                <button class="guide-toggle" data-guide="tgGuide">
+                  <span>如何获取 Bot Token 与 Chat ID？</span>
+                  <span class="guide-arrow" data-icon="chevronDown"></span>
+                </button>
+                <ol class="guide-body" id="tgGuide">
+                  <li>在 Telegram 中搜索 <strong>@BotFather</strong>，发送 <code>/newbot</code> 按提示创建机器人，得到 <strong>Bot Token</strong>；</li>
+                  <li>向你的新机器人发送任意一条消息（否则机器人无法主动私聊你）；</li>
+                  <li>浏览器访问 <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>，在返回 JSON 中找到 <code>chat.id</code>；</li>
+                  <li>群聊则把机器人拉进群，群 ID 通常为负数；频道可直接填 <code>@频道用户名</code>。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="bell"></span>飞书（自定义机器人）</h2>
+              <label class="switch"><input type="checkbox" id="fsEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Webhook 地址</label>
+                <input type="text" id="fsWebhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+              </div>
+              <div class="field">
+                <label>签名校验密钥（可选）</label>
+                <input type="password" id="fsSecret" placeholder="安全设置开启「签名校验」时填写" />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="fsTest">发送测试消息</button>
+                <span class="hint" id="fsHint"></span>
+              </div>
+              <div class="guide">
+                <button class="guide-toggle" data-guide="fsGuide">
+                  <span>如何获取飞书 Webhook？</span>
+                  <span class="guide-arrow" data-icon="chevronDown"></span>
+                </button>
+                <ol class="guide-body" id="fsGuide">
+                  <li>打开飞书群聊 → <strong>设置 → 群机器人 → 添加机器人 → 自定义机器人</strong>；</li>
+                  <li>复制生成的 <strong>Webhook 地址</strong>；</li>
+                  <li>如在安全设置中启用了<strong>签名校验</strong>，把密钥填入上方输入框。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="bell"></span>Slack（Incoming Webhook）</h2>
+              <label class="switch"><input type="checkbox" id="skEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Webhook 地址</label>
+                <input type="text" id="skWebhook" placeholder="https://hooks.slack.com/services/T000/B000/XXXX" />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="skTest">发送测试消息</button>
+                <span class="hint" id="skHint"></span>
+              </div>
+              <div class="guide">
+                <button class="guide-toggle" data-guide="skGuide">
+                  <span>如何获取 Slack Webhook？</span>
+                  <span class="guide-arrow" data-icon="chevronDown"></span>
+                </button>
+                <ol class="guide-body" id="skGuide">
+                  <li>访问 <code>api.slack.com/apps</code> → <strong>Create New App</strong>；</li>
+                  <li>启用 <strong>Incoming Webhooks</strong>，点击 <strong>Add New Webhook to Workspace</strong>；</li>
+                  <li>选择目标频道，复制生成的 Webhook URL。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="bell"></span>Server 酱</h2>
+              <label class="switch"><input type="checkbox" id="scEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>SendKey</label>
+                <input type="password" id="scKey" placeholder="SCT 开头（Turbo 版）或旧版 SCU 开头" />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="scTest">发送测试消息</button>
+                <span class="hint" id="scHint"></span>
+              </div>
+              <div class="guide">
+                <button class="guide-toggle" data-guide="scGuide">
+                  <span>如何获取 SendKey？</span>
+                  <span class="guide-arrow" data-icon="chevronDown"></span>
+                </button>
+                <ol class="guide-body" id="scGuide">
+                  <li>访问 <code>sct.ftqq.com</code> 并用微信扫码登录；</li>
+                  <li>在「SendKey」页面复制以 <code>SCT</code> 开头的密钥；</li>
+                  <li>按页面指引绑定微信，即可在微信中收到推送。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="bell"></span>通用 Webhook</h2>
+              <label class="switch"><input type="checkbox" id="cwEnable" /><span class="knob"></span></label>
+            </div>
+            <div class="panel-body">
+              <div class="field">
+                <label>请求地址</label>
+                <input type="text" id="cwWebhook" placeholder="https://your-endpoint.example.com/notify" />
+              </div>
+              <div class="field">
+                <label>JSON 请求体模板（可选）</label>
+                <textarea id="cwTemplate" rows="3" placeholder='{"content":"{{text}}","level":"{{status}}"}'></textarea>
+                <div class="field-hint">支持占位符：<code>{{text}}</code> <code>{{name}}</code> <code>{{status}}</code> <code>{{url}}</code> <code>{{time}}</code>；留空则发送 <code>{"text":"..."}</code></div>
+              </div>
+              <div class="field">
+                <label>自定义请求头（可选，JSON）</label>
+                <input type="text" id="cwHeaders" placeholder='{"X-Token":"abc123"}' />
+              </div>
+              <div class="field-row">
+                <button class="btn small" id="cwTest">发送测试消息</button>
+                <span class="hint" id="cwHint"></span>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
       <!-- 设置 -->
+      <!-- 统计 -->
+      <section class="view" id="view-stats">
+        <header class="view-head">
+          <h1>统计分析</h1>
+          <div class="head-actions">
+            <select id="stRange" class="select-input">
+              <option value="1">最近 1 小时</option>
+              <option value="6">最近 6 小时</option>
+              <option value="24" selected>最近 24 小时</option>
+              <option value="168">最近 7 天</option>
+              <option value="720">最近 30 天</option>
+            </select>
+            <button class="btn ghost" id="stExportCsv">导出明细</button>
+            <button class="btn ghost" id="stExportReport">导出报告</button>
+            <button class="btn primary" id="stRefresh">刷新</button>
+          </div>
+        </header>
+
+        <div class="stats-cards">
+          <div class="stat-card"><span class="stat-ic" data-icon="check"></span>
+            <div><div class="stat-label">整体可用率</div><div class="stat-value" id="stUptime">—</div></div></div>
+          <div class="stat-card"><span class="stat-ic" data-icon="server"></span>
+            <div><div class="stat-label">服务商</div><div class="stat-value" id="stProviders">0</div></div></div>
+          <div class="stat-card"><span class="stat-ic" data-icon="activity"></span>
+            <div><div class="stat-label">检测样本</div><div class="stat-value" id="stSamples">0</div></div></div>
+          <div class="stat-card"><span class="stat-ic" data-icon="gauge"></span>
+            <div><div class="stat-label">延迟 P95</div><div class="stat-value" id="stP95">—</div></div></div>
+        </div>
+
+        <div class="panel" style="margin-top:16px;">
+          <div class="panel-head"><h2><span class="panel-ic" data-icon="chart"></span>可用率与延迟趋势</h2>
+            <span class="hint" id="stChartHint"></span></div>
+          <div class="panel-body">
+            <div id="stChart" class="chart-wrap"></div>
+            <div class="chart-legend">
+              <span><i class="lg-dot" style="background:var(--green)"></i>可用率 %</span>
+              <span><i class="lg-dot" style="background:var(--blue)"></i>平均延迟 ms</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:16px;">
+          <div class="panel-head"><h2><span class="panel-ic" data-icon="server"></span>服务商明细</h2></div>
+          <div class="panel-body">
+            <div class="stats-table" id="stTable"></div>
+          </div>
+        </div>
+      </section>
+
       <section class="view" id="view-settings">
         <header class="view-head"><h1>设置</h1></header>
         <div class="settings-grid">
@@ -277,6 +489,178 @@
                   <option value="tray">隐藏到托盘</option>
                   <option value="exit">退出程序</option>
                 </select>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">每轮探测模型数上限</div>
+                  <div class="opt-sub">超出的模型标记为「未探测」，不计入不可用</div>
+                </div>
+                <input type="number" id="probeLimit" min="1" max="100" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">连接超时（毫秒）</div>
+                  <div class="opt-sub">获取模型列表的请求超时</div>
+                </div>
+                <input type="number" id="requestTimeoutMs" min="1000" max="120000" step="1000" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">探测超时（毫秒）</div>
+                  <div class="opt-sub">单个模型可用性探测的请求超时</div>
+                </div>
+                <input type="number" id="probeTimeoutMs" min="1000" max="120000" step="1000" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">失败重试次数</div>
+                  <div class="opt-sub">网络抖动 / 429 / 5xx 时按指数退避重试，避免瞬时误判离线</div>
+                </div>
+                <input type="number" id="retries" min="0" max="5" class="num-input" />
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="bell"></span>告警策略</h2></div>
+            <div class="panel-body">
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">连续失败阈值</div>
+                  <div class="opt-sub">连续 N 轮非在线才推送故障告警（消抖，避免瞬时抖动刷屏）</div>
+                </div>
+                <input type="number" id="alertFailThreshold" min="1" max="20" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">恢复时通知</div>
+                  <div class="opt-sub">服务从故障态恢复为在线时推送一条恢复消息</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="alertRecoverNotify" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">同类告警冷却（分钟）</div>
+                  <div class="opt-sub">同一服务商同类告警在该时间内不重复推送</div>
+                </div>
+                <input type="number" id="alertCooldownMin" min="0" max="1440" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">模型变动告警</div>
+                  <div class="opt-sub">全局开关，与每个服务商的「模型变化上报」取与</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="alertOnModelChange" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">静默时段</div>
+                  <div class="opt-sub">该时间段内不推送任何告警，支持跨零点（如 23:00 → 07:00）</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="alertQuietEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div><div class="opt-title">静默区间</div></div>
+                <div class="quiet-row">
+                  <input type="time" id="alertQuietStart" class="select-input" />
+                  <span class="quiet-sep">→</span>
+                  <input type="time" id="alertQuietEnd" class="select-input" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="server"></span>网络代理</h2></div>
+            <div class="panel-body">
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">启用全局代理</div>
+                  <div class="opt-sub">访问境外 API 时使用；服务商可单独覆盖或关闭</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="proxyEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="field">
+                <label>代理地址</label>
+                <input type="text" id="proxyUrl" placeholder="http://127.0.0.1:7890" />
+                <div class="field-hint">需安装依赖 https-proxy-agent；未安装时代理配置会被忽略并在日志提示</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="archive"></span>历史与日志</h2></div>
+            <div class="panel-body">
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">记录历史数据</div>
+                  <div class="opt-sub">每轮检测结果写入时序文件，用于可用率与延迟统计</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="historyEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">历史保留天数</div>
+                  <div class="opt-sub">超期的历史分片会在启动时自动清理</div>
+                </div>
+                <input type="number" id="historyKeepDays" min="1" max="365" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">日志保留天数</div>
+                  <div class="opt-sub">超期日志文件自动删除，避免磁盘无限增长</div>
+                </div>
+                <input type="number" id="logKeepDays" min="1" max="365" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">单个日志文件上限（MB）</div>
+                  <div class="opt-sub">超过后自动切分为 .1 / .2 分卷</div>
+                </div>
+                <input type="number" id="logMaxFileMB" min="1" max="200" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">日志级别</div>
+                  <div class="opt-sub">低于该级别的日志不再记录，可显著降低磁盘写入</div>
+                </div>
+                <select id="logLevel" class="select-input opt-select">
+                  <option value="debug">debug（最详细）</option>
+                  <option value="info">info（推荐）</option>
+                  <option value="warn">warn</option>
+                  <option value="error">error（仅错误）</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="settings"></span>外观与启动</h2></div>
+            <div class="panel-body">
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">主题</div>
+                  <div class="opt-sub">深色模式可减轻夜间长时间盯屏的疲劳</div>
+                </div>
+                <select id="theme" class="select-input opt-select">
+                  <option value="system">跟随系统</option>
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
+                </select>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">开机自启</div>
+                  <div class="opt-sub">登录系统后自动启动，持续后台监控</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="launchAtLogin" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">启动时最小化</div>
+                  <div class="opt-sub">开机自启时直接隐藏到托盘，不弹出主界面</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="launchMinimized" /><span class="knob"></span></label>
               </div>
             </div>
           </div>
@@ -340,7 +724,7 @@
           <div class="head-actions">
             <div class="search-wrap">
               <span class="search-ic" data-icon="search"></span>
-              <input id="logFilter" type="text" placeholder="过滤：服务商名 / 关键字" />
+              <input id="logFilter" class="search-input" type="text" placeholder="过滤：服务商名 / 关键字" />
             </div>
             <label class="switch small-switch"><input type="checkbox" id="autoScroll" checked /><span class="knob"></span></label>
             <span class="switch-label">自动滚动</span>
@@ -386,6 +770,49 @@
             <label class="switch"><input type="checkbox" id="fNotify" /><span class="knob"></span></label>
           </div>
         </div>
+        <div class="field-inline">
+          <div class="field">
+            <label>分组</label>
+            <input type="text" id="fGroup" list="groupOptions" placeholder="如：生产 / 测试（可选）" />
+            <datalist id="groupOptions"></datalist>
+          </div>
+          <div class="field">
+            <label>标签</label>
+            <input type="text" id="fTags" placeholder="逗号分隔，如：openai,海外" />
+          </div>
+        </div>
+        <div class="field-inline">
+          <div class="field">
+            <label>探测方式</label>
+            <select id="fProbeMode" class="select-input">
+              <option value="chat">chat/completions（默认）</option>
+              <option value="embeddings">embeddings（向量服务）</option>
+              <option value="completions">completions（老式补全）</option>
+              <option value="custom">自定义端点</option>
+              <option value="none">不探测（仅看模型列表）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>探测数上限（可选）</label>
+            <input type="number" id="fProbeLimit" min="1" max="100" placeholder="留空用全局设置" />
+          </div>
+        </div>
+        <div class="field" id="fProbeCustomWrap" style="display:none;">
+          <label>自定义探测路径</label>
+          <input type="text" id="fProbePath" placeholder="/v1/chat/completions" />
+          <label style="margin-top:8px;">自定义请求体（JSON，<code>{{model}}</code> 为模型占位符）</label>
+          <textarea id="fProbeBody" rows="2" placeholder='{"model":"{{model}}","messages":[{"role":"user","content":"ping"}],"max_tokens":1}'></textarea>
+        </div>
+        <div class="field-inline">
+          <div class="field">
+            <label>专用代理（可选）</label>
+            <input type="text" id="fProxyUrl" placeholder="留空则使用全局代理设置" />
+          </div>
+          <div class="field">
+            <label>使用代理</label>
+            <label class="switch"><input type="checkbox" id="fUseProxy" checked /><span class="knob"></span></label>
+          </div>
+        </div>
         <div class="field">
           <label>备注</label>
           <input type="text" id="fNote" placeholder="可选" />
@@ -414,8 +841,12 @@
           <div class="model-tags" id="dmAvail"></div>
         </div>
         <div class="dm-section">
-          <div class="dm-sec-title">不可用 / 未探测 <span id="dmUnavailCount" class="count-pill gray"></span></div>
+          <div class="dm-sec-title">不可用 <span id="dmUnavailCount" class="count-pill gray"></span></div>
           <div class="model-tags" id="dmUnavail"></div>
+        </div>
+        <div class="dm-section" id="dmUnprobedWrap" style="display:none;">
+          <div class="dm-sec-title">未探测（超出单轮上限） <span id="dmUnprobedCount" class="count-pill gray"></span></div>
+          <div class="model-tags" id="dmUnprobed"></div>
         </div>
       </div>
     </div>
@@ -535,6 +966,7 @@
 
   <div id="toastWrap"></div>
 
+  <script src="../src/durfmt.js"></script>
   <script src="icons.js"></script>
   <script src="app.js"></script>
 

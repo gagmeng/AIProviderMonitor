@@ -14,9 +14,54 @@ const DEFAULT_GLOBAL = {
   weixinWebhook: '',
   notifyQQEnabled: false,
   qqWebhook: '',
+  qqTarget: '',
+  qqTargetType: 'private',
+  qqToken: '',
   notifyDingtalkEnabled: false,
   dingtalkWebhook: '',
   dingtalkSecret: '',
+  // --- 扩展通知渠道 ---
+  notifyTelegramEnabled: false,
+  telegramToken: '',
+  telegramChatId: '',
+  telegramApiBase: 'https://api.telegram.org',
+  notifyFeishuEnabled: false,
+  feishuWebhook: '',
+  feishuSecret: '',
+  notifySlackEnabled: false,
+  slackWebhook: '',
+  notifyServerChanEnabled: false,
+  serverchanKey: '',
+  notifyCustomEnabled: false,
+  customWebhook: '',
+  customTemplate: '',
+  customHeaders: '',
+  // --- 告警策略 ---
+  alertFailThreshold: 2,
+  alertRecoverNotify: true,
+  alertCooldownMin: 10,
+  alertQuietEnabled: false,
+  alertQuietStart: '23:00',
+  alertQuietEnd: '07:00',
+  alertOnModelChange: true,
+  // --- 检测参数 ---
+  probeLimit: 8,
+  requestTimeoutMs: 20000,
+  probeTimeoutMs: 15000,
+  retries: 1,
+  // --- 代理 ---
+  proxyEnabled: false,
+  proxyUrl: '',
+  // --- 历史与日志 ---
+  historyEnabled: true,
+  historyKeepDays: 30,
+  logKeepDays: 7,
+  logMaxFileMB: 10,
+  logLevel: 'info',
+  // --- 外观与启动 ---
+  theme: 'system',
+  launchAtLogin: false,
+  launchMinimized: false,
   autoStartCheckOnLaunch: true,
   concurrency: 4,
   closeAction: 'tray'   // 'tray'：点关闭隐藏到托盘；'exit'：点关闭直接退出
@@ -40,7 +85,16 @@ function loadAll() {
 
 function saveAll(data) {
   ensureDir();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
+  // 原子写入：先写同目录临时文件再 rename，避免写入中途崩溃导致 providers.json 截断损坏
+  const tmp = `${DATA_FILE}.tmp-${process.pid}`;
+  const text = JSON.stringify(data, null, 2);
+  try {
+    fs.writeFileSync(tmp, text, 'utf8');
+    fs.renameSync(tmp, DATA_FILE);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (e2) { /* ignore */ }
+    throw e;
+  }
 }
 
 module.exports = { DATA_DIR, DATA_FILE, DEFAULT_GLOBAL, loadAll, saveAll, ensureDir };

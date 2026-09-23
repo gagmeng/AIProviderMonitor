@@ -1,11 +1,10 @@
 'use strict';
-/* global icon */
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 
 let state = { providers: [], global: {}, running: [], dataFile: '', logDir: '' };
-let selected = new Set();
+const selected = new Set();
 let editingId = null;
 let view = 'dashboard';
 
@@ -16,7 +15,7 @@ function initStaticIcons() {
   $$('.search-ic').forEach((el) => { el.innerHTML = icon(el.dataset.icon || 'search'); });
   $('#dashCheckAll').innerHTML = icon('refresh') + '<span>检测全部</span>';
   $('#btnAdd').innerHTML = icon('plus') + '<span>新增服务商</span>';
-  $('#btnCheckSel').innerHTML = icon('play') + '<span>检测</span>';
+  $('#btnCheckSel').textContent = '检测';
   $('#btnDelSel').innerHTML = icon('trash') + '<span>删除</span>';
   $('.search-ic').innerHTML = icon('search');
   $('#pmClose').innerHTML = icon('close');
@@ -71,6 +70,7 @@ $$('.nav-item').forEach((btn) => {
     if (view === 'dashboard') renderDashboard();
     if (view === 'providers') renderProviders();
     if (view === 'settings') renderNotify();
+    if (view === 'stats') renderStats();
   });
 });
 
@@ -93,34 +93,32 @@ function fmtDate(ts) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getMonth() + 1}/${p(d.getDate())} ${fmtTime(ts)}`;
 }
-// 周期智能格式化（与主进程 durfmt.js 同规则；列表空间有限，分钟/小时用短单位）
-const DUR_UNITS = [
-  { label: '秒', factor: 1 }, { label: '分', factor: 60 }, { label: '时', factor: 3600 },
-  { label: '天', factor: 86400 }, { label: '周', factor: 604800 },
-  { label: '月', factor: 2592000 }, { label: '年', factor: 31536000 }
-];
-function fmtDuration(sec) {
-  sec = Math.max(1, Math.round(Number(sec) || 0));
-  let bi = 0;
-  for (let i = DUR_UNITS.length - 1; i >= 0; i--) { if (sec >= DUR_UNITS[i].factor) { bi = i; break; } }
-  const u = DUR_UNITS[bi];
-  if (sec % u.factor === 0) {
-    const v = sec / u.factor;
-    if (u.label === '月' && v % 12 === 0) return `${v / 12} 年`;
-    return `${v} ${u.label}`;
-  }
-  if (bi === 0) return `${sec} 秒`;
-  const major = Math.floor(sec / u.factor);
-  const minor = Math.round((sec % u.factor) / DUR_UNITS[bi - 1].factor);
-  if (minor > 0) return `${major} ${u.label} ${minor} ${DUR_UNITS[bi - 1].label}`;
-  return `${major} ${u.label}`;
-}
+// 周期格式化/换算统一复用 src/durfmt.js（由 index.html 以 <script> 先行加载，挂在 window.durfmt）。
+// 此前渲染层另有一份同规则实现，两处口径易漂移，现已合并为单一事实来源。
+const fmtDuration = (sec) => window.durfmt.formatDuration(sec);
 
 function render() {
   renderNav();
+  refreshGroupOptions();
+  applyTheme();
   if (view === 'dashboard') renderDashboard();
   if (view === 'providers') renderProviders();
+  if (view === 'stats') renderStats();
   $('#footRunning').textContent = state.running.length;
+}
+
+/** 主题：system 跟随系统偏好，light/dark 强制 */
+function applyTheme() {
+  const t = (state.global && state.global.theme) || 'system';
+  const dark = t === 'dark' || (t === 'system' && window.matchMedia
+    && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.classList.toggle('dark', dark);
+}
+if (window.matchMedia) {
+  try {
+    window.matchMedia('(prefers-color-scheme: dark)')
+      .addEventListener('change', () => applyTheme());
+  } catch (e) { /* older engines */ }
 }
 
 function renderNav() {
@@ -169,11 +167,33 @@ $('#recentList').addEventListener('dblclick', (e) => {
 
 function filteredProviders() {
   const q = ($('#searchInput').value || '').trim().toLowerCase();
-  if (!q) return state.providers;
-  return state.providers.filter((p) =>
-    (p.name || '').toLowerCase().includes(q) ||
-    (p.url || '').toLowerCase().includes(q) ||
-    (p.note || '').toLowerCase().includes(q));
+  const g = $('#groupFilter') ? $('#groupFilter').value : '';
+  const st = $('#statusFilter') ? $('#statusFilter').value : '';
+  return state.providers.filter((p) => {
+    if (g && (p.group || '') !== g) return false;
+    if (st && (p.status || 'unknown') !== st) return false;
+    if (!q) return true;
+    const tags = (p.tags || []).join(',').toLowerCase();
+    return (p.name || '').toLowerCase().includes(q)
+      || (p.url || '').toLowerCase().includes(q)
+      || (p.note || '').toLowerCase().includes(q)
+      || (p.group || '').toLowerCase().includes(q)
+      || tags.includes(q);
+  });
+}
+
+/** 同步分组下拉与新增表单的 datalist */
+function refreshGroupOptions() {
+  const groups = [...new Set(state.providers.map((p) => (p.group || '').trim()).filter(Boolean))].sort();
+  const sel = $('#groupFilter');
+  if (sel) {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">全部分组</option>' +
+      groups.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
+    if (groups.includes(cur)) sel.value = cur;
+  }
+  const dl = $('#groupOptions');
+  if (dl) dl.innerHTML = groups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join('');
 }
 
 function renderProviders() {
@@ -199,6 +219,7 @@ function renderProviders() {
             ${p.modelChanged ? '<span class="changed-badge">变动</span>' : ''}
           </div>
           <div class="provider-url">${escapeHtml(p.url)}</div>
+          ${(p.group || (p.tags && p.tags.length)) ? `<div class="provider-meta">${p.group ? `<span class="chip group">${escapeHtml(p.group)}</span>` : ''}${(p.tags || []).slice(0, 3).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
         </div></div>
         <div class="col-status"><span class="status-pill st-${si.cls}"><span class="status-dot ${si.cls} ${checking ? 'pulse' : ''}"></span>${checking ? '检测中' : si.text}</span></div>
         <div class="col-models"><div class="models-cell"><span class="models-bar"><i style="width:${pct}%;"></i></span><span class="models-text">${avail}/${total}</span></div></div>
@@ -217,7 +238,12 @@ function renderProviders() {
 
   // 工具栏状态
   const allChecked = list.length > 0 && list.every((p) => selected.has(p.id));
-  $('#selAll').checked = allChecked;
+  const selCount = list.filter((p) => selected.has(p.id)).length;
+  const selBox = $('#selAll');
+  selBox.checked = allChecked;
+  // 部分选中：显示半选态，点击后补齐为全选
+  selBox.indeterminate = selCount > 0 && !allChecked;
+  $('#selAllText').textContent = allChecked && list.length ? '取消全选' : '全选';
   $('#btnCheckSel').disabled = selected.size === 0;
   $('#btnDelSel').disabled = selected.size === 0;
   $('#btnDelSel').textContent = selected.size > 0 ? `删除 (${selected.size})` : '删除';
@@ -251,6 +277,8 @@ $('#providerList').addEventListener('click', (e) => {
 });
 
 $('#searchInput').addEventListener('input', renderProviders);
+if ($('#groupFilter')) $('#groupFilter').addEventListener('change', renderProviders);
+if ($('#statusFilter')) $('#statusFilter').addEventListener('change', renderProviders);
 
 // 双击行任意位置打开详情（排除操作按钮与复选框）
 $('#providerList').addEventListener('dblclick', (e) => {
@@ -259,15 +287,13 @@ $('#providerList').addEventListener('dblclick', (e) => {
   if (row) openDetail(Number(row.dataset.id));
 });
 
-// 全选 / 反选
+// 全选 / 取消全选（单一三态勾选框：部分选中时显示 indeterminate）
 $('#selAll').addEventListener('change', () => {
   const list = filteredProviders();
-  if ($('#selAll').checked) list.forEach((p) => selected.add(p.id));
-  else list.forEach((p) => selected.delete(p.id));
-  renderProviders();
-});
-$('#btnInvert').addEventListener('click', () => {
-  filteredProviders().forEach((p) => selected.has(p.id) ? selected.delete(p.id) : selected.add(p.id));
+  // 只要当前筛选结果未被全选，就补齐为全选；已全选则清空，两种行为互斥。
+  const allSelected = list.length > 0 && list.every((p) => selected.has(p.id));
+  if (allSelected) list.forEach((p) => selected.delete(p.id));
+  else list.forEach((p) => selected.add(p.id));
   renderProviders();
 });
 $('#btnCheckSel').addEventListener('click', () => { window.aipm.checkNow([...selected]); toast(`已对 ${selected.size} 个服务商触发检测`); });
@@ -282,31 +308,10 @@ $('#btnDelSel').addEventListener('click', () => {
 $('#dashCheckAll').addEventListener('click', () => { window.aipm.checkAll(); toast('已触发全部检测'); });
 
 // ---------- 新增/编辑弹窗 ----------
-// 周期单位（与主进程 durfmt.js 保持一致）
-const INTERVAL_UNITS = [
-  { key: 'sec', label: '秒', factor: 1 },
-  { key: 'min', label: '分', factor: 60 },
-  { key: 'hour', label: '时', factor: 3600 },
-  { key: 'day', label: '天', factor: 86400 },
-  { key: 'week', label: '周', factor: 604800 },
-  { key: 'month', label: '月', factor: 2592000 },
-  { key: 'year', label: '年', factor: 31536000 }
-];
-function toSecondsUI(value, unitKey) {
-  const u = INTERVAL_UNITS.find((x) => x.key === unitKey) || INTERVAL_UNITS[0];
-  return Math.max(5, Math.round((Number(value) || 0) * u.factor));
-}
-function fromSecondsUI(sec) {
-  sec = Math.max(1, Math.round(Number(sec) || 0));
-  for (let i = INTERVAL_UNITS.length - 1; i >= 0; i--) {
-    const u = INTERVAL_UNITS[i];
-    if (sec >= u.factor && sec % u.factor === 0) {
-      if (u.key === 'month' && (sec / u.factor) % 12 === 0) return { value: sec / 31536000, unit: 'year' };
-      return { value: sec / u.factor, unit: u.key };
-    }
-  }
-  return { value: sec, unit: 'sec' };
-}
+// 周期单位与换算同样取自 window.durfmt，避免与主进程口径漂移。
+const INTERVAL_UNITS = window.durfmt.EDITABLE_UNITS;
+const toSecondsUI = (value, unitKey) => window.durfmt.toSeconds(value, unitKey);
+const fromSecondsUI = (sec) => window.durfmt.fromSeconds(sec);
 // 填充单位下拉
 (function initIntervalUnitSelect() {
   const sel = $('#fIntervalUnit');
@@ -327,9 +332,23 @@ function openProviderModal(id = null) {
   $('#fIntervalUnit').value = iv.unit;
   $('#fNotify').checked = p ? Boolean(p.notifyOnModelChange) : false;
   $('#fNote').value = p ? (p.note || '') : '';
+  $('#fGroup').value = p ? (p.group || '') : '';
+  $('#fTags').value = p && Array.isArray(p.tags) ? p.tags.join(', ') : '';
+  $('#fProbeMode').value = (p && p.probeMode) || 'chat';
+  $('#fProbeLimit').value = p && p.probeLimit ? p.probeLimit : '';
+  $('#fProbePath').value = p ? (p.probePath || '') : '';
+  $('#fProbeBody').value = p ? (p.probeBody || '') : '';
+  $('#fProxyUrl').value = p ? (p.proxyUrl || '') : '';
+  $('#fUseProxy').checked = p ? p.useProxy !== false : true;
+  syncProbeCustomVisibility();
   $('#providerModal').classList.add('show');
   setTimeout(() => $('#fName').focus(), 120);
 }
+function syncProbeCustomVisibility() {
+  const wrap = $('#fProbeCustomWrap');
+  if (wrap) wrap.style.display = $('#fProbeMode').value === 'custom' ? '' : 'none';
+}
+$('#fProbeMode').addEventListener('change', syncProbeCustomVisibility);
 $('#btnAdd').addEventListener('click', () => openProviderModal());
 $('#pmClose').addEventListener('click', () => $('#providerModal').classList.remove('show'));
 $('#pmCancel').addEventListener('click', () => $('#providerModal').classList.remove('show'));
@@ -348,7 +367,15 @@ $('#pmSave').addEventListener('click', async () => {
     apiKey: $('#fKey').value.trim() || undefined,
     intervalSec: interval,
     notifyOnModelChange: $('#fNotify').checked,
-    note: $('#fNote').value.trim()
+    note: $('#fNote').value.trim(),
+    group: $('#fGroup').value.trim(),
+    tags: $('#fTags').value.split(',').map((t) => t.trim()).filter(Boolean),
+    probeMode: $('#fProbeMode').value,
+    probePath: $('#fProbePath').value.trim(),
+    probeBody: $('#fProbeBody').value.trim(),
+    probeLimit: Number($('#fProbeLimit').value) > 0 ? Number($('#fProbeLimit').value) : null,
+    proxyUrl: $('#fProxyUrl').value.trim(),
+    useProxy: $('#fUseProxy').checked
   };
   if (editingId) {
     if (!data.apiKey) delete data.apiKey;
@@ -407,6 +434,19 @@ function openDetail(id) {
         </div>`;
       }).join('')
     : '<span class="empty" style="padding:8px 0;">无</span>';
+  // 未探测模型（超出单轮上限）单独展示，避免与真实失败混淆
+  const unprobed = p.modelsUnprobed || [];
+  const upWrap = $('#dmUnprobedWrap');
+  if (upWrap) {
+    if (unprobed.length) {
+      upWrap.style.display = '';
+      $('#dmUnprobedCount').textContent = unprobed.length;
+      $('#dmUnprobed').innerHTML = unprobed
+        .map((m) => `<span class="model-tag muted" data-copy="${escapeHtml(m)}">${escapeHtml(m)}</span>`).join('');
+    } else {
+      upWrap.style.display = 'none';
+    }
+  }
   $('#detailModal').classList.add('show');
 }
 $('#dmClose').addEventListener('click', () => $('#detailModal').classList.remove('show'));
@@ -434,11 +474,58 @@ function renderNotify() {
   $('#autoStart').checked = g.autoStartCheckOnLaunch !== false;
   $('#concurrency').value = g.concurrency || 4;
   $('#closeAction').value = g.closeAction === 'exit' ? 'exit' : 'tray';
+  // 扩展通知渠道
+  $('#tgEnable').checked = Boolean(g.notifyTelegramEnabled);
+  $('#tgToken').value = g.telegramToken || '';
+  $('#tgChatId').value = g.telegramChatId || '';
+  $('#tgApiBase').value = g.telegramApiBase || '';
+  $('#fsEnable').checked = Boolean(g.notifyFeishuEnabled);
+  $('#fsWebhook').value = g.feishuWebhook || '';
+  $('#fsSecret').value = g.feishuSecret || '';
+  $('#skEnable').checked = Boolean(g.notifySlackEnabled);
+  $('#skWebhook').value = g.slackWebhook || '';
+  $('#scEnable').checked = Boolean(g.notifyServerChanEnabled);
+  $('#scKey').value = g.serverchanKey || '';
+  $('#cwEnable').checked = Boolean(g.notifyCustomEnabled);
+  $('#cwWebhook').value = g.customWebhook || '';
+  $('#cwTemplate').value = g.customTemplate || '';
+  $('#cwHeaders').value = g.customHeaders || '';
+  // 检测参数
+  $('#probeLimit').value = g.probeLimit || 8;
+  $('#requestTimeoutMs').value = g.requestTimeoutMs || 20000;
+  $('#probeTimeoutMs').value = g.probeTimeoutMs || 15000;
+  $('#retries').value = g.retries == null ? 1 : g.retries;
+  // 告警策略
+  $('#alertFailThreshold').value = g.alertFailThreshold || 2;
+  $('#alertRecoverNotify').checked = g.alertRecoverNotify !== false;
+  $('#alertCooldownMin').value = g.alertCooldownMin == null ? 10 : g.alertCooldownMin;
+  $('#alertOnModelChange').checked = g.alertOnModelChange !== false;
+  $('#alertQuietEnabled').checked = Boolean(g.alertQuietEnabled);
+  $('#alertQuietStart').value = g.alertQuietStart || '23:00';
+  $('#alertQuietEnd').value = g.alertQuietEnd || '07:00';
+  // 代理
+  $('#proxyEnabled').checked = Boolean(g.proxyEnabled);
+  $('#proxyUrl').value = g.proxyUrl || '';
+  // 历史与日志
+  $('#historyEnabled').checked = g.historyEnabled !== false;
+  $('#historyKeepDays').value = g.historyKeepDays || 30;
+  $('#logKeepDays').value = g.logKeepDays || 7;
+  $('#logMaxFileMB').value = g.logMaxFileMB || 10;
+  $('#logLevel').value = g.logLevel || 'info';
+  // 外观与启动
+  $('#theme').value = g.theme || 'system';
+  $('#launchAtLogin').checked = Boolean(g.launchAtLogin);
+  $('#launchMinimized').checked = Boolean(g.launchMinimized);
 }
 let notifySaveTimer = null;
 function saveNotify() {
   clearTimeout(notifySaveTimer);
   notifySaveTimer = setTimeout(async () => {
+    const int = (sel, def, min, max) => {
+      const v = Number($(sel).value);
+      if (!Number.isFinite(v)) return def;
+      return Math.max(min, Math.min(max, Math.round(v)));
+    };
     await window.aipm.setGlobal({
       notifyWeixinEnabled: $('#wxEnable').checked,
       weixinWebhook: $('#wxWebhook').value.trim(),
@@ -450,16 +537,62 @@ function saveNotify() {
       notifyDingtalkEnabled: $('#dtEnable').checked,
       dingtalkWebhook: $('#dtWebhook').value.trim(),
       dingtalkSecret: $('#dtSecret').value.trim(),
+      notifyTelegramEnabled: $('#tgEnable').checked,
+      telegramToken: $('#tgToken').value.trim(),
+      telegramChatId: $('#tgChatId').value.trim(),
+      telegramApiBase: $('#tgApiBase').value.trim() || 'https://api.telegram.org',
+      notifyFeishuEnabled: $('#fsEnable').checked,
+      feishuWebhook: $('#fsWebhook').value.trim(),
+      feishuSecret: $('#fsSecret').value.trim(),
+      notifySlackEnabled: $('#skEnable').checked,
+      slackWebhook: $('#skWebhook').value.trim(),
+      notifyServerChanEnabled: $('#scEnable').checked,
+      serverchanKey: $('#scKey').value.trim(),
+      notifyCustomEnabled: $('#cwEnable').checked,
+      customWebhook: $('#cwWebhook').value.trim(),
+      customTemplate: $('#cwTemplate').value.trim(),
+      customHeaders: $('#cwHeaders').value.trim(),
+      probeLimit: int('#probeLimit', 8, 1, 100),
+      requestTimeoutMs: int('#requestTimeoutMs', 20000, 1000, 120000),
+      probeTimeoutMs: int('#probeTimeoutMs', 15000, 1000, 120000),
+      retries: int('#retries', 1, 0, 5),
+      alertFailThreshold: int('#alertFailThreshold', 2, 1, 20),
+      alertRecoverNotify: $('#alertRecoverNotify').checked,
+      alertCooldownMin: int('#alertCooldownMin', 10, 0, 1440),
+      alertOnModelChange: $('#alertOnModelChange').checked,
+      alertQuietEnabled: $('#alertQuietEnabled').checked,
+      alertQuietStart: $('#alertQuietStart').value || '23:00',
+      alertQuietEnd: $('#alertQuietEnd').value || '07:00',
+      proxyEnabled: $('#proxyEnabled').checked,
+      proxyUrl: $('#proxyUrl').value.trim(),
+      historyEnabled: $('#historyEnabled').checked,
+      historyKeepDays: int('#historyKeepDays', 30, 1, 365),
+      logKeepDays: int('#logKeepDays', 7, 1, 365),
+      logMaxFileMB: int('#logMaxFileMB', 10, 1, 200),
+      logLevel: $('#logLevel').value || 'info',
+      theme: $('#theme').value || 'system',
+      launchAtLogin: $('#launchAtLogin').checked,
+      launchMinimized: $('#launchMinimized').checked,
       autoStartCheckOnLaunch: $('#autoStart').checked,
       concurrency: Math.max(1, Math.min(16, Number($('#concurrency').value) || 4)),
       closeAction: $('#closeAction').value === 'exit' ? 'exit' : 'tray'
     });
   }, 350);
 }
-['wxEnable', 'qqEnable', 'dtEnable', 'autoStart'].forEach((id) => $('#' + id).addEventListener('change', saveNotify));
-['wxWebhook', 'qqWebhook', 'qqTarget', 'qqToken', 'dtWebhook', 'dtSecret', 'concurrency'].forEach((id) => $('#' + id).addEventListener('input', saveNotify));
+['wxEnable', 'qqEnable', 'dtEnable', 'autoStart', 'tgEnable', 'fsEnable', 'skEnable', 'scEnable', 'cwEnable',
+ 'alertRecoverNotify', 'alertOnModelChange', 'alertQuietEnabled', 'proxyEnabled', 'historyEnabled',
+ 'launchAtLogin', 'launchMinimized']
+  .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('change', saveNotify); });
+['wxWebhook', 'qqWebhook', 'qqTarget', 'qqToken', 'dtWebhook', 'dtSecret', 'concurrency',
+ 'tgToken', 'tgChatId', 'tgApiBase', 'fsWebhook', 'fsSecret', 'skWebhook', 'scKey',
+ 'cwWebhook', 'cwTemplate', 'cwHeaders', 'probeLimit', 'requestTimeoutMs', 'probeTimeoutMs', 'retries',
+ 'alertFailThreshold', 'alertCooldownMin', 'alertQuietStart', 'alertQuietEnd', 'proxyUrl',
+ 'historyKeepDays', 'logKeepDays', 'logMaxFileMB']
+  .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('input', saveNotify); });
 $('#qqTargetType').addEventListener('change', saveNotify);
 $('#closeAction').addEventListener('change', saveNotify);
+$('#logLevel').addEventListener('change', saveNotify);
+$('#theme').addEventListener('change', () => { saveNotify(); setTimeout(applyTheme, 400); });
 
 // 指引折叠
 $$('.guide-toggle').forEach((btn) => {
@@ -490,6 +623,142 @@ $('#dtTest').addEventListener('click', async () => {
   $('#dtHint').textContent = r.ok ? '发送成功' : '失败: ' + r.error;
   $('#dtHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
 });
+
+/** 扩展渠道测试按钮：先落盘配置再发测试，避免用刚输入但未保存的值失败 */
+[['tgTest', 'tgHint', 'telegram'], ['fsTest', 'fsHint', 'feishu'], ['skTest', 'skHint', 'slack'],
+ ['scTest', 'scHint', 'serverchan'], ['cwTest', 'cwHint', 'custom']]
+  .forEach(([btnId, hintId, channel]) => {
+    const btn = $('#' + btnId);
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      saveNotify();
+      const hint = $('#' + hintId);
+      hint.textContent = '发送中…'; hint.className = 'hint';
+      // 等待防抖保存落盘后再发送
+      await new Promise((r) => setTimeout(r, 420));
+      const r = await window.aipm.testNotify(channel);
+      hint.textContent = r.ok ? '发送成功' : '失败: ' + r.error;
+      hint.className = 'hint ' + (r.ok ? 'ok' : 'bad');
+    });
+  });
+
+// ---------- 统计分析 ----------
+function statsHours() {
+  const v = Number(($('#stRange') && $('#stRange').value) || 24);
+  return v > 0 ? v : 24;
+}
+
+async function renderStats() {
+  const hours = statsHours();
+  const [sum, ser] = await Promise.all([
+    window.aipm.historySummary({ hours }),
+    window.aipm.historySeries({ hours, buckets: 48 })
+  ]);
+  if (!sum.ok) { $('#stTable').innerHTML = `<div class="empty">统计读取失败：${escapeHtml(sum.error || '')}</div>`; return; }
+
+  const o = sum.overall;
+  $('#stUptime').textContent = o.samples ? o.uptime + '%' : '—';
+  $('#stProviders').textContent = o.providers;
+  $('#stSamples').textContent = o.samples;
+  $('#stP95').textContent = o.latencyP95 != null ? o.latencyP95 + ' ms' : '—';
+
+  if (ser.ok) drawChart(ser);
+  $('#stChartHint').textContent = o.samples
+    ? `${o.samples} 个样本 · 每桶约 ${Math.round((ser.bucketMs || 0) / 60000)} 分钟`
+    : '暂无历史数据，检测运行一段时间后自动积累';
+
+  const rows = sum.perProvider;
+  if (!rows.length) {
+    $('#stTable').innerHTML = '<div class="empty">该时间范围内暂无检测记录</div>';
+    return;
+  }
+  $('#stTable').innerHTML = `
+    <div class="st-row st-head">
+      <div>服务商</div><div>样本</div><div>可用率</div>
+      <div>在线/异常/离线</div><div>故障时长</div><div>平均延迟</div><div>P95</div><div>最后状态</div>
+    </div>` + rows.map((p) => {
+    const cls = p.uptime >= 99 ? 'up' : p.uptime >= 90 ? 'degraded' : 'down';
+    const si = statusInfo(p.lastStatus);
+    return `<div class="st-row">
+      <div class="st-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div>
+      <div>${p.samples}</div>
+      <div><span class="st-uptime u-${cls}">${p.uptime}%</span></div>
+      <div class="st-mini">${p.upCount}/${p.degCount}/${p.downCount}</div>
+      <div class="st-mini">${fmtMsShort(p.downMs)}</div>
+      <div>${p.latencyAvg != null ? p.latencyAvg + ' ms' : '—'}</div>
+      <div>${p.latencyP95 != null ? p.latencyP95 + ' ms' : '—'}</div>
+      <div><span class="status-pill st-${si.cls}">${si.text}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function fmtMsShort(ms) {
+  const s = Math.floor((Number(ms) || 0) / 1000);
+  if (s <= 0) return '—';
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
+}
+
+/** 内联 SVG 双轴折线图：可用率(绿, 0-100) + 平均延迟(蓝, 自适应) */
+function drawChart(ser) {
+  const W = 900, H = 200, PAD = { l: 38, r: 44, t: 12, b: 22 };
+  const pts = ser.buckets || [];
+  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
+  const valid = pts.filter((b) => b.samples > 0);
+  if (!valid.length) {
+    $('#stChart').innerHTML = '<div class="empty" style="padding:48px 0;">暂无数据</div>';
+    return;
+  }
+  const maxLat = Math.max(1, ...valid.map((b) => b.latencyAvg || 0));
+  const x = (i) => PAD.l + (pts.length <= 1 ? iw / 2 : (i / (pts.length - 1)) * iw);
+  const yU = (v) => PAD.t + ih - (v / 100) * ih;
+  const yL = (v) => PAD.t + ih - (v / maxLat) * ih;
+
+  const seg = (key, yfn) => {
+    const out = [];
+    let cur = [];
+    pts.forEach((b, i) => {
+      const v = b[key];
+      if (v == null) { if (cur.length) { out.push(cur); cur = []; } return; }
+      cur.push(`${x(i).toFixed(1)},${yfn(v).toFixed(1)}`);
+    });
+    if (cur.length) out.push(cur);
+    return out.map((c) => `<polyline points="${c.join(' ')}" fill="none" stroke-width="2"
+      stroke-linejoin="round" stroke-linecap="round"/>`).join('');
+  };
+
+  const grid = [0, 25, 50, 75, 100].map((v) =>
+    `<line x1="${PAD.l}" y1="${yU(v)}" x2="${W - PAD.r}" y2="${yU(v)}" class="ch-grid"/>
+     <text x="${PAD.l - 6}" y="${yU(v) + 4}" class="ch-lbl" text-anchor="end">${v}</text>`).join('');
+
+  const t0 = new Date(ser.from), t1 = new Date(ser.to);
+  const hm = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+  $('#stChart').innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="ch-svg">
+    ${grid}
+    <g class="ch-lat">${seg('latencyAvg', yL)}</g>
+    <g class="ch-up">${seg('uptime', yU)}</g>
+    <text x="${PAD.l}" y="${H - 6}" class="ch-lbl">${hm(t0)}</text>
+    <text x="${W - PAD.r}" y="${H - 6}" class="ch-lbl" text-anchor="end">${hm(t1)}</text>
+    <text x="${W - PAD.r + 6}" y="${PAD.t + 8}" class="ch-lbl">${maxLat}ms</text>
+  </svg>`;
+}
+
+if ($('#stRefresh')) {
+  $('#stRefresh').addEventListener('click', renderStats);
+  $('#stRange').addEventListener('change', renderStats);
+  $('#stExportCsv').addEventListener('click', async () => {
+    const r = await window.aipm.historyExportCSV({ hours: statsHours() });
+    if (r.ok) toast('历史明细已导出');
+    else if (!r.canceled) toast('导出失败: ' + r.error, 'err');
+  });
+  $('#stExportReport').addEventListener('click', async () => {
+    const r = await window.aipm.reportExport({ format: 'html', hours: statsHours() });
+    if (r.ok) toast('状态报告已导出');
+    else if (!r.canceled) toast('导出失败: ' + r.error, 'err');
+  });
+}
 
 // ---------- 日志 ----------
 let logLines = [];
@@ -647,8 +916,8 @@ $('#bkList').addEventListener('click', (e) => {
 let emState = { format: 'json', delimiter: 'tab' };
 let imState = { format: 'json', delimiter: 'tab', items: null, errors: [] };
 
-$('#btnImport').innerHTML = icon('inbox') + '<span>导入</span>';
-$('#btnExport').innerHTML = icon('copy') + '<span>导出</span>';
+$('#btnImport').textContent = '导入';
+$('#btnExport').textContent = '导出';
 $('#emClose').innerHTML = icon('close');
 $('#imClose').innerHTML = icon('close');
 
@@ -765,7 +1034,7 @@ async function parseAndPreviewImport() {
   const box = $('#imResult');
   box.style.display = '';
   if (r.items.length === 0) {
-    box.innerHTML = `<span class="io-err">未解析到有效条目</span>` +
+    box.innerHTML = '<span class="io-err">未解析到有效条目</span>' +
       (r.errors.length ? `<ul>${r.errors.map((e) => `<li>第 ${e.line} 行：${escapeHtml(e.msg)}</li>`).join('')}</ul>` : '');
     $('#imApply').disabled = true;
     return;
@@ -799,7 +1068,12 @@ $('#imApply').addEventListener('click', async () => {
 });
 
 // ---------- 其它 ----------
-$('#openDataDir').addEventListener('click', () => window.aipm.openPath(state.dataFile ? require('path').dirname(state.dataFile) : ''));
+// 注意：渲染进程无 require（contextIsolation + nodeIntegration:false），
+// 数据目录由主进程通过 publicState().dataDir 下发
+$('#openDataDir').addEventListener('click', () => {
+  const dir = state.dataDir || (state.dataFile ? state.dataFile.replace(/[\\/][^\\/]*$/, '') : '');
+  if (dir) window.aipm.openPath(dir);
+});
 $('#openLogDir').addEventListener('click', () => window.aipm.openPath(state.logDir || ''));
 
 // ---------- 启动 ----------

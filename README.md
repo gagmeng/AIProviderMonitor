@@ -274,13 +274,13 @@ applyResult(provider, result):
 
 ### 方式一：安装版（推荐）
 
-1. 运行 `dist/AIProviderMonitor-1.0.2.exe`
+1. 运行 `dist/AIProviderMonitor-1.1.0.exe`
 2. 按向导选择安装目录（默认安装到用户目录）
 3. 完成后从桌面 / 开始菜单启动「AI Provider Monitor」
 
 ### 方式二：便携版
 
-直接运行 `dist/AIProviderMonitor-Portable-1.0.2.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
+直接运行 `dist/AIProviderMonitor-Portable-1.1.0.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
 
 ### 方式三：开发模式
 
@@ -295,8 +295,14 @@ npm_config_electron_mirror=https://npmmirror.com/mirrors/electron/ node node_mod
 npm start
 
 # 运行测试
-npm test                # 模块冒烟测试（11 用例，mock HTTP 服务器）
-npm run smoke           # Electron 应用级自检
+npm test                # 模块冒烟测试（35 用例，mock HTTP 服务器，纯 Node）
+npm run app-test        # Electron 应用级自检（主进程 + 模块加载 + 资源存在性）
+npm run renderer-test   # 渲染层自检（真实 BrowserWindow，校验 CSP 与共享模块加载）
+
+# 代码规范
+npm run lint            # ESLint 检查
+npm run lint:fix        # ESLint 自动修复
+npm run format          # Prettier 格式化
 
 # 打包（NSIS 安装包 + 便携版）
 npm run dist
@@ -395,27 +401,32 @@ AIProviderMonitor/
 │   ├── store.js             #   JSON 持久化（providers.json）
 │   ├── scheduler.js         #   周期调度器（定时器 + 并发池）
 │   ├── detector.js          #   检测引擎（模型列表 + 逐模型探测）
-│   ├── notifier.js          #   微信 / QQ / 钉钉 通知
-│   ├── durfmt.js            #   周期时长工具（单位换算 + 智能格式化）
+│   ├── notifier.js          #   8 通道通知（微信/QQ/钉钉/Telegram/飞书/Slack/Server酱/自定义）
+│   ├── alerts.js            #   告警策略引擎（失败消抖 / 恢复通知 / 冷却 / 静默时段）
+│   ├── history.js           #   历史采样与可用率统计（JSONL 分片 + 分位数 + CSV 导出）
+│   ├── durfmt.js            #   周期时长工具（主进程与渲染层共用，双模导出）
 │   ├── transfer.js          #   服务商批量导入 / 导出（JSON/CSV/文本）
 │   ├── backup.js            #   备份与还原（手动 + 每日自动）
 │   └── logger.js            #   日志（内存缓冲 + 按天落盘 + 订阅）
 ├── renderer/                # 渲染进程（无框架 SPA）
-│   ├── index.html           #   六视图布局 + 五个弹窗
+│   ├── index.html           #   七视图布局（含统计）+ 弹窗
 │   ├── styles.css           #   iOS 风格设计系统
 │   ├── app.js               #   状态渲染与交互逻辑
 │   └── icons.js             #   手绘 SVG 图标集（25+）
 ├── scripts/
 │   └── gen-icons.js         # SDF 算法生成应用图标（PNG/ICO）
 ├── tests/
-│   ├── smoke.js             # 模块冒烟测试（11 用例，mock 服务器）
-│   └── app-smoke.js         # Electron 应用级自检（--smoke-test）
+│   ├── smoke.js             # 模块冒烟测试（35 用例，mock 服务器）
+│   ├── app-smoke.js         # Electron 应用级自检（--smoke-test）
+│   └── renderer-check.js    # 渲染层自检（真实窗口加载 + CSP 校验）
+├── .eslintrc.json           # ESLint 规则
+├── .prettierrc.json         # Prettier 格式化配置
 ├── build/
 │   ├── icon.ico             # 多尺寸应用图标
 │   └── icon.png             # 256×256 PNG
 └── dist/                    # 打包产物
-    ├── AIProviderMonitor-1.0.2.exe          # NSIS 安装包
-    └── AIProviderMonitor-Portable-1.0.2.exe # 便携版
+    ├── AIProviderMonitor-1.1.0.exe          # NSIS 安装包
+    └── AIProviderMonitor-Portable-1.1.0.exe # 便携版
 ```
 
 ## 数据文件格式

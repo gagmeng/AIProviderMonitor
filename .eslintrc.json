@@ -1,0 +1,27 @@
+{
+  "root": true,
+  "env": { "node": true, "es2022": true },
+  "parserOptions": { "ecmaVersion": 2022, "sourceType": "script" },
+  "extends": "eslint:recommended",
+  "rules": {
+    "no-unused-vars": ["warn", { "args": "none", "caughtErrors": "none" }],
+    "no-empty": ["warn", { "allowEmptyCatch": true }],
+    "no-console": "off",
+    "eqeqeq": ["warn", "smart"],
+    "prefer-const": "warn",
+    "no-var": "error",
+    "semi": ["warn", "always"],
+    "quotes": ["warn", "single", { "avoidEscape": true }]
+  },
+  "overrides": [
+    {
+      "files": ["renderer/**/*.js"],
+      "env": { "browser": true, "node": false },
+      "globals": { "icon": "readonly", "aipm": "readonly" }
+    },
+    {
+      "files": ["tests/**/*.js"],
+      "env": { "node": true }
+    }
+  ]
+}

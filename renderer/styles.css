@@ -169,13 +169,17 @@ input, textarea { user-select: text; }
   color: var(--text-3); display: flex; pointer-events: none;
 }
 .search-wrap .search-ic .icon { width: 15px; height: 15px; }
-#searchInput {
+.search-input {
   width: 240px; padding: 7px 12px 7px 32px; border: none; border-radius: 9px;
   background: rgba(120,120,128,.12); font-size: 13px; font-family: inherit; color: var(--text);
   outline: none; transition: box-shadow .15s;
 }
-#searchInput:focus { box-shadow: 0 0 0 3px rgba(10,132,255,.22); background: #fff; }
-#searchInput::placeholder { color: var(--text-3); }
+.search-input:focus { box-shadow: 0 0 0 3px rgba(10,132,255,.22); background: #fff; }
+.search-input::placeholder { color: var(--text-3); }
+html.dark .search-input { background: var(--card-2); }
+html.dark .search-input:focus { background: var(--card-2); }
+/* 日志页过滤框略窄，给右侧「自动滚动」等控件留出空间 */
+#logFilter { width: 220px; }
 
 /* checkbox（iOS 样式） */
 .checkbox { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text-2); font-weight: 500; }
@@ -289,7 +293,26 @@ input, textarea { user-select: text; }
 .hint { font-size: 12px; }
 .hint.ok { color: #248a3d; }
 .hint.bad { color: var(--red); }
-.num-input { width: 84px !important; text-align: center; }
+.num-input {
+  width: 92px !important; flex: none;
+  padding: 8px 10px; text-align: center;
+  border: 1.5px solid transparent; border-radius: 10px;
+  background: rgba(120,120,128,.08);
+  font-size: 13.5px; font-weight: 600; font-family: inherit;
+  color: var(--text); outline: none; transition: all .15s;
+  /* 隐藏微调箭头，避免挤压数字导致「看起来没居中」。
+     Chromium 需标准/-webkit- 前缀，仅 -moz- 无效。 */
+  -moz-appearance: textfield;
+  -webkit-appearance: textfield;
+  appearance: textfield;
+}
+.num-input::-webkit-outer-spin-button,
+.num-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.num-input:focus {
+  border-color: var(--accent); background: #fff;
+  box-shadow: 0 0 0 3px rgba(10,132,255,.14);
+}
+html.dark .num-input:focus { background: var(--card-2); }
 .opt-select { width: auto !important; min-width: 0; flex: none; }
 .opt-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--sep); }
 .opt-row:last-child { border-bottom: none; padding-bottom: 2px; }
@@ -328,6 +351,20 @@ input, textarea { user-select: text; }
   -webkit-appearance: none; appearance: none;
 }
 .select-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(10,132,255,.14); }
+
+/* 统计页头部：时间筛选框与导出/刷新按钮同排单行。
+   .select-input 的 width:100% 会独占整行、把按钮挤成竖排折行，这里覆盖为内容宽且可收缩，
+   并复用 .filter-select 的自定义下拉箭头保持风格一致。 */
+#stRange {
+  width: auto; flex: 0 1 auto; min-width: 96px;
+  height: 32px; padding: 0 26px 0 10px; font-size: 13px;
+  text-overflow: ellipsis;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+/* 头部按钮不允许折行收缩，杜绝标签竖排 */
+.head-actions .btn { white-space: nowrap; flex: none; }
 
 /* 周期输入：数值 + 单位下拉 */
 .interval-row { display: flex; gap: 8px; }
@@ -515,3 +552,168 @@ input, textarea { user-select: text; }
 ::-webkit-scrollbar-thumb { background: rgba(120,120,128,.3); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(120,120,128,.5); background-clip: content-box; border: 2px solid transparent; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ================= 深色模式 ================= */
+html.dark {
+  --bg: #000000;
+  --card: #1c1c1e;
+  --card-2: #2c2c2e;
+  --text: #f2f2f7;
+  --text-2: #98989f;
+  --text-3: #6e6e73;
+  --sep: rgba(255, 255, 255, 0.12);
+  --accent: #0a84ff;
+  --accent-press: #409cff;
+  --green: #32d74b;
+  --red: #ff453a;
+  --orange: #ff9f0a;
+  --purple: #6e6ce8;
+  --shadow-1: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.35);
+  --shadow-2: 0 8px 40px rgba(0,0,0,.6);
+}
+html.dark #sidebar { background: #151517; }
+html.dark input, html.dark textarea, html.dark select {
+  background: var(--card-2);
+  color: var(--text);
+  border-color: var(--sep);
+}
+html.dark input::placeholder, html.dark textarea::placeholder { color: var(--text-3); }
+html.dark .log-line { border-color: var(--sep); }
+html.dark code { background: var(--card-2); }
+
+/* ================= 筛选下拉 ================= */
+.filter-select {
+  height: 32px;
+  width: 104px; min-width: 104px; flex: none;
+  padding: 0 26px 0 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--sep);
+  background-color: var(--card);
+  color: var(--text);
+  font-size: 13px;
+  margin-right: 0;
+  cursor: pointer;
+  /* 文字过长时省略而非撑宽控件，保证工具栏按钮不被挤压折行 */
+  text-overflow: ellipsis;
+  -webkit-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+.filter-select:focus {
+  border-color: var(--accent); outline: none;
+  box-shadow: 0 0 0 3px rgba(10,132,255,.14);
+}
+/* 工具栏按钮不允许折行（「导入」「导出」等双字按钮） */
+.toolbar .btn { white-space: nowrap; flex: none; }
+.toolbar .checkbox { flex: none; }
+
+/* ================= 分组 / 标签 chips ================= */
+.provider-meta { display: flex; gap: 5px; margin-top: 4px; flex-wrap: wrap; }
+.chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  background: var(--card-2);
+  color: var(--text-2);
+  border: 1px solid var(--sep);
+}
+.chip.group {
+  background: rgba(10, 132, 255, .12);
+  color: var(--accent);
+  border-color: rgba(10, 132, 255, .25);
+  font-weight: 600;
+}
+.model-tag.muted { opacity: .55; }
+
+/* ================= 静默时段 ================= */
+.quiet-row { display: flex; align-items: center; gap: 8px; }
+.quiet-row input[type="time"] {
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--sep);
+  background: var(--card);
+  color: var(--text);
+  font-size: 13px;
+}
+.quiet-sep { color: var(--text-3); }
+.field-hint { font-size: 11px; color: var(--text-3); margin-top: 5px; line-height: 1.5; }
+.field-hint code {
+  background: var(--card-2);
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* ================= 统计视图 ================= */
+.stats-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+}
+.stat-card {
+  background: var(--card);
+  border-radius: var(--r-lg);
+  padding: 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-shadow: var(--shadow-1);
+}
+.stat-card .stat-ic { color: var(--accent); flex-shrink: 0; }
+.stat-card .stat-label { font-size: 12px; color: var(--text-2); }
+.stat-card .stat-value { font-size: 24px; font-weight: 700; margin-top: 2px; letter-spacing: -.3px; }
+
+.chart-wrap { width: 100%; min-height: 200px; }
+.ch-svg { width: 100%; height: 200px; display: block; }
+.ch-grid { stroke: var(--sep); stroke-width: 1; }
+.ch-lbl { fill: var(--text-3); font-size: 10px; }
+.ch-up polyline { stroke: var(--green); }
+.ch-lat polyline { stroke: var(--accent); stroke-dasharray: 3 3; }
+.chart-legend {
+  display: flex;
+  gap: 18px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.lg-dot {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.stats-table { width: 100%; }
+.st-row {
+  display: grid;
+  grid-template-columns: 2fr .7fr .9fr 1.2fr .9fr 1fr .8fr 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 11px 6px;
+  border-bottom: 1px solid var(--sep);
+  font-size: 13px;
+}
+.st-row:last-child { border-bottom: none; }
+.st-head {
+  font-size: 11px;
+  color: var(--text-2);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+}
+.st-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-mini { color: var(--text-2); font-size: 12px; }
+.st-uptime { font-weight: 700; font-variant-numeric: tabular-nums; }
+.st-uptime.u-up { color: var(--green); }
+.st-uptime.u-degraded { color: var(--orange); }
+.st-uptime.u-down { color: var(--red); }

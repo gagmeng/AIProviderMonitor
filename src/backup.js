@@ -163,7 +163,7 @@ function listAuto(dataDir) {
       .reverse()
       .map((f) => {
         const full = path.join(dir, f);
-        let meta = { count: 0, at: null };
+        const meta = { count: 0, at: null };
         try {
           const j = JSON.parse(fs.readFileSync(full, 'utf8'));
           meta.count = Array.isArray(j.providers) ? j.providers.length : 0;
