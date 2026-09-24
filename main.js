@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain, Menu, Tray, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const pkg = require('./package.json');
 const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL } = require('./src/store');
 const logger = require('./src/logger');
 const { Scheduler } = require('./src/scheduler');
@@ -64,8 +65,8 @@ function applyResult(provider, result, reason) {
   provider.lastError = result.error || null;
 
   // 变动判定：状态 + 可用模型集合。
-  // 注意：不再把 modelsTotal 纳入指纹——超出探测上限的模型属于「未探测」，
-  // 上游列表顺序抖动会让每轮探测到的子集不同，把总数计入会造成误报。
+  // 注意：不把 modelsTotal/未探测数量纳入指纹；detector 会先稳定排序再截取探测子集，
+  // 避免上游列表顺序抖动造成误报。
   const prevKey = prev ? `${prev.status}|${[...prev.modelsAvailable].sort().join(',')}` : null;
   const nextKey = `${result.status}|${[...(result.modelsAvailable || [])].sort().join(',')}`;
   // 首次检测（此前从未成功检测过）：仅建立基准，不算变动、不推送
@@ -372,7 +373,14 @@ ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
     // 停用后旧状态不再代表现实：回到待检测，避免列表里显示成"在线"
     p.status = 'unknown';
     p.latency = null;
+    p.modelsTotal = 0;
+    p.modelsAvailable = [];
+    p.modelsUnavailable = [];
+    p.modelsUnprobed = [];
+    p.modelDetails = [];
+    p.checkedAt = null;
     p.lastError = null;
+    p.consecutiveFail = 0;
     alerts.resetState(p.id);
   }
   persist();
@@ -405,7 +413,7 @@ ipcMain.handle('notify:test', async (e, channel) => {
 
 ipcMain.handle('open:path', (e, p) => { shell.openPath(p); return { ok: true }; });
 
-ipcMain.handle('app:version', () => app.getVersion());
+ipcMain.handle('app:version', () => pkg.version || app.getVersion());
 
 // ---------- 历史统计 ----------
 ipcMain.handle('history:summary', (e, { hours, providerId } = {}) => {
@@ -638,7 +646,10 @@ function createWindow() {
   ]));
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  win.once('ready-to-show', () => { win.show(); });
+  win.once('ready-to-show', () => {
+    if (db.global.launchMinimized) win.hide();
+    else win.show();
+  });
   win.on('close', (ev) => {
     if (quitting) return;
     // closeAction = 'tray'（默认）：隐藏到托盘继续监控；'exit'：直接退出

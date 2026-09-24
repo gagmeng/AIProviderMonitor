@@ -6,7 +6,7 @@ const logger = require('./logger');
 
 const DEFAULT_REQUEST_TIMEOUT = 20000;
 const DEFAULT_PROBE_TIMEOUT = 15000;
-const DEFAULT_PROBE_LIMIT = 8;
+const DEFAULT_PROBE_LIMIT = 20;
 const DEFAULT_RETRIES = 1;
 const RETRY_BACKOFF_MS = 800;
 
@@ -191,7 +191,8 @@ async function detect(provider, opts = {}) {
       { retries, tag, what: '连接' });
     result.latency = Date.now() - t0;
     const fmt = Array.isArray(payload) ? 'array' : (payload && payload.data ? 'openai' : (payload && payload.models ? 'ollama' : 'unknown'));
-    models = extractModelIds(payload);
+    // 上游模型列表顺序可能抖动，先稳定排序再截取 probeLimit，避免每轮探测子集变化造成误报。
+    models = extractModelIds(payload).sort((a, b) => String(a).localeCompare(String(b)));
     logger.info(`${tag} 连接成功（HTTP 200，${result.latency} ms，响应格式: ${fmt}）`);
     logger.info(`${tag} 获取模型列表：共 ${models.length} 个${models.length === 0 ? '（列表为空）' : ''}`);
     if (models.length > 0 && models.length <= 20) {

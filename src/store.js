@@ -8,8 +8,11 @@ const DATA_DIR = process.env.AIPM_DATA_DIR
     : path.join(process.env.APPDATA || path.join(require('os').homedir(), '.config'), 'ai-provider-monitor'));
 
 const DATA_FILE = path.join(DATA_DIR, 'providers.json');
+const CURRENT_CONFIG_VERSION = 2;
+const LEGACY_DEFAULT_PROBE_LIMIT = 8;
 
 const DEFAULT_GLOBAL = {
+  configVersion: CURRENT_CONFIG_VERSION,
   notifyWeixinEnabled: false,
   weixinWebhook: '',
   notifyQQEnabled: false,
@@ -45,7 +48,7 @@ const DEFAULT_GLOBAL = {
   alertQuietEnd: '07:00',
   alertOnModelChange: true,
   // --- 检测参数 ---
-  probeLimit: 8,
+  probeLimit: 20,
   requestTimeoutMs: 20000,
   probeTimeoutMs: 15000,
   retries: 1,
@@ -67,6 +70,20 @@ const DEFAULT_GLOBAL = {
   closeAction: 'tray'   // 'tray'：点关闭隐藏到托盘；'exit'：点关闭直接退出
 };
 
+function normalizeGlobal(rawGlobal = {}) {
+  const source = rawGlobal && typeof rawGlobal === 'object' ? rawGlobal : {};
+  const g = Object.assign({}, DEFAULT_GLOBAL, source);
+
+  // 旧版本的全局默认探测上限是 8。升级到当前配置版本时，
+  // 将未迁移配置里的旧默认值自动提升为新的默认值 20。
+  const sourceVersion = Number(source.configVersion || 0);
+  if (sourceVersion < CURRENT_CONFIG_VERSION && Number(source.probeLimit) === LEGACY_DEFAULT_PROBE_LIMIT) {
+    g.probeLimit = DEFAULT_GLOBAL.probeLimit;
+  }
+  g.configVersion = CURRENT_CONFIG_VERSION;
+  return g;
+}
+
 function ensureDir() {
   try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { /* ignore */ }
 }
@@ -75,11 +92,11 @@ function loadAll() {
   ensureDir();
   try {
     const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    const g = Object.assign({}, DEFAULT_GLOBAL, raw.global || {});
+    const g = normalizeGlobal(raw.global);
     const list = Array.isArray(raw.providers) ? raw.providers : [];
     return { global: g, providers: list };
   } catch (e) {
-    return { global: { ...DEFAULT_GLOBAL }, providers: [] };
+    return { global: normalizeGlobal(), providers: [] };
   }
 }
 

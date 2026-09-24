@@ -59,7 +59,7 @@
 | 🟠 异常 degraded | 连接成功但所有模型不可用 | 服务在但模型全挂 |
 | 🔴 离线 down | 连接失败（网络/超时/DNS） | 服务不可达 |
 
-- 每轮探测数量默认上限 8 个，超出部分标记为「未探测」，避免大模型列表拖慢周期
+- 每轮探测数量默认上限 20 个，超出部分标记为「未探测」，避免大模型列表拖慢周期
 
 ### 3. 变动通知
 
@@ -186,7 +186,7 @@ detect(provider)
   │    ├─ 失败 → status=down, error="连接失败: ..."
   │    └─ 成功 → 提取模型列表（OpenAI/Ollama/数组格式自适应）
   │
-  └─ 对前 probeLimit(=8) 个模型并行 POST /v1/chat/completions
+  └─ 对稳定排序后的前 probeLimit(=20) 个模型并行 POST /v1/chat/completions
        body: { model, messages:[{role:"user",content:"ping"}], max_tokens:1 }
        ├─ 2xx                    → 可用
        ├─ 400 / 413 / 422        → 可用（请求已路由到模型，仅参数被拒）
@@ -195,7 +195,7 @@ detect(provider)
        ├─ 429                    → 不可用「请求速率受限」
        ├─ 5xx                    → 不可用「服务端错误」
        ├─ 超时                    → 不可用「探测请求超时」
-       └─ 超出上限                → 不可用「未探测」
+       └─ 超出上限                → 未探测（不计入不可用）
 ```
 
 ### 变动判定与通知触发（main.js）
@@ -274,13 +274,13 @@ applyResult(provider, result):
 
 ### 方式一：安装版（推荐）
 
-1. 运行 `dist/AIProviderMonitor-1.1.0.exe`
+1. 运行 `dist/AIProviderMonitor-1.1.1.exe`
 2. 按向导选择安装目录（默认安装到用户目录）
 3. 完成后从桌面 / 开始菜单启动「AI Provider Monitor」
 
 ### 方式二：便携版
 
-直接运行 `dist/AIProviderMonitor-Portable-1.1.0.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
+直接运行 `dist/AIProviderMonitor-Portable-1.1.1.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
 
 ### 方式三：开发模式
 
@@ -425,8 +425,8 @@ AIProviderMonitor/
 │   ├── icon.ico             # 多尺寸应用图标
 │   └── icon.png             # 256×256 PNG
 └── dist/                    # 打包产物
-    ├── AIProviderMonitor-1.1.0.exe          # NSIS 安装包
-    └── AIProviderMonitor-Portable-1.1.0.exe # 便携版
+    ├── AIProviderMonitor-1.1.1.exe          # NSIS 安装包
+    └── AIProviderMonitor-Portable-1.1.1.exe # 便携版
 ```
 
 ## 数据文件格式

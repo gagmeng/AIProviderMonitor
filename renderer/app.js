@@ -491,7 +491,7 @@ function renderNotify() {
   $('#cwTemplate').value = g.customTemplate || '';
   $('#cwHeaders').value = g.customHeaders || '';
   // 检测参数
-  $('#probeLimit').value = g.probeLimit || 8;
+  $('#probeLimit').value = g.probeLimit || 20;
   $('#requestTimeoutMs').value = g.requestTimeoutMs || 20000;
   $('#probeTimeoutMs').value = g.probeTimeoutMs || 15000;
   $('#retries').value = g.retries == null ? 1 : g.retries;
@@ -552,7 +552,7 @@ function saveNotify() {
       customWebhook: $('#cwWebhook').value.trim(),
       customTemplate: $('#cwTemplate').value.trim(),
       customHeaders: $('#cwHeaders').value.trim(),
-      probeLimit: int('#probeLimit', 8, 1, 100),
+      probeLimit: int('#probeLimit', 20, 1, 100),
       requestTimeoutMs: int('#requestTimeoutMs', 20000, 1000, 120000),
       probeTimeoutMs: int('#probeTimeoutMs', 15000, 1000, 120000),
       retries: int('#retries', 1, 0, 5),
