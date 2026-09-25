@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
+const { normalizeProvider, mergeProvider, normalizeUrlKey } = require('./providerSchema');
 
 /**
  * 备份/还原模块
@@ -60,28 +61,23 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
 
   if (mode === 'overwrite') {
     if (backup.global) Object.assign(data.global, backup.global);
-    data.providers = backup.providers.map(sanitize);
+    data.providers = backup.providers.map(normalizeProvider);
     logger.info(`[还原] 覆盖还原完成：${data.providers.length} 个服务商`);
     return { mode, providers: data.providers.length, added: data.providers.length, updated: 0, skipped: 0 };
   }
 
   // merge
   let added = 0, updated = 0, skipped = 0;
-  const urlIndex = new Map(data.providers.map((p) => [normalizeUrl(p.url), p]));
+  const urlIndex = new Map(data.providers.map((p) => [normalizeUrlKey(p.url), p]));
   for (const raw of backup.providers) {
-    const p = sanitize(raw);
+    const p = normalizeProvider(raw);
     if (!p.name && !p.url) { skipped++; continue; }
-    const key = normalizeUrl(p.url) || `id:${p.id}`;
+    const key = normalizeUrlKey(p.url) || `id:${p.id}`;
     const exist = urlIndex.get(key);
     if (exist) {
-      // 仅覆盖检测字段之外的用户配置
-      exist.name = p.name || exist.name;
-      exist.url = p.url || exist.url;
-      if (p.apiKey) exist.apiKey = p.apiKey;
-      exist.intervalSec = p.intervalSec || exist.intervalSec;
-      exist.notifyOnModelChange = p.notifyOnModelChange;
-      exist.note = p.note ?? exist.note;
-      updated++;
+      // 仅覆盖用户配置（运行态不动）；内容一致记为跳过
+      if (mergeProvider(exist, p)) updated++;
+      else skipped++;
     } else {
       data.providers.push(p);
       urlIndex.set(key, p);
@@ -92,31 +88,7 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
   return { mode, providers: data.providers.length, added, updated, skipped };
 }
 
-function normalizeUrl(u) {
-  return String(u || '').trim().replace(/\/+$/, '').toLowerCase();
-}
-
-/** 补全/修正还原条目的必要字段 */
-function sanitize(p) {
-  return {
-    id: Number(p.id) || Date.now() + Math.floor(Math.random() * 1000),
-    name: String(p.name || '').trim(),
-    url: String(p.url || '').trim().replace(/\/+$/, ''),
-    apiKey: String(p.apiKey || ''),
-    intervalSec: Math.max(5, Number(p.intervalSec) || 60),
-    notifyOnModelChange: Boolean(p.notifyOnModelChange),
-    note: String(p.note || ''),
-    enabled: p.enabled !== false,
-    status: 'unknown',
-    modelsTotal: 0,
-    modelsAvailable: [],
-    modelsUnavailable: [],
-    modelDetails: [],
-    checkedAt: null,
-    lastError: null,
-    modelChanged: false
-  };
-}
+// 条目归一/合并已收敛到 providerSchema（与导入导出共用同一实现）
 
 // ---------- 自动备份（滚动保留 N 份） ----------
 

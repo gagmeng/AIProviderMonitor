@@ -3,6 +3,23 @@ const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
 const { URL } = require('url');
+
+/** 懒加载 https-proxy-agent（可选依赖，缺失时退化为直连） */
+function getProxyAgent(proxyUrl) {
+  if (!proxyUrl) return null;
+  try {
+    const mod = require('https-proxy-agent');
+    const AgentCtor = mod.HttpsProxyAgent || mod;
+    if (typeof AgentCtor !== 'function') return null;
+    return new AgentCtor(proxyUrl);
+  } catch (e) { return null; }
+}
+
+/** 通知代理解析：服务商独立代理 > 全局代理；服务商可关闭 */
+function resolveNotifyProxy(provider, g = {}) {
+  if (provider && provider.useProxy === false) return '';
+  return (provider && provider.proxyUrl) || g.proxyUrl || '';
+}
 const logger = require('./logger');
 
 /**
@@ -19,7 +36,7 @@ const CHANNEL_LABEL = {
   feishu: '飞书', slack: 'Slack', serverchan: 'Server酱', custom: '自定义Webhook'
 };
 
-function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders = {}, raw = false } = {}) {
+function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders = {}, raw = false, proxy = '', insecureSkipVerify = false, _redirects = 0 } = {}) {
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(url); } catch (e) { return reject(new Error('Webhook URL 无效')); }
@@ -30,7 +47,21 @@ function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders
       extraHeaders
     );
     if (token) headers.Authorization = `Bearer ${token}`;
-    const req = mod.request(u, { method: 'POST', headers, timeout }, (res) => {
+    const reqOpts = { method: 'POST', headers, timeout };
+    if (mod === https && insecureSkipVerify) reqOpts.rejectUnauthorized = false;
+    const agent = getProxyAgent(proxy);
+    if (agent) reqOpts.agent = agent;
+    const req = mod.request(u, reqOpts, (res) => {
+      // 重定向跟随（≤3 跳；303 转 GET 对 webhook 无意义，直接报错提示检查地址）
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && _redirects < 3) {
+        res.resume();
+        if (res.statusCode === 303) { reject(new Error('通道重定向到 GET（HTTP 303），请检查 Webhook 地址')); return; }
+        let next;
+        try { next = new URL(res.headers.location, u).toString(); }
+        catch (e) { reject(new Error(`重定向地址无效: ${res.headers.location}`)); return; }
+        resolve(post(next, payload, { timeout, token, headers: extraHeaders, raw, proxy, insecureSkipVerify, _redirects: _redirects + 1 }));
+        return;
+      }
       let data = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { data += c; });
@@ -46,15 +77,49 @@ function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders
   });
 }
 
+/** 可重试判定：网络层错误/超时，或 HTTP 429/5xx */
+function isPostRetryable(e) {
+  const m = /^HTTP (\d{3})\b/.exec(String((e && e.message) || e || ''));
+  if (!m) return true;
+  const s = Number(m[1]);
+  return s === 429 || s >= 500;
+}
+
+/** 带 1 次重试的 POST（各通道统一入口）：失败 800ms 后重试一次 */
+async function postRetry(url, payload, opts = {}) {
+  try {
+    return await post(url, payload, opts);
+  } catch (e) {
+    if (!isPostRetryable(e)) throw e;
+    await new Promise((r) => setTimeout(r, 800));
+    return post(url, payload, opts);
+  }
+}
+
+/** 组装通道请求选项：服务商独立代理 > 全局代理；TLS 跳过跟随全局 */
+function sendOpts(globalCfg = {}, ctx = {}) {
+  return { proxy: resolveNotifyProxy(ctx.provider, globalCfg), insecureSkipVerify: Boolean(globalCfg.insecureSkipVerify) };
+}
+
+/** 各通道连续失败计数（自监控用；成功清零，达 3 次记 error 日志预警） */
+const notifyFailStreak = {};
+function noteResult(channel, ok) {
+  if (ok) { notifyFailStreak[channel] = 0; return; }
+  const n = (notifyFailStreak[channel] || 0) + 1;
+  notifyFailStreak[channel] = n;
+  if (n === 3) logger.error(`[自检] 通知通道「${CHANNEL_LABEL[channel] || channel}」连续失败 ${n} 次，请检查配置与网络`);
+}
+function getNotifyHealth() { return { ...notifyFailStreak }; }
+
 function fmtProvider(p) {
   return `${p.name || 'Provider#' + p.id}`;
 }
 
 function statusText(s) {
-  return { up: '在线', degraded: '异常', down: '离线', unknown: '待检测' }[s] || String(s || '未知');
+  return { up: '在线', degraded: '异常', down: '离线', authfail: '鉴权失败', unknown: '待检测' }[s] || String(s || '未知');
 }
 
-function buildModelChangeText(provider, prev, next) {
+function buildModelChangeText(provider, prev, next, extra = {}) {
   const lines = [];
   lines.push('【AI Provider 模型变动】');
   lines.push(`服务商：${fmtProvider(provider)}`);
@@ -65,8 +130,9 @@ function buildModelChangeText(provider, prev, next) {
   lines.push(parts.join('　'));
   const prevSet = new Set((prev?.modelsAvailable) || []);
   const nextSet = new Set(next.modelsAvailable || []);
-  const added = next.modelsAvailable.filter((m) => !prevSet.has(m));
-  const removed = (prev?.modelsAvailable || []).filter((m) => !nextSet.has(m));
+  // 主进程在轮询覆盖下给出精确增减（extra.added/extra.lost），缺省时回退为 prev/next 差集
+  const added = extra.added || next.modelsAvailable.filter((m) => !prevSet.has(m));
+  const removed = extra.lost || (prev?.modelsAvailable || []).filter((m) => !nextSet.has(m));
   if (added.length) lines.push(`新增可用：${added.join(', ')}`);
   if (removed.length) lines.push(`失去可用：${removed.join(', ')}`);
   if (totalChanged && !added.length && !removed.length) lines.push(`模型清单发生变化（总数 ${prev.modelsTotal} → ${next.modelsTotal}）`);
@@ -78,7 +144,8 @@ function buildModelChangeText(provider, prev, next) {
 /** 故障/恢复类告警文案 */
 function buildAlertText(provider, alert) {
   const lines = [];
-  const head = alert.kind === 'recover' ? '【AI Provider 服务恢复】' : '【AI Provider 服务异常】';
+  const head = alert.kind === 'recover' ? '【AI Provider 服务恢复】'
+    : alert.kind === 'authfail' ? '【AI Provider 密钥失效】' : '【AI Provider 服务异常】';
   lines.push(head);
   lines.push(`服务商：${fmtProvider(provider)}`);
   lines.push(`地址：${provider.url || '—'}`);
@@ -91,13 +158,13 @@ function buildAlertText(provider, alert) {
 
 // ---------- 各通道实现 ----------
 
-async function sendWeixin(globalCfg, text) {
+async function sendWeixin(globalCfg, text, ctx = {}) {
   if (!globalCfg.weixinWebhook) throw new Error('未配置微信 Webhook');
-  return post(globalCfg.weixinWebhook, { msgtype: 'text', text: { content: text } });
+  return postRetry(globalCfg.weixinWebhook, { msgtype: 'text', text: { content: text } }, sendOpts(globalCfg, ctx));
 }
 
 /** 钉钉群机器人：webhook + 可选加签（secret 时在 URL 上附 timestamp & sign） */
-async function sendDingtalk(globalCfg, text) {
+async function sendDingtalk(globalCfg, text, ctx = {}) {
   let url = String(globalCfg.dingtalkWebhook || '').trim();
   if (!url) throw new Error('未配置钉钉 Webhook');
   const secret = String(globalCfg.dingtalkSecret || '').trim();
@@ -107,7 +174,7 @@ async function sendDingtalk(globalCfg, text) {
     const sep = url.includes('?') ? '&' : '?';
     url = `${url}${sep}timestamp=${ts}&sign=${encodeURIComponent(sign)}`;
   }
-  const res = await post(url, { msgtype: 'text', text: { content: text } });
+  const res = await postRetry(url, { msgtype: 'text', text: { content: text } }, sendOpts(globalCfg, ctx));
   try {
     const j = JSON.parse(res);
     if (j.errcode !== undefined && Number(j.errcode) !== 0) {
@@ -121,7 +188,7 @@ async function sendDingtalk(globalCfg, text) {
 }
 
 /** QQ 上报：调用 OneBot v11 HTTP API（/send_private_msg 或 /send_group_msg） */
-async function sendQQ(globalCfg, text) {
+async function sendQQ(globalCfg, text, ctx = {}) {
   const base = String(globalCfg.qqWebhook || '').trim().replace(/\/+$/, '');
   if (!base) throw new Error('未配置 QQ 机器人服务地址');
   const target = String(globalCfg.qqTarget || '').trim();
@@ -130,7 +197,7 @@ async function sendQQ(globalCfg, text) {
   const isGroup = globalCfg.qqTargetType === 'group';
   const path = isGroup ? '/send_group_msg' : '/send_private_msg';
   const payload = isGroup ? { group_id: target, message: text } : { user_id: target, message: text };
-  const res = await post(base + path, payload, { token });
+  const res = await postRetry(base + path, payload, { token, ...sendOpts(globalCfg, ctx) });
   try {
     const j = JSON.parse(res);
     if (typeof j.retcode === 'number' && j.retcode !== 0) {
@@ -144,17 +211,17 @@ async function sendQQ(globalCfg, text) {
 }
 
 /** Telegram Bot：sendMessage API */
-async function sendTelegram(globalCfg, text) {
+async function sendTelegram(globalCfg, text, ctx = {}) {
   const token = String(globalCfg.telegramToken || '').trim();
   const chatId = String(globalCfg.telegramChatId || '').trim();
   if (!token) throw new Error('未配置 Telegram Bot Token');
   if (!chatId) throw new Error('未配置 Telegram Chat ID');
   const apiBase = String(globalCfg.telegramApiBase || 'https://api.telegram.org').trim().replace(/\/+$/, '');
-  const res = await post(`${apiBase}/bot${token}/sendMessage`, {
+  const res = await postRetry(`${apiBase}/bot${token}/sendMessage`, {
     chat_id: chatId,
     text,
     disable_web_page_preview: true
-  });
+  }, sendOpts(globalCfg, ctx));
   try {
     const j = JSON.parse(res);
     if (j.ok === false) throw new Error(`Telegram 返回错误: ${j.description || 'unknown'}`);
@@ -166,7 +233,7 @@ async function sendTelegram(globalCfg, text) {
 }
 
 /** 飞书自定义机器人：支持加签（sign = HMAC-SHA256(timestamp\nsecret) 的 base64，密钥为空串） */
-async function sendFeishu(globalCfg, text) {
+async function sendFeishu(globalCfg, text, ctx = {}) {
   const url = String(globalCfg.feishuWebhook || '').trim();
   if (!url) throw new Error('未配置飞书 Webhook');
   const secret = String(globalCfg.feishuSecret || '').trim();
@@ -177,7 +244,7 @@ async function sendFeishu(globalCfg, text) {
     payload.timestamp = String(ts);
     payload.sign = sign;
   }
-  const res = await post(url, payload);
+  const res = await postRetry(url, payload, sendOpts(globalCfg, ctx));
   try {
     const j = JSON.parse(res);
     if (j.code !== undefined && Number(j.code) !== 0) {
@@ -191,14 +258,14 @@ async function sendFeishu(globalCfg, text) {
 }
 
 /** Slack Incoming Webhook */
-async function sendSlack(globalCfg, text) {
+async function sendSlack(globalCfg, text, ctx = {}) {
   const url = String(globalCfg.slackWebhook || '').trim();
   if (!url) throw new Error('未配置 Slack Webhook');
-  return post(url, { text });
+  return postRetry(url, { text }, sendOpts(globalCfg, ctx));
 }
 
 /** Server 酱（sct / ft）：兼容 sctapi.ftqq.com 与 sc.ftqq.com */
-async function sendServerChan(globalCfg, text) {
+async function sendServerChan(globalCfg, text, ctx = {}) {
   const key = String(globalCfg.serverchanKey || '').trim();
   if (!key) throw new Error('未配置 Server 酱 SendKey');
   const lines = text.split('\n');
@@ -208,7 +275,7 @@ async function sendServerChan(globalCfg, text) {
     ? `https://sctapi.ftqq.com/${key}.send`
     : `https://sc.ftqq.com/${key}.send`;
   const form = `title=${encodeURIComponent(title)}&desp=${encodeURIComponent(desp)}`;
-  return post(url, form, { raw: true, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+  return postRetry(url, form, { raw: true, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, ...sendOpts(globalCfg, ctx) });
 }
 
 /**
@@ -242,7 +309,7 @@ async function sendCustom(globalCfg, text, ctx = {}) {
       if (h && typeof h === 'object') Object.assign(headers, h);
     } catch (e) { throw new Error('自定义请求头不是合法 JSON'); }
   }
-  return post(url, body, { raw: true, headers });
+  return postRetry(url, body, { raw: true, headers, ...sendOpts(globalCfg, ctx) });
 }
 
 const SENDERS = {
@@ -280,8 +347,8 @@ async function broadcast(globalCfg, text, ctx = {}) {
     const label = CHANNEL_LABEL[ch] || ch;
     jobs.push(
       SENDERS[ch](globalCfg, text, ctx)
-        .then(() => logger.info(`[通知] ${label}推送成功${ctx.name ? ': ' + ctx.name : ''}`))
-        .catch((e) => logger.error(`[通知] ${label}推送失败: ${e.message}`))
+        .then(() => { noteResult(ch, true); logger.info(`[通知] ${label}推送成功${ctx.name ? ': ' + ctx.name : ''}`); })
+        .catch((e) => { noteResult(ch, false); logger.error(`[通知] ${label}推送失败: ${e.message}`); })
     );
   }
   if (!jobs.length) logger.debug('[通知] 无已启用的通知通道，跳过推送');
@@ -290,15 +357,15 @@ async function broadcast(globalCfg, text, ctx = {}) {
 }
 
 /** 模型变化时推送（兼容旧签名） */
-async function notifyModelChange(globalCfg, provider, prev, next) {
-  const text = buildModelChangeText(provider, prev, next);
-  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url });
+async function notifyModelChange(globalCfg, provider, prev, next, extra = {}) {
+  const text = buildModelChangeText(provider, prev, next, extra);
+  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider });
 }
 
 /** 故障/恢复告警推送 */
 async function notifyAlert(globalCfg, provider, alert) {
   const text = buildAlertText(provider, alert);
-  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url });
+  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider });
 }
 
 async function sendTest(globalCfg, channel) {
@@ -312,5 +379,5 @@ module.exports = {
   notifyModelChange, notifyAlert, sendTest, broadcast,
   buildModelChangeText, buildAlertText, channelEnabled,
   sendQQ, sendWeixin, sendDingtalk, sendTelegram, sendFeishu, sendSlack, sendServerChan, sendCustom,
-  CHANNELS, CHANNEL_LABEL
+  CHANNELS, CHANNEL_LABEL, getNotifyHealth, resolveNotifyProxy
 };

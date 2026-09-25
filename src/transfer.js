@@ -1,12 +1,13 @@
 'use strict';
 const logger = require('./logger');
+const { normalizeProvider, mergeProvider, normalizeUrlKey } = require('./providerSchema');
 
 /**
  * 服务商批量导入/导出模块
  *
  * 支持三种格式：
  * - json : 备份式结构（providers 数组，字段完整），导入可直接还原 apiKey 等全部字段
- * - csv  : 表头行 + 数据行，逗号分隔（RFC 4180 基本转义），字段：name,url,apiKey,intervalSec,notifyOnModelChange,note
+ * - csv  : 表头行 + 数据行，逗号分隔（RFC 4180 基本转义 + 公式注入防护），字段：name,url,apiKey,intervalSec,notifyOnModelChange,note,group,tags,probeMode,probeLimit,proxyUrl,useProxy
  * - text : 纯文本行，分隔符可选（Tab / 逗号 / 竖线 / 分号），每行一个服务商：
  *          名称 <sep> URL <sep> APIKey <sep> 周期秒 <sep> 上报(1/0/true/false) <sep> 备注
  *          URL 与后续字段可省略（仅有名称时 URL 需在导入时补填或留空拒绝）
@@ -19,44 +20,32 @@ const TEXT_DELIMITERS = {
   semicolon: ';'
 };
 
-function sanitize(p) {
-  return {
-    id: Number(p.id) || Date.now() + Math.floor(Math.random() * 1000),
-    name: String(p.name || '').trim(),
-    url: String(p.url || '').trim().replace(/\/+$/, ''),
-    apiKey: String(p.apiKey || ''),
-    intervalSec: Math.max(5, Number(p.intervalSec) || 60),
-    notifyOnModelChange: p.notifyOnModelChange === true || p.notifyOnModelChange === 1 || /^(1|true|yes|是|y)$/i.test(String(p.notifyOnModelChange)),
-    note: String(p.note || ''),
-    enabled: p.enabled !== false,
-    status: 'unknown',
-    modelsTotal: 0,
-    modelsAvailable: [],
-    modelsUnavailable: [],
-    modelDetails: [],
-    checkedAt: null,
-    lastError: null,
-    modelChanged: false
-  };
-}
+// 条目归一/合并已收敛到 providerSchema（与备份还原共用同一实现）
 
 // ---------- 导出 ----------
 
 function toJSON(providers) {
   return JSON.stringify(providers.map((p) => ({
     name: p.name, url: p.url, apiKey: p.apiKey || '', intervalSec: p.intervalSec,
-    notifyOnModelChange: Boolean(p.notifyOnModelChange), note: p.note || ''
+    notifyOnModelChange: Boolean(p.notifyOnModelChange), note: p.note || '',
+    group: p.group || '', tags: p.tags || [], enabled: p.enabled !== false,
+    probeMode: p.probeMode || 'chat', probePath: p.probePath || '', probeBody: p.probeBody || '',
+    probeLimit: p.probeLimit ?? null, proxyUrl: p.proxyUrl || '', useProxy: p.useProxy !== false,
+    maintEnabled: Boolean(p.maintEnabled), maintStart: p.maintStart || '02:00', maintEnd: p.maintEnd || '04:00',
+    insecureSkipVerify: p.insecureSkipVerify === true ? true : p.insecureSkipVerify === false ? false : null
   })), null, 2);
 }
 
 function csvEscape(v) {
-  const s = String(v ?? '');
+  let s = String(v ?? '');
+  if (/^[=+\-@]/.test(s)) s = '\t' + s;   // 公式注入防护：Excel/Sheets 打开 CSV 时不执行公式
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function toCSV(providers) {
-  const head = ['name', 'url', 'apiKey', 'intervalSec', 'notifyOnModelChange', 'note'];
-  const rows = providers.map((p) => [p.name, p.url, p.apiKey || '', p.intervalSec, p.notifyOnModelChange ? 1 : 0, p.note || ''].map(csvEscape).join(','));
+  const head = ['name', 'url', 'apiKey', 'intervalSec', 'notifyOnModelChange', 'note', 'group', 'tags', 'probeMode', 'probeLimit', 'proxyUrl', 'useProxy'];
+  const rows = providers.map((p) => [p.name, p.url, p.apiKey || '', p.intervalSec, p.notifyOnModelChange ? 1 : 0, p.note || '',
+    p.group || '', (p.tags || []).join(';'), p.probeMode || '', p.probeLimit ?? '', p.proxyUrl || '', p.useProxy !== false ? 1 : 0].map(csvEscape).join(','));
   return [head.join(','), ...rows].join('\r\n');
 }
 
@@ -121,6 +110,12 @@ function fromCSV(text) {
   const iInt = idx(['intervalsec', 'interval', '周期', '轮循周期']);
   const iNotify = idx(['notifyonmodelchange', 'notify', '上报', '变动上报']);
   const iNote = idx(['note', '备注', '说明']);
+  const iGroup = idx(['group', '分组']);
+  const iTags = idx(['tags', '标签']);
+  const iProbeMode = idx(['probemode', 'probe_mode', '探测模式']);
+  const iProbeLimit = idx(['probelimit', '探测上限']);
+  const iProxyUrl = idx(['proxyurl', 'proxy', '代理']);
+  const iUseProxy = idx(['useproxy', '使用代理']);
   if (iName < 0) throw new Error('CSV 缺少 name/名称 列');
   return lines.slice(1).map((line) => {
     const cols = parseCSVLine(line);
@@ -131,6 +126,12 @@ function fromCSV(text) {
     if (iInt >= 0) item.intervalSec = Number(cols[iInt]) || 60;
     if (iNotify >= 0) item.notifyOnModelChange = boolVal(cols[iNotify]);
     if (iNote >= 0) item.note = cols[iNote];
+    if (iGroup >= 0) item.group = cols[iGroup] || '';
+    if (iTags >= 0) item.tags = String(cols[iTags] || '').split(';').map((s) => s.trim()).filter(Boolean);
+    if (iProbeMode >= 0 && cols[iProbeMode]) item.probeMode = cols[iProbeMode];
+    if (iProbeLimit >= 0 && cols[iProbeLimit] !== undefined && cols[iProbeLimit] !== '') item.probeLimit = Number(cols[iProbeLimit]) || null;
+    if (iProxyUrl >= 0) item.proxyUrl = cols[iProxyUrl] || '';
+    if (iUseProxy >= 0 && cols[iUseProxy] !== undefined && cols[iUseProxy] !== '') item.useProxy = boolVal(cols[iUseProxy]);
     return item;
   });
 }
@@ -176,10 +177,8 @@ function parseImport(text, opts = {}) {
     if (!name && !url) { errors.push({ line: lineNo, msg: '名称与 URL 均为空，已跳过' }); return; }
     if (!name) { errors.push({ line: lineNo, msg: '缺少名称，已跳过' }); return; }
     if (!url) { errors.push({ line: lineNo, msg: `「${name}」缺少 URL，已跳过` }); return; }
-    if (!/^https?:\/\//i.test(url) && !/^[\w.-]+:\d+/.test(url)) {
-      // 允许 host:port 简写，导入时补 http://
-    }
-    const item = sanitize({ ...r, name, url: /^https?:\/\//i.test(url) ? url : `http://${url}` });
+    // 允许 host:port 简写，导入时补 http://
+    const item = normalizeProvider({ ...r, name, url: /^https?:\/\//i.test(url) ? url : `http://${url}` });
     items.push(item);
   });
   logger.info(`[导入导出] 解析导入文本（${format}${format === 'text' ? '/' + (opts.delimiter || 'tab') : ''}）：${items.length} 条有效，${errors.length} 条问题`);
@@ -193,12 +192,12 @@ function parseImport(text, opts = {}) {
  */
 function applyImport(db, items, mode = 'merge') {
   let added = 0, updated = 0, skipped = 0;
-  const norm = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
+  const norm = normalizeUrlKey;
   if (mode === 'append') {
     for (const it of items) {
       // 无法识别的空 URL 不入库，计为跳过
       if (!norm(it.url)) { skipped++; continue; }
-      db.providers.push(sanitize({ ...it, id: undefined }));
+      db.providers.push(normalizeProvider({ ...it, id: undefined }));
       added++;
     }
   } else {
@@ -208,22 +207,11 @@ function applyImport(db, items, mode = 'merge') {
       if (!key) { skipped++; continue; }
       const exist = urlIndex.get(key);
       if (exist) {
-        const next = {
-          name: it.name || exist.name,
-          // 导入条目未带密钥时保留原密钥
-          apiKey: it.apiKey ? it.apiKey : exist.apiKey,
-          intervalSec: it.intervalSec || exist.intervalSec,
-          notifyOnModelChange: it.notifyOnModelChange,
-          note: it.note ?? exist.note,
-          // URL 存储格式归一（去尾部斜杠），与导入条目一致
-          url: key
-        };
         // 与现有记录逐字段一致 => 记为跳过，避免「更新数」虚高
-        if (!Object.keys(next).some((k) => exist[k] !== next[k])) { skipped++; continue; }
-        Object.assign(exist, next);
-        updated++;
+        if (mergeProvider(exist, it)) updated++;
+        else skipped++;
       } else {
-        const p = sanitize({ ...it, id: undefined });
+        const p = normalizeProvider({ ...it, id: undefined });
         db.providers.push(p);
         urlIndex.set(key, p);
         added++;

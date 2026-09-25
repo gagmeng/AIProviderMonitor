@@ -123,7 +123,7 @@ input, textarea { user-select: text; }
 .icon-btn .icon { width: 16px; height: 16px; }
 
 /* ---------- 统计卡 ---------- */
-.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+.stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 18px; }
 .stat-card {
   background: var(--card); border-radius: var(--r-lg); padding: 16px 18px;
   box-shadow: var(--shadow-1);
@@ -135,6 +135,37 @@ input, textarea { user-select: text; }
 .stat-ic.warn { background: rgba(255,159,10,.14); color: #c93400; }
 .stat-ic.bad { background: rgba(255,69,58,.12); color: var(--red); }
 .stat-ic.accent { background: rgba(10,132,255,.12); color: var(--accent); }
+/* ---------- v1.2.0 新增：鉴权失败紫 / 未读徽标 / 可用率徽标 / 设置文本输入 ---------- */
+.st-authfail { color: #af52de; }
+.status-dot.authfail { background: #af52de; }
+.stat-ic.lock { background: rgba(175,82,222,.12); color: #af52de; }
+html.dark .stat-ic.lock { background: rgba(175,82,222,.2); color: #c98cf0; }
+html.dark .st-authfail { color: #c98cf0; }
+.dm-banner.b-authfail { background: linear-gradient(135deg, rgba(175,82,222,.14), rgba(175,82,222,.05)); }
+.dm-banner.b-authfail .dm-banner-status { color: #af52de; }
+html.dark .dm-banner.b-authfail .dm-banner-status { color: #c98cf0; }
+.unread-chip {
+  display: inline-flex; align-items: center;
+  font-size: 12px; font-weight: 700; color: #fff;
+  background: var(--red); border: none; border-radius: 999px;
+  padding: 5px 12px; margin-left: 8px; cursor: pointer;
+}
+.unread-chip:hover { filter: brightness(1.08); }
+.rate-pill {
+  font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
+  background: rgba(48,209,88,.16); color: #248a3d;
+  padding: 1px 7px; border-radius: 9px; margin-left: 6px; white-space: nowrap;
+}
+.rate-pill.mid { background: rgba(255,159,10,.18); color: #c93400; }
+.rate-pill.low { background: rgba(255,69,58,.14); color: var(--red); }
+.text-input {
+  width: 220px; flex: none;
+  padding: 8px 12px; border: 1.5px solid transparent; border-radius: 10px;
+  background: var(--card-2); font-size: 13px;
+}
+.text-input:focus { border-color: var(--accent); background: #fff; outline: none; }
+html.dark .text-input:focus { background: var(--card-2); }
+input[type="time"].text-input { font-variant-numeric: tabular-nums; }
 .stat-label { font-size: 12.5px; color: var(--text-2); font-weight: 500; }
 .stat-num { font-size: 30px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
 

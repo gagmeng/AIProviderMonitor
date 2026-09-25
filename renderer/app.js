@@ -8,6 +8,11 @@ const selected = new Set();
 let editingId = null;
 let view = 'dashboard';
 
+// ---------- 界面语言（v1.2.0：中文原文作 key，zh 直接返回原文） ----------
+const lang = () => (state.global && state.global.lang) || 'zh';
+const tx = (key, vars) => (window.aipmi18n ? window.aipmi18n.t(lang(), key, vars) : key);
+const applyLang = () => { if (window.aipmi18n) window.aipmi18n.applyI18n(lang()); };
+
 // ---------- 初始化静态图标 ----------
 function initStaticIcons() {
   $('#brandMark').innerHTML = icon('activity');
@@ -49,7 +54,7 @@ function confirmDialog(title, text, cb, opts = {}) {
   $('#cfText').textContent = text;
   $('#cfIcon').innerHTML = icon(opts.danger === false ? 'info' : 'trash');
   const okBtn = $('#cfOk');
-  okBtn.textContent = opts.okText || '确定';
+  okBtn.textContent = opts.okText || tx('确定');
   okBtn.classList.toggle('danger', opts.danger !== false);
   okBtn.classList.toggle('solid', opts.danger !== false);
   okBtn.classList.toggle('primary', opts.danger === false);
@@ -76,10 +81,11 @@ $$('.nav-item').forEach((btn) => {
 
 // ---------- 状态渲染 ----------
 function statusInfo(s) {
-  if (s === 'up') return { cls: 'up', text: '在线' };
-  if (s === 'degraded') return { cls: 'degraded', text: '异常' };
-  if (s === 'down') return { cls: 'down', text: '离线' };
-  return { cls: 'unknown', text: '待检测' };
+  if (s === 'up') return { cls: 'up', text: tx('在线') };
+  if (s === 'degraded') return { cls: 'degraded', text: tx('异常') };
+  if (s === 'down') return { cls: 'down', text: tx('离线') };
+  if (s === 'authfail') return { cls: 'authfail', text: tx('鉴权失败') };
+  return { cls: 'unknown', text: tx('待检测') };
 }
 function fmtTime(ts) {
   if (!ts) return '—';
@@ -105,6 +111,7 @@ function render() {
   if (view === 'providers') renderProviders();
   if (view === 'stats') renderStats();
   $('#footRunning').textContent = state.running.length;
+  applyLang();
 }
 
 /** 主题：system 跟随系统偏好，light/dark 强制 */
@@ -125,28 +132,43 @@ function renderNav() {
   $('#navProviderCount').textContent = state.providers.length;
 }
 
+// 最近检测圆点色（authfail 无对应 CSS 变量，用紫色字面量）
+const actDotColor = (cls) => cls === 'up' ? 'var(--green)'
+  : cls === 'degraded' ? 'var(--orange)' : cls === 'down' ? 'var(--red)'
+  : cls === 'authfail' ? '#af52de' : 'var(--gray)';
+
 function renderDashboard() {
   const up = state.providers.filter((p) => p.status === 'up').length;
   const deg = state.providers.filter((p) => p.status === 'degraded').length;
   const down = state.providers.filter((p) => p.status === 'down').length;
+  const auth = state.providers.filter((p) => p.status === 'authfail').length;
   const models = state.providers.reduce((a, p) => a + (p.modelsAvailable || []).length, 0);
   $('#statUp').textContent = up;
   $('#statDegraded').textContent = deg;
   $('#statDown').textContent = down;
+  $('#statAuthfail').textContent = auth;
   $('#statModels').textContent = models;
+  // 未读告警徽标
+  const unreadN = (state.unread && state.unread.count) || 0;
+  const chip = $('#unreadChip');
+  if (chip) {
+    chip.style.display = unreadN > 0 ? '' : 'none';
+    chip.textContent = unreadN > 0 ? `${tx('未读')} ${unreadN}` : '';
+    chip.title = tx('点击清零');
+  }
 
   const recent = [...state.providers].filter((p) => p.checkedAt).sort((a, b) => b.checkedAt - a.checkedAt).slice(0, 8);
   const wrap = $('#recentList');
   if (recent.length === 0) {
-    wrap.innerHTML = '<div class="empty">暂无检测记录，点击右上角"检测全部"开始</div>';
+    wrap.innerHTML = `<div class="empty">${tx('暂无检测记录，点击右上角"检测全部"开始')}</div>`;
   } else {
     wrap.innerHTML = recent.map((p) => {
       const si = statusInfo(p.status);
-      return `<div class="act-item" data-act="${p.id}" title="双击查看详情">
-        <span class="act-dot" style="background: var(--${si.cls === 'up' ? 'green' : si.cls === 'degraded' ? 'orange' : si.cls === 'down' ? 'red' : 'gray'});"></span>
+      return `<div class="act-item" data-act="${p.id}" title="${tx('双击查看详情')}">
+        <span class="act-dot" style="background: ${actDotColor(si.cls)};"></span>
         <div>
           <div class="act-name">${escapeHtml(p.name)}</div>
-          <div class="act-sub">${p.modelsAvailable.length}/${p.modelsTotal} 模型可用${p.lastError ? ' · ' + escapeHtml(p.lastError) : ''}</div>
+          <div class="act-sub">${p.modelsAvailable.length}/${p.modelsTotal} ${tx('模型可用')}${p.lastError ? ' · ' + escapeHtml(p.lastError) : ''}</div>
         </div>
         <div class="act-right">
           <div class="act-status st-${si.cls}">${si.text}</div>
@@ -156,13 +178,21 @@ function renderDashboard() {
     }).join('');
   }
   const latest = recent[0];
-  $('#dashUpdated').textContent = latest ? `最近活动 ${fmtTime(latest.checkedAt)}` : '';
+  $('#dashUpdated').textContent = latest ? `${tx('最近活动')} ${fmtTime(latest.checkedAt)}` : '';
 }
 
 // 仪表盘最近检测条目：双击打开详情
 $('#recentList').addEventListener('dblclick', (e) => {
   const item = e.target.closest('[data-act]');
   if (item) openDetail(Number(item.dataset.act));
+});
+
+// 未读徽标：点击清零
+$('#unreadChip').addEventListener('click', async () => {
+  try { await window.aipm.clearUnread(); } catch (e) { /* 后端不可用时仅隐藏 */ }
+  if (state.unread) state.unread.count = 0;
+  $('#unreadChip').style.display = 'none';
+  toast(tx('已清零'));
 });
 
 function filteredProviders() {
@@ -201,7 +231,7 @@ function renderProviders() {
   const wrap = $('#providerList');
 
   if (list.length === 0) {
-    wrap.innerHTML = `<div class="empty">${state.providers.length === 0 ? '暂无服务商，点击"新增服务商"开始添加' : '没有匹配的结果'}</div>`;
+    wrap.innerHTML = `<div class="empty">${state.providers.length === 0 ? tx('暂无服务商，点击"新增服务商"开始添加') : tx('没有匹配的结果')}</div>`;
   } else {
     wrap.innerHTML = list.map((p) => {
       const si = statusInfo(p.status);
@@ -210,27 +240,27 @@ function renderProviders() {
       const avail = (p.modelsAvailable || []).length;
       const pct = total > 0 ? Math.round((avail / total) * 100) : 0;
       const cycleMin = fmtDuration(p.intervalSec);
-      const checked = p.checkedAt ? fmtTime(p.checkedAt) : '未检测';
+      const checked = p.checkedAt ? fmtTime(p.checkedAt) : tx('未检测');
       return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''}" data-id="${p.id}">
         <div class="col-sel"><label class="checkbox"><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
         <div class="col-name"><div class="provider-cell">
           <div class="provider-name">
             <span class="name-text" data-detail="${p.id}">${escapeHtml(p.name)}</span>
-            ${p.modelChanged ? '<span class="changed-badge">变动</span>' : ''}
+            ${p.modelChanged ? `<span class="changed-badge">${tx('变动')}</span>` : ''}
           </div>
           <div class="provider-url">${escapeHtml(p.url)}</div>
           ${(p.group || (p.tags && p.tags.length)) ? `<div class="provider-meta">${p.group ? `<span class="chip group">${escapeHtml(p.group)}</span>` : ''}${(p.tags || []).slice(0, 3).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
         </div></div>
-        <div class="col-status"><span class="status-pill st-${si.cls}"><span class="status-dot ${si.cls} ${checking ? 'pulse' : ''}"></span>${checking ? '检测中' : si.text}</span></div>
+        <div class="col-status"><span class="status-pill st-${si.cls}"><span class="status-dot ${si.cls} ${checking ? 'pulse' : ''}"></span>${checking ? tx('检测中') : si.text}</span></div>
         <div class="col-models"><div class="models-cell"><span class="models-bar"><i style="width:${pct}%;"></i></span><span class="models-text">${avail}/${total}</span></div></div>
         <div class="col-latency">${p.latency != null ? p.latency + ' ms' : '—'}</div>
         <div class="col-cycle cycle-cell">${cycleMin}</div>
-        <div class="col-notify">${p.notifyOnModelChange ? '<span class="status-pill st-up">开启</span>' : '<span class="status-pill st-unknown">关闭</span>'}</div>
+        <div class="col-notify">${p.notifyOnModelChange ? `<span class="status-pill st-up">${tx('开启')}</span>` : `<span class="status-pill st-unknown">${tx('关闭')}</span>`}</div>
         <div class="col-checked checked-cell">${checked}${p.lastError ? `<br/><span class="st-down" style="font-size:11px;">${escapeHtml(p.lastError).slice(0, 26)}</span>` : ''}</div>
         <div class="col-ops">
-          <button class="op-btn run" data-run="${p.id}" title="立即检测">${icon('refresh')}</button>
-          <button class="op-btn edit" data-edit="${p.id}" title="编辑">${icon('pencil')}</button>
-          <button class="op-btn del" data-del="${p.id}" title="删除">${icon('trash')}</button>
+          <button class="op-btn run" data-run="${p.id}" title="${tx('立即检测')}">${icon('refresh')}</button>
+          <button class="op-btn edit" data-edit="${p.id}" title="${tx('编辑')}">${icon('pencil')}</button>
+          <button class="op-btn del" data-del="${p.id}" title="${tx('删除')}">${icon('trash')}</button>
         </div>
       </div>`;
     }).join('');
@@ -243,10 +273,10 @@ function renderProviders() {
   selBox.checked = allChecked;
   // 部分选中：显示半选态，点击后补齐为全选
   selBox.indeterminate = selCount > 0 && !allChecked;
-  $('#selAllText').textContent = allChecked && list.length ? '取消全选' : '全选';
+  $('#selAllText').textContent = allChecked && list.length ? tx('取消全选') : tx('全选');
   $('#btnCheckSel').disabled = selected.size === 0;
   $('#btnDelSel').disabled = selected.size === 0;
-  $('#btnDelSel').textContent = selected.size > 0 ? `删除 (${selected.size})` : '删除';
+  $('#btnDelSel').textContent = selected.size > 0 ? `${tx('删除')} (${selected.size})` : tx('删除');
 }
 
 // 列表事件委托
@@ -261,17 +291,17 @@ $('#providerList').addEventListener('click', (e) => {
   const detail = e.target.closest('[data-detail]');
   if (detail) { openDetail(Number(detail.dataset.detail)); return; }
   const run = e.target.closest('[data-run]');
-  if (run) { window.aipm.checkNow([Number(run.dataset.run)]); toast('已触发检测'); return; }
+  if (run) { window.aipm.checkNow([Number(run.dataset.run)]); toast(tx('已触发检测')); return; }
   const edit = e.target.closest('[data-edit]');
   if (edit) { openProviderModal(Number(edit.dataset.edit)); return; }
   const del = e.target.closest('[data-del]');
   if (del) {
     const id = Number(del.dataset.del);
     const p = state.providers.find((x) => x.id === id);
-    confirmDialog('删除服务商', `确定删除「${p ? p.name : id}」吗？该操作不可撤销。`, async () => {
+    confirmDialog(tx('删除服务商'), tx('确定删除「{name}」吗？该操作不可撤销。', { name: p ? p.name : id }), async () => {
       await window.aipm.deleteProvider(id);
       selected.delete(id);
-      toast('已删除');
+      toast(tx('已删除'));
     });
   }
 });
@@ -296,16 +326,16 @@ $('#selAll').addEventListener('change', () => {
   else list.forEach((p) => selected.add(p.id));
   renderProviders();
 });
-$('#btnCheckSel').addEventListener('click', () => { window.aipm.checkNow([...selected]); toast(`已对 ${selected.size} 个服务商触发检测`); });
+$('#btnCheckSel').addEventListener('click', () => { window.aipm.checkNow([...selected]); toast(tx('已对 {n} 个服务商触发检测', { n: selected.size })); });
 $('#btnDelSel').addEventListener('click', () => {
   const n = selected.size;
-  confirmDialog('批量删除', `确定删除选中的 ${n} 个服务商吗？该操作不可撤销。`, async () => {
+  confirmDialog(tx('批量删除'), tx('确定删除选中的 {n} 个服务商吗？该操作不可撤销。', { n }), async () => {
     await window.aipm.deleteMany([...selected]);
     selected.clear();
-    toast('批量删除完成');
+    toast(tx('批量删除完成'));
   });
 });
-$('#dashCheckAll').addEventListener('click', () => { window.aipm.checkAll(); toast('已触发全部检测'); });
+$('#dashCheckAll').addEventListener('click', () => { window.aipm.checkAll(); toast(tx('已触发全部检测')); });
 
 // ---------- 新增/编辑弹窗 ----------
 // 周期单位与换算同样取自 window.durfmt，避免与主进程口径漂移。
@@ -320,13 +350,13 @@ const fromSecondsUI = (sec) => window.durfmt.fromSeconds(sec);
 
 function openProviderModal(id = null) {
   editingId = id;
-  $('#pmTitle').textContent = id ? '编辑服务商' : '新增服务商';
+  $('#pmTitle').textContent = id ? tx('编辑服务商') : tx('新增服务商');
   $('#fError').textContent = '';
   const p = id ? state.providers.find((x) => x.id === id) : null;
   $('#fName').value = p ? p.name : '';
   $('#fUrl').value = p ? p.url : '';
   $('#fKey').value = '';
-  $('#fKey').placeholder = p && p.hasApiKey ? `已保存（${p.apiKeyMasked}），留空则不修改` : 'sk-...';
+  $('#fKey').placeholder = p && p.hasApiKey ? tx('已保存（{mask}），留空则不修改', { mask: p.apiKeyMasked }) : 'sk-...';
   const iv = fromSecondsUI(p ? p.intervalSec : 300);
   $('#fInterval').value = iv.value;
   $('#fIntervalUnit').value = iv.unit;
@@ -340,6 +370,10 @@ function openProviderModal(id = null) {
   $('#fProbeBody').value = p ? (p.probeBody || '') : '';
   $('#fProxyUrl').value = p ? (p.proxyUrl || '') : '';
   $('#fUseProxy').checked = p ? p.useProxy !== false : true;
+  $('#fMaintEnabled').checked = p ? Boolean(p.maintEnabled) : false;
+  $('#fMaintStart').value = (p && p.maintStart) || '02:00';
+  $('#fMaintEnd').value = (p && p.maintEnd) || '04:00';
+  $('#fTlsVerify').value = !p || p.insecureSkipVerify == null ? 'follow' : p.insecureSkipVerify === true ? 'skip' : 'verify';
   syncProbeCustomVisibility();
   $('#providerModal').classList.add('show');
   setTimeout(() => $('#fName').focus(), 120);
@@ -357,10 +391,10 @@ $('#pmSave').addEventListener('click', async () => {
   const name = $('#fName').value.trim();
   let url = $('#fUrl').value.trim();
   const interval = toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value);
-  if (!name) { $('#fError').textContent = '请输入供应商名称'; return; }
-  if (!url) { $('#fError').textContent = '请输入 URL'; return; }
+  if (!name) { $('#fError').textContent = tx('请输入供应商名称'); return; }
+  if (!url) { $('#fError').textContent = tx('请输入 URL'); return; }
   if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-  if (interval < 5) { $('#fError').textContent = '轮循周期不能小于 5 秒'; return; }
+  if (interval < 5) { $('#fError').textContent = tx('轮循周期不能小于 5 秒'); return; }
 
   const data = {
     name, url,
@@ -375,16 +409,20 @@ $('#pmSave').addEventListener('click', async () => {
     probeBody: $('#fProbeBody').value.trim(),
     probeLimit: Number($('#fProbeLimit').value) > 0 ? Number($('#fProbeLimit').value) : null,
     proxyUrl: $('#fProxyUrl').value.trim(),
-    useProxy: $('#fUseProxy').checked
+    useProxy: $('#fUseProxy').checked,
+    maintEnabled: $('#fMaintEnabled').checked,
+    maintStart: $('#fMaintStart').value || '02:00',
+    maintEnd: $('#fMaintEnd').value || '04:00',
+    insecureSkipVerify: $('#fTlsVerify').value === 'follow' ? null : $('#fTlsVerify').value === 'skip'
   };
   if (editingId) {
     if (!data.apiKey) delete data.apiKey;
     await window.aipm.updateProvider(editingId, data);
-    toast('已保存');
+    toast(tx('已保存'));
   } else {
     if (!data.apiKey) data.apiKey = '';
     await window.aipm.addProvider(data);
-    toast('已添加');
+    toast(tx('已添加'));
   }
   $('#providerModal').classList.remove('show');
 });
@@ -409,31 +447,31 @@ function openDetail(id) {
     <span class="status-dot ${si.cls}"></span>
     <div class="dm-banner-main">
       <div class="dm-banner-status">${si.text}</div>
-      <div class="dm-banner-sub">${avail.length}/${total} 模型可用 · 可用率 ${pct}%</div>
+      <div class="dm-banner-sub">${avail.length}/${total} ${tx('模型可用')} · ${tx('可用率')} ${pct}%</div>
     </div>
     <div class="dm-banner-lat">${p.latency != null ? p.latency + ' ms' : '—'}</div>`;
   $('#dmMeta').innerHTML = `
     <div class="dm-item"><span>URL</span><b>${escapeHtml(p.url)}</b></div>
-    <div class="dm-item"><span>API Key</span><b>${p.apiKeyMasked || '未配置'}</b></div>
-    <div class="dm-item"><span>轮循周期</span><b>${fmtDuration(p.intervalSec)}</b></div>
-    <div class="dm-item"><span>最近检测</span><b>${p.checkedAt ? new Date(p.checkedAt).toLocaleString('zh-CN') : '—'}</b></div>
-    ${p.note ? `<div class="dm-item wide"><span>备注</span><b>${escapeHtml(p.note)}</b></div>` : ''}
-    ${p.lastError ? `<div class="dm-item wide"><span>连接信息</span><b class="st-down">${escapeHtml(p.lastError)}</b></div>` : ''}`;
+    <div class="dm-item"><span>API Key</span><b>${p.apiKeyMasked || tx('未配置')}</b></div>
+    <div class="dm-item"><span>${tx('轮循周期')}</span><b>${fmtDuration(p.intervalSec)}</b></div>
+    <div class="dm-item"><span>${tx('最近检测')}</span><b>${p.checkedAt ? new Date(p.checkedAt).toLocaleString(lang() === 'en' ? 'en-US' : 'zh-CN') : '—'}</b></div>
+    ${p.note ? `<div class="dm-item wide"><span>${tx('备注')}</span><b>${escapeHtml(p.note)}</b></div>` : ''}
+    ${p.lastError ? `<div class="dm-item wide"><span>${tx('连接信息')}</span><b class="st-down">${escapeHtml(p.lastError)}</b></div>` : ''}`;
   $('#dmAvailCount').textContent = avail.length;
   $('#dmUnavailCount').textContent = unavail.length;
   $('#dmAvail').innerHTML = avail.length
     ? avail.map((m) => `<span class="model-tag" data-copy="${escapeHtml(m)}">${escapeHtml(m)}</span>`).join('')
-    : '<span class="empty" style="padding:8px 0;">无</span>';
+    : `<span class="empty" style="padding:8px 0;">${tx('无')}</span>`;
   $('#dmUnavail').innerHTML = unavail.length
     ? unavail.map((m) => {
         const d = detailMap.get(m);
-        const reason = d && d.note ? d.note : '未探测';
+        const reason = d && d.note ? d.note : tx('未探测');
         return `<div class="model-fail" data-copy="${escapeHtml(m)}">
           <span class="model-fail-name">${escapeHtml(m)}</span>
           <span class="model-fail-reason" title="${escapeHtml(reason)}">${escapeHtml(reason)}</span>
         </div>`;
       }).join('')
-    : '<span class="empty" style="padding:8px 0;">无</span>';
+    : `<span class="empty" style="padding:8px 0;">${tx('无')}</span>`;
   // 未探测模型（超出单轮上限）单独展示，避免与真实失败混淆
   const unprobed = p.modelsUnprobed || [];
   const upWrap = $('#dmUnprobedWrap');
@@ -447,6 +485,22 @@ function openDetail(id) {
       upWrap.style.display = 'none';
     }
   }
+  // v1.2.0：单模型 24h 可用率徽标（异步追加，失败静默）
+  (async () => {
+    try {
+      const r = await window.aipm.historyModelRates({ providerId: id, hours: 24 });
+      if (!r || !r.ok || !Array.isArray(r.models)) return;
+      const rateByMid = new Map(r.models.map((m) => [String(m.mid), m.rate]));
+      $$('#dmAvail .model-tag').forEach((el) => {
+        const rate = rateByMid.get(el.dataset.copy);
+        if (rate == null) return;
+        const s = document.createElement('span');
+        s.className = 'rate-pill' + (rate >= 99 ? '' : rate >= 90 ? ' mid' : ' low');
+        s.textContent = `${rate}%`;
+        el.appendChild(s);
+      });
+    } catch (e) { /* 徽标失败不打扰 */ }
+  })();
   $('#detailModal').classList.add('show');
 }
 $('#dmClose').addEventListener('click', () => $('#detailModal').classList.remove('show'));
@@ -454,7 +508,7 @@ $('#detailModal').addEventListener('click', async (e) => {
   const tag = e.target.closest('[data-copy]');
   if (tag) {
     await navigator.clipboard.writeText(tag.dataset.copy);
-    toast('已复制模型名');
+    toast(tx('已复制模型名'));
   }
 });
 
@@ -495,6 +549,10 @@ function renderNotify() {
   $('#requestTimeoutMs').value = g.requestTimeoutMs || 20000;
   $('#probeTimeoutMs').value = g.probeTimeoutMs || 15000;
   $('#retries').value = g.retries == null ? 1 : g.retries;
+  $('#probeConcurrency').value = g.probeConcurrency || 8;
+  $('#probeJitterMs').value = g.probeJitterMs == null ? 120 : g.probeJitterMs;
+  $('#probeRotate').checked = g.probeRotate !== false;
+  $('#insecureSkipVerify').checked = Boolean(g.insecureSkipVerify);
   // 告警策略
   $('#alertFailThreshold').value = g.alertFailThreshold || 2;
   $('#alertRecoverNotify').checked = g.alertRecoverNotify !== false;
@@ -508,6 +566,7 @@ function renderNotify() {
   $('#proxyUrl').value = g.proxyUrl || '';
   // 历史与日志
   $('#historyEnabled').checked = g.historyEnabled !== false;
+  $('#modelHistoryEnabled').checked = g.modelHistoryEnabled !== false;
   $('#historyKeepDays').value = g.historyKeepDays || 30;
   $('#logKeepDays').value = g.logKeepDays || 7;
   $('#logMaxFileMB').value = g.logMaxFileMB || 10;
@@ -516,6 +575,21 @@ function renderNotify() {
   $('#theme').value = g.theme || 'system';
   $('#launchAtLogin').checked = Boolean(g.launchAtLogin);
   $('#launchMinimized').checked = Boolean(g.launchMinimized);
+  $('#lang').value = g.lang || 'zh';
+  $('#hotkeyEnabled').checked = g.hotkeyEnabled !== false;
+  $('#hotkey').value = g.hotkey || '';
+  $('#trayBalloonEnabled').checked = g.trayBalloonEnabled !== false;
+  $('#autoUpdateCheck').checked = g.autoUpdateCheck !== false;
+  // 邮件日报
+  $('#dailyReportEnabled').checked = Boolean(g.dailyReportEnabled);
+  $('#dailyReportTime').value = g.dailyReportTime || '08:00';
+  $('#smtpHost').value = g.smtpHost || '';
+  $('#smtpPort').value = g.smtpPort || 465;
+  $('#smtpSecure').checked = g.smtpSecure !== false;
+  $('#smtpUser').value = g.smtpUser || '';
+  $('#smtpPass').value = g.smtpPass || '';
+  $('#mailFrom').value = g.mailFrom || '';
+  $('#mailTo').value = g.mailTo || '';
 }
 let notifySaveTimer = null;
 function saveNotify() {
@@ -556,6 +630,10 @@ function saveNotify() {
       requestTimeoutMs: int('#requestTimeoutMs', 20000, 1000, 120000),
       probeTimeoutMs: int('#probeTimeoutMs', 15000, 1000, 120000),
       retries: int('#retries', 1, 0, 5),
+      probeConcurrency: int('#probeConcurrency', 8, 5, 10),
+      probeJitterMs: int('#probeJitterMs', 120, 0, 2000),
+      probeRotate: $('#probeRotate').checked,
+      insecureSkipVerify: $('#insecureSkipVerify').checked,
       alertFailThreshold: int('#alertFailThreshold', 2, 1, 20),
       alertRecoverNotify: $('#alertRecoverNotify').checked,
       alertCooldownMin: int('#alertCooldownMin', 10, 0, 1440),
@@ -566,6 +644,7 @@ function saveNotify() {
       proxyEnabled: $('#proxyEnabled').checked,
       proxyUrl: $('#proxyUrl').value.trim(),
       historyEnabled: $('#historyEnabled').checked,
+      modelHistoryEnabled: $('#modelHistoryEnabled').checked,
       historyKeepDays: int('#historyKeepDays', 30, 1, 365),
       logKeepDays: int('#logKeepDays', 7, 1, 365),
       logMaxFileMB: int('#logMaxFileMB', 10, 1, 200),
@@ -573,6 +652,20 @@ function saveNotify() {
       theme: $('#theme').value || 'system',
       launchAtLogin: $('#launchAtLogin').checked,
       launchMinimized: $('#launchMinimized').checked,
+      lang: $('#lang').value || 'zh',
+      hotkeyEnabled: $('#hotkeyEnabled').checked,
+      hotkey: $('#hotkey').value.trim(),
+      trayBalloonEnabled: $('#trayBalloonEnabled').checked,
+      autoUpdateCheck: $('#autoUpdateCheck').checked,
+      dailyReportEnabled: $('#dailyReportEnabled').checked,
+      dailyReportTime: $('#dailyReportTime').value || '08:00',
+      smtpHost: $('#smtpHost').value.trim(),
+      smtpPort: int('#smtpPort', 465, 1, 65535),
+      smtpSecure: $('#smtpSecure').checked,
+      smtpUser: $('#smtpUser').value.trim(),
+      smtpPass: $('#smtpPass').value,
+      mailFrom: $('#mailFrom').value.trim(),
+      mailTo: $('#mailTo').value.trim(),
       autoStartCheckOnLaunch: $('#autoStart').checked,
       concurrency: Math.max(1, Math.min(16, Number($('#concurrency').value) || 4)),
       closeAction: $('#closeAction').value === 'exit' ? 'exit' : 'tray'
@@ -581,18 +674,26 @@ function saveNotify() {
 }
 ['wxEnable', 'qqEnable', 'dtEnable', 'autoStart', 'tgEnable', 'fsEnable', 'skEnable', 'scEnable', 'cwEnable',
  'alertRecoverNotify', 'alertOnModelChange', 'alertQuietEnabled', 'proxyEnabled', 'historyEnabled',
- 'launchAtLogin', 'launchMinimized']
+ 'launchAtLogin', 'launchMinimized', 'probeRotate', 'insecureSkipVerify', 'modelHistoryEnabled',
+ 'hotkeyEnabled', 'trayBalloonEnabled', 'autoUpdateCheck', 'dailyReportEnabled', 'smtpSecure']
   .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('change', saveNotify); });
 ['wxWebhook', 'qqWebhook', 'qqTarget', 'qqToken', 'dtWebhook', 'dtSecret', 'concurrency',
  'tgToken', 'tgChatId', 'tgApiBase', 'fsWebhook', 'fsSecret', 'skWebhook', 'scKey',
  'cwWebhook', 'cwTemplate', 'cwHeaders', 'probeLimit', 'requestTimeoutMs', 'probeTimeoutMs', 'retries',
  'alertFailThreshold', 'alertCooldownMin', 'alertQuietStart', 'alertQuietEnd', 'proxyUrl',
- 'historyKeepDays', 'logKeepDays', 'logMaxFileMB']
+ 'historyKeepDays', 'logKeepDays', 'logMaxFileMB', 'probeConcurrency', 'probeJitterMs', 'hotkey',
+ 'dailyReportTime', 'smtpHost', 'smtpPort', 'smtpUser', 'smtpPass', 'mailFrom', 'mailTo']
   .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('input', saveNotify); });
 $('#qqTargetType').addEventListener('change', saveNotify);
 $('#closeAction').addEventListener('change', saveNotify);
 $('#logLevel').addEventListener('change', saveNotify);
 $('#theme').addEventListener('change', () => { saveNotify(); setTimeout(applyTheme, 400); });
+$('#lang').addEventListener('change', () => {
+  saveNotify();
+  // 即时预览 + 落盘推送后整页重渲染
+  if (window.aipmi18n) window.aipmi18n.applyI18n($('#lang').value);
+  setTimeout(() => { if (state.global) state.global.lang = $('#lang').value; render(); }, 450);
+});
 
 // 指引折叠
 $$('.guide-toggle').forEach((btn) => {
@@ -604,23 +705,26 @@ $$('.guide-toggle').forEach((btn) => {
 
 $('#wxTest').addEventListener('click', async () => {
   saveNotify();
-  $('#wxHint').textContent = '发送中…'; $('#wxHint').className = 'hint';
+  $('#wxHint').textContent = tx('发送中…'); $('#wxHint').className = 'hint';
+  await new Promise((r) => setTimeout(r, 420));
   const r = await window.aipm.testNotify('weixin');
-  $('#wxHint').textContent = r.ok ? '发送成功' : '失败: ' + r.error;
+  $('#wxHint').textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
   $('#wxHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
 });
 $('#qqTest').addEventListener('click', async () => {
   saveNotify();
-  $('#qqHint').textContent = '发送中…'; $('#qqHint').className = 'hint';
+  $('#qqHint').textContent = tx('发送中…'); $('#qqHint').className = 'hint';
+  await new Promise((r) => setTimeout(r, 420));
   const r = await window.aipm.testNotify('qq');
-  $('#qqHint').textContent = r.ok ? '发送成功' : '失败: ' + r.error;
+  $('#qqHint').textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
   $('#qqHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
 });
 $('#dtTest').addEventListener('click', async () => {
   saveNotify();
-  $('#dtHint').textContent = '发送中…'; $('#dtHint').className = 'hint';
+  $('#dtHint').textContent = tx('发送中…'); $('#dtHint').className = 'hint';
+  await new Promise((r) => setTimeout(r, 420));
   const r = await window.aipm.testNotify('dingtalk');
-  $('#dtHint').textContent = r.ok ? '发送成功' : '失败: ' + r.error;
+  $('#dtHint').textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
   $('#dtHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
 });
 
@@ -633,14 +737,30 @@ $('#dtTest').addEventListener('click', async () => {
     btn.addEventListener('click', async () => {
       saveNotify();
       const hint = $('#' + hintId);
-      hint.textContent = '发送中…'; hint.className = 'hint';
+      hint.textContent = tx('发送中…'); hint.className = 'hint';
       // 等待防抖保存落盘后再发送
       await new Promise((r) => setTimeout(r, 420));
       const r = await window.aipm.testNotify(channel);
-      hint.textContent = r.ok ? '发送成功' : '失败: ' + r.error;
+      hint.textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
       hint.className = 'hint ' + (r.ok ? 'ok' : 'bad');
     });
   });
+
+// 邮件日报测试
+$('#btnMailTest').addEventListener('click', async () => {
+  saveNotify();
+  const hint = $('#mailHint');
+  hint.textContent = tx('发送中…'); hint.className = 'hint';
+  await new Promise((r) => setTimeout(r, 420));
+  try {
+    const r = await window.aipm.testMail();
+    hint.textContent = r.ok ? tx('发送成功') : tx('失败: ') + (r.error || '');
+    hint.className = 'hint ' + (r.ok ? 'ok' : 'bad');
+  } catch (e) {
+    hint.textContent = tx('失败: ') + (e.message || e);
+    hint.className = 'hint bad';
+  }
+});
 
 // ---------- 统计分析 ----------
 function statsHours() {
@@ -654,7 +774,7 @@ async function renderStats() {
     window.aipm.historySummary({ hours }),
     window.aipm.historySeries({ hours, buckets: 48 })
   ]);
-  if (!sum.ok) { $('#stTable').innerHTML = `<div class="empty">统计读取失败：${escapeHtml(sum.error || '')}</div>`; return; }
+  if (!sum.ok) { $('#stTable').innerHTML = `<div class="empty">${tx('统计读取失败：')}${escapeHtml(sum.error || '')}</div>`; return; }
 
   const o = sum.overall;
   $('#stUptime').textContent = o.samples ? o.uptime + '%' : '—';
@@ -664,18 +784,18 @@ async function renderStats() {
 
   if (ser.ok) drawChart(ser);
   $('#stChartHint').textContent = o.samples
-    ? `${o.samples} 个样本 · 每桶约 ${Math.round((ser.bucketMs || 0) / 60000)} 分钟`
-    : '暂无历史数据，检测运行一段时间后自动积累';
+    ? `${o.samples} ${tx('个样本')} · ${tx('每桶约')} ${Math.round((ser.bucketMs || 0) / 60000)} ${tx('分钟')}`
+    : tx('暂无历史数据，检测运行一段时间后自动积累');
 
   const rows = sum.perProvider;
   if (!rows.length) {
-    $('#stTable').innerHTML = '<div class="empty">该时间范围内暂无检测记录</div>';
+    $('#stTable').innerHTML = `<div class="empty">${tx('该时间范围内暂无检测记录')}</div>`;
     return;
   }
   $('#stTable').innerHTML = `
     <div class="st-row st-head">
-      <div>服务商</div><div>样本</div><div>可用率</div>
-      <div>在线/异常/离线</div><div>故障时长</div><div>平均延迟</div><div>P95</div><div>最后状态</div>
+      <div>${tx('服务商')}</div><div>${tx('样本')}</div><div>${tx('可用率')}</div>
+      <div>${tx('在线/异常/离线')}</div><div>${tx('故障时长')}</div><div>${tx('平均延迟')}</div><div>${tx('P95')}</div><div>${tx('最后状态')}</div>
     </div>` + rows.map((p) => {
     const cls = p.uptime >= 99 ? 'up' : p.uptime >= 90 ? 'degraded' : 'down';
     const si = statusInfo(p.lastStatus);
@@ -707,7 +827,7 @@ function drawChart(ser) {
   const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
   const valid = pts.filter((b) => b.samples > 0);
   if (!valid.length) {
-    $('#stChart').innerHTML = '<div class="empty" style="padding:48px 0;">暂无数据</div>';
+    $('#stChart').innerHTML = `<div class="empty" style="padding:48px 0;">${tx('暂无数据')}</div>`;
     return;
   }
   const maxLat = Math.max(1, ...valid.map((b) => b.latencyAvg || 0));
@@ -750,13 +870,13 @@ if ($('#stRefresh')) {
   $('#stRange').addEventListener('change', renderStats);
   $('#stExportCsv').addEventListener('click', async () => {
     const r = await window.aipm.historyExportCSV({ hours: statsHours() });
-    if (r.ok) toast('历史明细已导出');
-    else if (!r.canceled) toast('导出失败: ' + r.error, 'err');
+    if (r.ok) toast(tx('历史明细已导出'));
+    else if (!r.canceled) toast(tx('导出失败: ') + r.error, 'err');
   });
   $('#stExportReport').addEventListener('click', async () => {
     const r = await window.aipm.reportExport({ format: 'html', hours: statsHours() });
-    if (r.ok) toast('状态报告已导出');
-    else if (!r.canceled) toast('导出失败: ' + r.error, 'err');
+    if (r.ok) toast(tx('状态报告已导出'));
+    else if (!r.canceled) toast(tx('导出失败: ') + r.error, 'err');
   });
 }
 
@@ -766,7 +886,7 @@ let logsLoaded = false;
 function renderLogs() {
   if (!logsLoaded) {
     logsLoaded = true;
-    window.aipm.getLogs().then((lines) => { logLines = lines; appendLogLines(lines, true); });
+    window.aipm.getLogs().then((lines) => { logLines = (lines || []).slice(-2000); appendLogLines(logLines, true); });
   }
 }
 function logMatchesFilter(l) {
@@ -790,6 +910,7 @@ function appendLogLines(lines, replace = false) {
 }
 window.aipm.onLogLine((l) => {
   logLines.push(l);
+  if (logLines.length > 2000) logLines.splice(0, logLines.length - 2000);
   if (view === 'logs') appendLogLines([l]);
 });
 
@@ -803,12 +924,12 @@ $('#logFilter').addEventListener('input', () => {
 // 清除日志（仅清空界面与内存缓冲，不删除磁盘日志文件）
 $('#logClear').innerHTML = icon('trash') + '<span>清除</span>';
 $('#logClear').addEventListener('click', () => {
-  confirmDialog('清除日志', '确定清除当前显示的日志吗？（磁盘日志文件保留）', async () => {
+  confirmDialog(tx('清除日志'), tx('确定清除当前显示的日志吗？（磁盘日志文件保留）'), async () => {
     await window.aipm.clearLogs();
     logLines = [];
     $('#logCard').innerHTML = '';
-    toast('日志已清除');
-  }, { okText: '清除', danger: true });
+    toast(tx('日志已清除'));
+  }, { okText: tx('清除'), danger: true });
 });
 
 // ---------- 备份与还原 ----------
@@ -817,10 +938,10 @@ let bkPickedFile = null;
 function renderBackup() {
   window.aipm.backupListAuto().then((r) => {
     if (!r.ok) return;
-    $('#bkOpenDir').textContent = '打开备份目录';
+    $('#bkOpenDir').textContent = tx('打开备份目录');
     const wrap = $('#bkList');
     if (!r.list.length) {
-      wrap.innerHTML = '<div class="empty" style="padding:18px 0;">暂无自动备份记录，每天首次启动会自动生成一份</div>';
+      wrap.innerHTML = `<div class="empty" style="padding:18px 0;">${tx('暂无自动备份记录，每天首次启动会自动生成一份')}</div>`;
       return;
     }
     wrap.innerHTML = r.list.map((f) => {
@@ -830,9 +951,9 @@ function renderBackup() {
         <span class="nav-ic bk-item-ic">${icon('archive')}</span>
         <div class="bk-item-main">
           <div class="bk-item-name">${escapeHtml(f.file)}</div>
-          <div class="bk-item-sub">${when} · ${f.count} 个服务商 · ${(f.size / 1024).toFixed(1)} KB</div>
+          <div class="bk-item-sub">${when} · ${f.count} ${tx('个服务商')} · ${(f.size / 1024).toFixed(1)} KB</div>
         </div>
-        <button class="btn small ghost" data-bkrestore="${escapeHtml(f.path)}">还原</button>
+        <button class="btn small ghost" data-bkrestore="${escapeHtml(f.path)}">${tx('还原')}</button>
       </div>`;
     }).join('');
   }).catch(() => {});
@@ -848,17 +969,17 @@ $('#bkOpenDir').addEventListener('click', async () => {
 $('#bkSaveAs').addEventListener('click', async () => {
   $('#bkHint').textContent = '';
   const r = await window.aipm.backupSaveAs();
-  $('#bkHint').textContent = r.ok ? '已备份' : (r.canceled ? '' : '失败: ' + r.error);
+  $('#bkHint').textContent = r.ok ? tx('已备份') : (r.canceled ? '' : tx('失败: ') + r.error);
   $('#bkHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
-  if (r.ok) toast('备份完成');
+  if (r.ok) toast(tx('备份完成'));
 });
 
 $('#bkQuick').addEventListener('click', async () => {
   $('#bkHint').textContent = '';
   const r = await window.aipm.backupExport();
-  $('#bkHint').textContent = r.ok ? '已备份到备份目录' : '失败: ' + r.error;
+  $('#bkHint').textContent = r.ok ? tx('已备份到备份目录') : tx('失败: ') + r.error;
   $('#bkHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
-  if (r.ok) { toast('备份完成'); renderBackup(); }
+  if (r.ok) { toast(tx('备份完成')); renderBackup(); }
 });
 
 function bkSelectedMode() {
@@ -868,29 +989,29 @@ function bkSelectedMode() {
 $('#bkPick').addEventListener('click', async () => {
   const r = await window.aipm.backupPickFile();
   if (r.canceled) return;
-  if (!r.ok) { toast('读取备份失败: ' + r.error, 'err'); return; }
+  if (!r.ok) { toast(tx('读取备份失败: ') + r.error, 'err'); return; }
   bkPickedFile = r.path;
   $('#bkPicked').style.display = 'flex';
-  $('#bkPicked').innerHTML = `${icon('check')}<span>已选择：<b>${escapeHtml(r.path.split(/[\\/]/).pop())}</b>（${r.count} 个服务商${r.hasGlobal ? '，含通知设置' : ''}）</span>`;
+  $('#bkPicked').innerHTML = `${icon('check')}<span>${tx('已选择：')}<b>${escapeHtml(r.path.split(/[\\/]/).pop())}</b>（${r.count} ${tx('个服务商')}${r.hasGlobal ? tx('，含通知设置') : ''}）</span>`;
   $('#bkRestore').disabled = false;
 });
 
 $('#bkRestore').addEventListener('click', () => {
   if (!bkPickedFile) return;
   const mode = bkSelectedMode();
-  const modeText = mode === 'merge' ? '合并还原' : '覆盖还原';
+  const modeText = mode === 'merge' ? tx('合并还原') : tx('覆盖还原');
   confirmDialog(
     modeText,
     mode === 'merge'
-      ? '将把备份中的服务商并入当前列表（按 URL 去重），通知设置保持不变。确定继续吗？'
-      : '当前全部数据（服务商与通知设置）将被备份内容替换。确定继续吗？',
+      ? tx('将把备份中的服务商并入当前列表（按 URL 去重），通知设置保持不变。确定继续吗？')
+      : tx('当前全部数据（服务商与通知设置）将被备份内容替换。确定继续吗？'),
     async () => {
       const r = await window.aipm.backupRestore(bkPickedFile, mode);
       if (r.ok) {
-        const detail = mode === 'merge' ? `新增 ${r.added}，更新 ${r.updated}` : `共 ${r.providers} 个服务商`;
-        toast(`还原完成：${detail}`);
+        const detail = mode === 'merge' ? tx('新增 {a}，更新 {u}', { a: r.added, u: r.updated }) : tx('共 {n} 个服务商', { n: r.providers });
+        toast(tx('还原完成：{detail}', { detail }));
       } else {
-        toast('还原失败: ' + r.error, 'err');
+        toast(tx('还原失败: ') + r.error, 'err');
       }
     }
   );
@@ -902,12 +1023,12 @@ $('#bkList').addEventListener('click', (e) => {
   if (!btn) return;
   const filePath = btn.dataset.bkrestore;
   confirmDialog(
-    '覆盖还原',
-    '当前全部数据（服务商与通知设置）将被该备份替换。确定继续吗？',
+    tx('覆盖还原'),
+    tx('当前全部数据（服务商与通知设置）将被该备份替换。确定继续吗？'),
     async () => {
       const r = await window.aipm.backupRestore(filePath, 'overwrite');
-      if (r.ok) toast(`还原完成：共 ${r.providers} 个服务商`);
-      else toast('还原失败: ' + r.error, 'err');
+      if (r.ok) toast(tx('还原完成：{detail}', { detail: tx('共 {n} 个服务商', { n: r.providers }) }));
+      else toast(tx('还原失败: ') + r.error, 'err');
     }
   );
 });
@@ -916,8 +1037,8 @@ $('#bkList').addEventListener('click', (e) => {
 let emState = { format: 'json', delimiter: 'tab' };
 let imState = { format: 'json', delimiter: 'tab', items: null, errors: [] };
 
-$('#btnImport').textContent = '导入';
-$('#btnExport').textContent = '导出';
+$('#btnImport').textContent = tx('导入');
+$('#btnExport').textContent = tx('导出');
 $('#emClose').innerHTML = icon('close');
 $('#imClose').innerHTML = icon('close');
 
@@ -933,7 +1054,7 @@ function bindSeg(segId, onPick) {
 
 // ----- 导出 -----
 $('#btnExport').addEventListener('click', () => {
-  if (state.providers.length === 0) { toast('暂无服务商可导出', 'err'); return; }
+  if (state.providers.length === 0) { toast(tx('暂无服务商可导出'), 'err'); return; }
   emState = { format: 'json', delimiter: 'tab' };
   $$('#emFormat .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.fmt === 'json'));
   $$('#emDelim .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.d === 'tab'));
@@ -967,13 +1088,13 @@ async function refreshExportPreview() {
 
 $('#emCopy').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('#emPreview').textContent);
-  toast('已复制到剪贴板');
+  toast(tx('已复制到剪贴板'));
 });
 
 $('#emSave').addEventListener('click', async () => {
   const r = await window.aipm.transferExportSaveAs({ format: emState.format, delimiter: emState.delimiter, withKey: $('#emWithKey').checked });
   if (r.canceled) return;
-  if (r.ok) { toast('已导出到文件'); $('#exportModal').classList.remove('show'); }
+  if (r.ok) { toast(tx('已导出到文件')); $('#exportModal').classList.remove('show'); }
   else $('#emError').textContent = r.error;
 });
 
@@ -1026,7 +1147,7 @@ $('#imPreviewBtn').addEventListener('click', parseAndPreviewImport);
 
 async function parseAndPreviewImport() {
   const text = $('#imText').value;
-  if (!text.trim()) { $('#imError').textContent = '请先粘贴内容或选择文件'; return; }
+  if (!text.trim()) { $('#imError').textContent = tx('请先粘贴内容或选择文件'); return; }
   $('#imError').textContent = '';
   const r = await window.aipm.transferParse({ text, format: imState.format, delimiter: imState.delimiter });
   if (!r.ok) { $('#imError').textContent = r.error; $('#imApply').disabled = true; imParsed = null; return; }
@@ -1034,36 +1155,37 @@ async function parseAndPreviewImport() {
   const box = $('#imResult');
   box.style.display = '';
   if (r.items.length === 0) {
-    box.innerHTML = '<span class="io-err">未解析到有效条目</span>' +
-      (r.errors.length ? `<ul>${r.errors.map((e) => `<li>第 ${e.line} 行：${escapeHtml(e.msg)}</li>`).join('')}</ul>` : '');
+    box.innerHTML = `<span class="io-err">${tx('未解析到有效条目')}</span>` +
+      (r.errors.length ? `<ul>${r.errors.map((e) => `<li>${tx('第 {n} 行：', { n: e.line })}${escapeHtml(e.msg)}</li>`).join('')}</ul>` : '');
     $('#imApply').disabled = true;
     return;
   }
   const errHtml = r.errors.length
-    ? `<div class="io-err">${r.errors.length} 条已跳过：</div><ul>${r.errors.slice(0, 5).map((e) => `<li>第 ${e.line} 行：${escapeHtml(e.msg)}</li>`).join('')}${r.errors.length > 5 ? `<li>… 共 ${r.errors.length} 条</li>` : ''}</ul>`
+    ? `<div class="io-err">${r.errors.length} ${tx('条已跳过：')}</div><ul>${r.errors.slice(0, 5).map((e) => `<li>${tx('第 {n} 行：', { n: e.line })}${escapeHtml(e.msg)}</li>`).join('')}${r.errors.length > 5 ? `<li>${tx('… 共 {n} 条', { n: r.errors.length })}</li>` : ''}</ul>`
     : '';
-  box.innerHTML = `<span class="io-ok">解析成功：${r.items.length} 条服务商</span>${errHtml}
-    <ul>${r.items.slice(0, 5).map((p) => `<li>${escapeHtml(p.name)} — ${escapeHtml(p.url)}（周期 ${fmtDuration(p.intervalSec)}，上报 ${p.notifyOnModelChange ? '开' : '关'}）</li>`).join('')}${r.items.length > 5 ? `<li>… 共 ${r.items.length} 条</li>` : ''}</ul>`;
+  box.innerHTML = `<span class="io-ok">${tx('解析成功：')}${r.items.length} ${tx('条服务商')}</span>${errHtml}
+    <ul>${r.items.slice(0, 5).map((p) => `<li>${escapeHtml(p.name)} — ${escapeHtml(p.url)}（${tx('周期 {d}，上报 {s}', { d: fmtDuration(p.intervalSec), s: tx(p.notifyOnModelChange ? '开' : '关') })}）</li>`).join('')}${r.items.length > 5 ? `<li>${tx('… 共 {n} 条', { n: r.items.length })}</li>` : ''}</ul>`;
   $('#imApply').disabled = false;
 }
 
 $('#imApply').addEventListener('click', async () => {
   if (!imParsed || !imParsed.items.length) return;
   const mode = document.querySelector('input[name="imMode"]:checked').value;
-  const modeText = mode === 'append' ? '追加' : '合并';
+  const modeText = mode === 'append' ? tx('追加') : tx('合并');
   confirmDialog(
-    `确认${modeText}导入`,
-    `将${modeText}导入 ${imParsed.items.length} 条服务商${mode === 'append' ? '（URL 重复也会新增）' : '（URL 相同的现有服务商将被更新）'}。确定继续吗？`,
+    tx('确认{n}导入', { n: modeText }),
+    tx('将{n}导入 {c} 条服务商', { n: modeText, c: imParsed.items.length })
+      + (mode === 'append' ? tx('（URL 重复也会新增）') : tx('（URL 相同的现有服务商将被更新）')) + tx('。确定继续吗？'),
     async () => {
       const r = await window.aipm.transferApply({ items: imParsed.items, mode });
       if (r.ok) {
-        toast(`导入完成：新增 ${r.added}${r.updated ? `，更新 ${r.updated}` : ''}`);
+        toast(tx('导入完成：新增 {a}', { a: r.added }) + (r.updated ? tx('，更新 {u}', { u: r.updated }) : ''));
         $('#importModal').classList.remove('show');
       } else {
-        $('#imError').textContent = '导入失败: ' + r.error;
+        $('#imError').textContent = tx('导入失败: ') + r.error;
       }
     },
-    { okText: '开始导入', danger: false }
+    { okText: tx('开始导入'), danger: false }
   );
 });
 

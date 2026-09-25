@@ -7,6 +7,7 @@ const logger = require('./logger');
  * 历史时序存储：按天分片的 JSONL（每行一条检测记录），便于追加写与按范围裁剪。
  * 目录：<dataDir>/history/hist-YYYYMMDD.jsonl
  * 单条记录：{ t, id, name, status, latency, total, avail, unavail, unprobed, err }
+ * 单模型记录：<dataDir>/history/mhist-YYYYMMDD.jsonl，每行 { t, id, mid, ok }
  *
  * 设计取舍：不引入 SQLite 依赖，纯 JSONL 追加写；查询时只读取覆盖时间范围的分片文件，
  * 单日数据量（服务商数 × 每日轮次）在桌面场景下完全可控。
@@ -26,6 +27,10 @@ function dayKey(ts) {
 
 function fileFor(dataDir, ts) {
   return path.join(historyDir(dataDir), `hist-${dayKey(ts)}.jsonl`);
+}
+
+function modelFileFor(dataDir, ts) {
+  return path.join(historyDir(dataDir), `mhist-${dayKey(ts)}.jsonl`);
 }
 
 /** 追加一条检测记录 */
@@ -51,6 +56,76 @@ function append(dataDir, provider, result) {
     logger.warn(`[历史] 写入失败: ${e.message}`);
     return null;
   }
+}
+
+/** 追加单模型探测记录（details 为 [{ id, ok }]，ok 非布尔的跳过） */
+function appendModels(dataDir, providerId, checkedAt, details) {
+  try {
+    if (!Array.isArray(details) || !details.length) return 0;
+    const t = checkedAt || Date.now();
+    const lines = [];
+    for (const d of details) {
+      if (!d || typeof d.ok !== 'boolean') continue;
+      lines.push(JSON.stringify({ t, id: providerId, mid: String(d.id), ok: d.ok ? 1 : 0 }));
+    }
+    if (!lines.length) return 0;
+    const dir = historyDir(dataDir);
+    ensureDir(dir);
+    fs.appendFileSync(modelFileFor(dataDir, t), lines.join('\n') + '\n', 'utf8');
+    return lines.length;
+  } catch (e) {
+    logger.warn(`[历史] 单模型写入失败: ${e.message}`);
+    return 0;
+  }
+}
+
+/** 读取某服务商指定时间范围内的单模型记录 */
+function readModelRange(dataDir, providerId, fromTs, toTs) {
+  const dir = historyDir(dataDir);
+  const out = [];
+  let files;
+  try { files = fs.readdirSync(dir).filter((f) => /^mhist-\d{8}\.jsonl$/.test(f)).sort(); }
+  catch (e) { return out; }
+
+  const fromKey = dayKey(fromTs);
+  const toKey = dayKey(toTs);
+  for (const f of files) {
+    const key = f.slice(6, 14);
+    if (key < fromKey || key > toKey) continue;
+    let text;
+    try { text = fs.readFileSync(path.join(dir, f), 'utf8'); } catch (e) { continue; }
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line);
+        if (r.id === Number(providerId) && r.t >= fromTs && r.t <= toTs) out.push(r);
+      } catch (e) { /* 跳过损坏行 */ }
+    }
+  }
+  return out;
+}
+
+/**
+ * 单模型可用率统计。
+ * 返回 { rangeHours, from, to, models: [{ mid, samples, ok, rate }] }（按 rate 升序）。
+ */
+function modelRates(dataDir, providerId, { hours = 24 } = {}) {
+  const to = Date.now();
+  const from = to - hours * 3600 * 1000;
+  const recs = readModelRange(dataDir, providerId, from, to);
+  const map = new Map();
+  for (const r of recs) {
+    if (!map.has(r.mid)) map.set(r.mid, { samples: 0, ok: 0 });
+    const e = map.get(r.mid);
+    e.samples++;
+    if (r.ok) e.ok++;
+  }
+  const models = [...map.entries()].map(([mid, e]) => ({
+    mid, samples: e.samples, ok: e.ok,
+    rate: e.samples ? Number(((e.ok / e.samples) * 100).toFixed(1)) : 0
+  }));
+  models.sort((a, b) => a.rate - b.rate || String(a.mid).localeCompare(String(b.mid)));
+  return { rangeHours: hours, from, to, models };
 }
 
 /** 读取指定时间范围内的全部记录（按天分片定位，避免全量扫描） */
@@ -202,11 +277,12 @@ function series(dataDir, { hours = 24, providerId = null, buckets = 48 } = {}) {
 function prune(dataDir, keepDays = 30) {
   const dir = historyDir(dataDir);
   let files;
-  try { files = fs.readdirSync(dir).filter((f) => /^hist-\d{8}\.jsonl$/.test(f)); } catch (e) { return 0; }
+  try { files = fs.readdirSync(dir).filter((f) => /^(hist|mhist)-\d{8}\.jsonl$/.test(f)); } catch (e) { return 0; }
   const cutoff = dayKey(Date.now() - keepDays * 86400 * 1000);
   let removed = 0;
   for (const f of files) {
-    if (f.slice(5, 13) < cutoff) {
+    const m = /(\d{8})/.exec(f);
+    if (m && m[1] < cutoff) {
       try { fs.unlinkSync(path.join(dir, f)); removed++; } catch (e) { /* ignore */ }
     }
   }
@@ -222,7 +298,8 @@ function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
   const head = ['time', 'providerId', 'name', 'status', 'latencyMs', 'modelsTotal', 'available', 'unavailable', 'unprobed', 'error'];
   const esc = (v) => {
-    const s = String(v ?? '');
+    let s = String(v ?? '');
+    if (/^[=+\-@]/.test(s)) s = '\t' + s;   // 公式注入防护
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const rows = recs.map((r) => [
@@ -232,4 +309,4 @@ function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
   return [head.join(','), ...rows].join('\r\n');
 }
 
-module.exports = { append, readRange, summarize, series, prune, exportCSV, historyDir, DIR_NAME };
+module.exports = { append, appendModels, readRange, readModelRange, summarize, modelRates, series, prune, exportCSV, historyDir, modelFileFor, DIR_NAME };

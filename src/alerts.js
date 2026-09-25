@@ -60,6 +60,19 @@ function inQuietHours(globalCfg, now = new Date()) {
   return start < end ? (cur >= start && cur < end) : (cur >= start || cur < end);
 }
 
+/**
+ * 是否处于该服务商的维护窗口（支持跨零点区间）。
+ * 维护窗口内：故障/恢复/模型变动告警全部抑制（仅记 suppressed，不推送）。
+ */
+function inMaintWindow(provider, now = new Date()) {
+  if (!provider || !provider.maintEnabled) return false;
+  const start = parseHM(provider.maintStart);
+  const end = parseHM(provider.maintEnd);
+  if (start == null || end == null || start === end) return false;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  return start < end ? (cur >= start && cur < end) : (cur >= start || cur < end);
+}
+
 /** 冷却判定：同一 provider 同一 kind 在冷却窗口内只推一次 */
 function inCooldown(st, kind, cooldownMin) {
   const last = st.lastSent[kind] || 0;
@@ -76,13 +89,14 @@ function markSent(st, kind) { st.lastSent[kind] = Date.now(); }
  * @param prev      上一轮快照 { status, modelsTotal, modelsAvailable }
  * @param opts      { modelChanged:boolean, firstCheck:boolean }
  * @returns { alerts: [{kind, title, reason}], suppressed: [{kind, why}] }
- *   kind ∈ 'down' | 'recover' | 'modelChange'
+ *   kind ∈ 'down' | 'authfail' | 'recover' | 'modelChange'
  */
 function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck = false } = {}) {
   const st = stateOf(provider.id);
   const alerts = [];
   const suppressed = [];
   const quiet = inQuietHours(globalCfg);
+  const maint = inMaintWindow(provider);
   const cooldownMin = Number(cfg(globalCfg, 'alertCooldownMin'));
   const threshold = Math.max(1, Number(cfg(globalCfg, 'alertFailThreshold')) || 1);
 
@@ -101,19 +115,25 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
     return { alerts, suppressed, consecutiveFail: st.consecutiveFail };
   }
 
-  // --- 故障告警（消抖） ---
+  // --- 故障告警（消抖；down 与 authfail 共用计数/冷却，kind 区分展示与文案） ---
+  const failKind = provider.status === 'authfail' ? 'authfail' : 'down';
+  const failTitle = provider.status === 'authfail' ? '密钥失效' : '服务异常';
   if (!isUp && st.consecutiveFail >= threshold && !st.inAlarm) {
-    if (quiet) {
-      suppressed.push({ kind: 'down', why: '静默时段' });
-    } else if (inCooldown(st, 'down', cooldownMin)) {
-      suppressed.push({ kind: 'down', why: '冷却中' });
+    if (maint) {
+      suppressed.push({ kind: failKind, why: '维护窗口' });
+    } else if (quiet) {
+      suppressed.push({ kind: failKind, why: '静默时段' });
+    } else if (inCooldown(st, failKind, cooldownMin)) {
+      suppressed.push({ kind: failKind, why: '冷却中' });
     } else {
       alerts.push({
-        kind: 'down',
-        title: '服务异常',
-        reason: `连续 ${st.consecutiveFail} 轮检测未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`
+        kind: failKind,
+        title: failTitle,
+        reason: failKind === 'authfail'
+          ? `鉴权失败（API Key 无效或无权限）${provider.lastError ? '：' + provider.lastError : ''}`
+          : `连续 ${st.consecutiveFail} 轮检测未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`
       });
-      markSent(st, 'down');
+      markSent(st, failKind);
     }
     // 无论是否实际推送，都进入告警态，避免静默结束后补发一堆历史告警
     st.inAlarm = true;
@@ -124,6 +144,8 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
     st.inAlarm = false;
     if (!cfg(globalCfg, 'alertRecoverNotify')) {
       suppressed.push({ kind: 'recover', why: '恢复通知已关闭' });
+    } else if (maint) {
+      suppressed.push({ kind: 'recover', why: '维护窗口' });
     } else if (quiet) {
       suppressed.push({ kind: 'recover', why: '静默时段' });
     } else {
@@ -138,7 +160,9 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
 
   // --- 模型变动告警 ---
   if (modelChanged && cfg(globalCfg, 'alertOnModelChange') && provider.notifyOnModelChange) {
-    if (quiet) {
+    if (maint) {
+      suppressed.push({ kind: 'modelChange', why: '维护窗口' });
+    } else if (quiet) {
       suppressed.push({ kind: 'modelChange', why: '静默时段' });
     } else if (inCooldown(st, 'modelChange', cooldownMin)) {
       suppressed.push({ kind: 'modelChange', why: '冷却中' });
@@ -154,4 +178,4 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
   return { alerts, suppressed, consecutiveFail: st.consecutiveFail };
 }
 
-module.exports = { evaluate, inQuietHours, resetState, stateOf, DEFAULTS, parseHM };
+module.exports = { evaluate, inQuietHours, inMaintWindow, resetState, stateOf, DEFAULTS, parseHM };

@@ -70,14 +70,18 @@
             <div class="stat-num" id="statDown">0</div>
           </div>
           <div class="stat-card">
+            <div class="stat-top"><span class="stat-ic lock" data-icon="lock"></span><span class="stat-label">鉴权失败</span></div>
+            <div class="stat-num" id="statAuthfail">0</div>
+          </div>
+          <div class="stat-card">
             <div class="stat-top"><span class="stat-ic accent" data-icon="bolt"></span><span class="stat-label">可用模型</span></div>
             <div class="stat-num" id="statModels">0</div>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head"><h2>最近检测</h2><span class="panel-hint" id="dashUpdated"></span></div>
-          <div class="activity-list" id="recentList"></div>
+          <div class="panel-head"><h2>最近检测</h2><span class="panel-hint" id="dashUpdated"></span><button class="unread-chip" id="unreadChip" style="display:none;"></button></div>
+          <div class="activity-list" id="recentList" data-i18n-skip></div>
         </div>
       </section>
 
@@ -111,6 +115,7 @@
             <option value="up">在线</option>
             <option value="degraded">异常</option>
             <option value="down">离线</option>
+            <option value="authfail">鉴权失败</option>
             <option value="unknown">待检测</option>
           </select>
           <div class="search-wrap">
@@ -131,7 +136,7 @@
             <div class="col-checked">最近检测</div>
             <div class="col-ops"></div>
           </div>
-          <div id="providerList"></div>
+          <div id="providerList" data-i18n-skip></div>
         </div>
       </section>
 
@@ -455,7 +460,7 @@
         <div class="panel" style="margin-top:16px;">
           <div class="panel-head"><h2><span class="panel-ic" data-icon="server"></span>服务商明细</h2></div>
           <div class="panel-body">
-            <div class="stats-table" id="stTable"></div>
+            <div class="stats-table" id="stTable" data-i18n-skip></div>
           </div>
         </div>
       </section>
@@ -517,6 +522,34 @@
                   <div class="opt-sub">网络抖动 / 429 / 5xx 时按指数退避重试，避免瞬时误判离线</div>
                 </div>
                 <input type="number" id="retries" min="0" max="5" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">探测并发池</div>
+                  <div class="opt-sub">单轮同时探测的模型路数（5–10，避免请求突发）</div>
+                </div>
+                <input type="number" id="probeConcurrency" min="5" max="10" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">探测请求抖动（毫秒）</div>
+                  <div class="opt-sub">每路探测启动前随机延迟 0–N 毫秒，打散请求突发</div>
+                </div>
+                <input type="number" id="probeJitterMs" min="0" max="2000" step="50" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">探测轮询覆盖</div>
+                  <div class="opt-sub">超出上限时每轮探测不同子集，多轮覆盖全部模型</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="probeRotate" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">跳过 TLS 证书校验</div>
+                  <div class="opt-sub">仅用于自签证书内网环境；有中间人风险，公网请勿开启</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="insecureSkipVerify" /><span class="knob"></span></label>
               </div>
             </div>
           </div>
@@ -600,6 +633,13 @@
               </div>
               <div class="opt-row">
                 <div>
+                  <div class="opt-title">记录单模型历史</div>
+                  <div class="opt-sub">记录每个模型的逐轮探测结果，用于详情页可用率徽标</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="modelHistoryEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
                   <div class="opt-title">历史保留天数</div>
                   <div class="opt-sub">超期的历史分片会在启动时自动清理</div>
                 </div>
@@ -662,6 +702,109 @@
                 </div>
                 <label class="switch"><input type="checkbox" id="launchMinimized" /><span class="knob"></span></label>
               </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">界面语言</div>
+                  <div class="opt-sub">切换后界面文本即时更新（操作指南暂仅中文）</div>
+                </div>
+                <select id="lang" class="select-input opt-select">
+                  <option value="zh">中文</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">全局快捷键</div>
+                  <div class="opt-sub">按下显示 / 隐藏主界面</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="hotkeyEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">快捷键组合</div>
+                  <div class="opt-sub">修改后自动重新注册；注册失败通常是被其它程序占用</div>
+                </div>
+                <input type="text" id="hotkey" class="text-input" placeholder="CommandOrCtrl+Alt+M" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">托盘气泡通知</div>
+                  <div class="opt-sub">有新告警时在托盘弹出气泡（5 分钟内最多一次）</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="trayBalloonEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">自动检查更新</div>
+                  <div class="opt-sub">启动约 30 秒后静默检查一次，也可在菜单手动检查</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="autoUpdateCheck" /><span class="knob"></span></label>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="inbox"></span>邮件日报</h2></div>
+            <div class="panel-body">
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">每日定时发送</div>
+                  <div class="opt-sub">每天指定时刻发送可用率日报到下方收件人</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="dailyReportEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">发送时刻</div>
+                </div>
+                <input type="time" id="dailyReportTime" class="select-input" value="08:00" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">SMTP 服务器</div>
+                </div>
+                <input type="text" id="smtpHost" class="text-input" placeholder="smtp.example.com" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">SMTP 端口</div>
+                </div>
+                <input type="number" id="smtpPort" min="1" max="65535" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">SSL 加密</div>
+                  <div class="opt-sub">465 端口通常开启，587 端口通常关闭</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="smtpSecure" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">发件账号</div>
+                </div>
+                <input type="text" id="smtpUser" class="text-input" placeholder="user@example.com" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">授权码 / 密码</div>
+                </div>
+                <input type="password" id="smtpPass" class="text-input" placeholder="SMTP 授权码" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">发件人</div>
+                </div>
+                <input type="text" id="mailFrom" class="text-input" placeholder="monitor@example.com" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">收件人</div>
+                </div>
+                <input type="text" id="mailTo" class="text-input" placeholder="admin@example.com" />
+              </div>
+              <div class="field-row" style="margin-top:10px;">
+                <button class="btn small" id="btnMailTest">发送测试邮件</button>
+                <span class="hint" id="mailHint"></span>
+              </div>
             </div>
           </div>
         </div>
@@ -701,7 +844,7 @@
                 <button class="btn small" id="bkPick">选择备份文件…</button>
                 <button class="btn small primary" id="bkRestore" disabled>开始还原</button>
               </div>
-              <div class="bk-picked" id="bkPicked" style="display:none;"></div>
+              <div class="bk-picked" id="bkPicked" style="display:none;" data-i18n-skip></div>
             </div>
           </div>
 
@@ -711,7 +854,7 @@
               <button class="btn small ghost" id="bkRefresh">刷新</button>
             </div>
             <div class="panel-body" style="padding-top:6px;">
-              <div id="bkList"></div>
+              <div id="bkList" data-i18n-skip></div>
             </div>
           </div>
         </div>
@@ -732,7 +875,7 @@
             <button class="btn small ghost" id="openLogDir">打开日志目录</button>
           </div>
         </header>
-        <div class="log-card" id="logCard"></div>
+        <div class="log-card" id="logCard" data-i18n-skip></div>
       </section>
     </main>
   </div>
@@ -814,6 +957,25 @@
           </div>
         </div>
         <div class="field">
+          <label>维护窗口 <span class="hint">该时段内不触发故障告警（可跨零点）</span></label>
+          <div class="field-inline">
+            <label class="switch"><input type="checkbox" id="fMaintEnabled" /><span class="knob"></span></label>
+            <input type="time" id="fMaintStart" class="select-input" value="02:00" title="维护开始" />
+            <span class="hint">→</span>
+            <input type="time" id="fMaintEnd" class="select-input" value="04:00" title="维护结束" />
+          </div>
+        </div>
+        <div class="field-inline">
+          <div class="field grow">
+            <label>TLS 证书校验 <span class="hint">自签证书内网可跳过</span></label>
+            <select id="fTlsVerify" class="select-input">
+              <option value="follow">跟随全局</option>
+              <option value="verify">始终校验</option>
+              <option value="skip">跳过校验（自签证书）</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
           <label>备注</label>
           <input type="text" id="fNote" placeholder="可选" />
         </div>
@@ -834,19 +996,19 @@
         <button class="icon-btn" id="dmClose"></button>
       </div>
       <div class="modal-body">
-        <div class="dm-banner" id="dmBanner"></div>
-        <div class="detail-meta" id="dmMeta"></div>
+        <div class="dm-banner" id="dmBanner" data-i18n-skip></div>
+        <div class="detail-meta" id="dmMeta" data-i18n-skip></div>
         <div class="dm-section">
           <div class="dm-sec-title">可用模型 <span id="dmAvailCount" class="count-pill"></span></div>
-          <div class="model-tags" id="dmAvail"></div>
+          <div class="model-tags" id="dmAvail" data-i18n-skip></div>
         </div>
         <div class="dm-section">
           <div class="dm-sec-title">不可用 <span id="dmUnavailCount" class="count-pill gray"></span></div>
-          <div class="model-tags" id="dmUnavail"></div>
+          <div class="model-tags" id="dmUnavail" data-i18n-skip></div>
         </div>
         <div class="dm-section" id="dmUnprobedWrap" style="display:none;">
           <div class="dm-sec-title">未探测（超出单轮上限） <span id="dmUnprobedCount" class="count-pill gray"></span></div>
-          <div class="model-tags" id="dmUnprobed"></div>
+          <div class="model-tags" id="dmUnprobed" data-i18n-skip></div>
         </div>
       </div>
     </div>
@@ -886,7 +1048,7 @@
         </div>
         <div class="field" style="margin-top:6px;">
           <label>预览</label>
-          <pre class="io-preview" id="emPreview"></pre>
+          <pre class="io-preview" id="emPreview" data-i18n-skip></pre>
         </div>
         <div class="form-error" id="emError"></div>
       </div>
@@ -925,14 +1087,14 @@
         </div>
         <div class="field">
           <label>粘贴内容或选择文件</label>
-          <textarea class="io-textarea" id="imText" rows="7" placeholder="JSON：[{ name, url, apiKey, intervalSec, notifyOnModelChange, note }]&#10;CSV：表头 name,url,apiKey,intervalSec,notifyOnModelChange,note&#10;文本：名称&lt;分隔符&gt;URL&lt;分隔符&gt;APIKey&lt;分隔符&gt;周期秒&lt;分隔符&gt;上报(1/0)&lt;分隔符&gt;备注（后四列可省略）"></textarea>
+          <textarea class="io-textarea" id="imText" rows="7" placeholder="JSON：[{ name, url, apiKey, intervalSec, notifyOnModelChange, note }]&#10;CSV：表头 name,url,apiKey,intervalSec,notifyOnModelChange,note（另可含 group,tags,probeMode,probeLimit,proxyUrl,useProxy）&#10;文本：名称&lt;分隔符&gt;URL&lt;分隔符&gt;APIKey&lt;分隔符&gt;周期秒&lt;分隔符&gt;上报(1/0)&lt;分隔符&gt;备注（后四列可省略）"></textarea>
         </div>
         <div class="field-row">
           <button class="btn small" id="imPick">从文件读取…</button>
           <button class="btn small" id="imPreviewBtn">解析预览</button>
           <span class="hint" id="imHint"></span>
         </div>
-        <div class="io-result" id="imResult" style="display:none;"></div>
+        <div class="io-result" id="imResult" style="display:none;" data-i18n-skip></div>
         <div class="field" style="margin-top:12px;">
           <label>导入方式</label>
           <div class="field-row">
@@ -964,10 +1126,11 @@
     </div>
   </div>
 
-  <div id="toastWrap"></div>
+  <div id="toastWrap" data-i18n-skip></div>
 
   <script src="../src/durfmt.js"></script>
   <script src="icons.js"></script>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 
 </body>

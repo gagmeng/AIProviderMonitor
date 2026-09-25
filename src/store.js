@@ -67,7 +67,36 @@ const DEFAULT_GLOBAL = {
   launchMinimized: false,
   autoStartCheckOnLaunch: true,
   concurrency: 4,
-  closeAction: 'tray'   // 'tray'：点关闭隐藏到托盘；'exit'：点关闭直接退出
+  closeAction: 'tray',  // 'tray'：点关闭隐藏到托盘；'exit'：点关闭直接退出
+  // --- 界面语言 ---
+  lang: 'zh',   // 'zh' | 'en'
+  // --- 探测并发与轮询 ---
+  probeConcurrency: 8,
+  probeJitterMs: 120,
+  probeRotate: true,
+  // --- TLS ---
+  insecureSkipVerify: false,
+  // --- 全局代理（通知发送 + 无独立代理的服务商检测） ---
+  // --- 自动更新 / 托盘 / 快捷键 ---
+  autoUpdateCheck: true,
+  trayBalloonEnabled: true,
+  hotkeyEnabled: true,
+  hotkey: 'CommandOrCtrl+Alt+M',
+  // --- 邮件日报 ---
+  smtpHost: '',
+  smtpPort: 465,
+  smtpSecure: true,
+  smtpUser: '',
+  smtpPass: '',
+  mailFrom: '',
+  mailTo: '',
+  dailyReportEnabled: false,
+  dailyReportTime: '08:00',
+  // --- 自监控 ---
+  selfmonSlowMs: 60000,
+  selfmonQueueWarn: 20,
+  // --- 单模型历史 ---
+  modelHistoryEnabled: true
 };
 
 function normalizeGlobal(rawGlobal = {}) {
