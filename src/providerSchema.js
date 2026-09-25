@@ -9,7 +9,7 @@
 const RUNTIME_FIELDS = [
   'status', 'latency', 'modelsTotal', 'modelsAvailable', 'modelsUnavailable',
   'modelsUnprobed', 'modelDetails', 'checkedAt', 'lastError', 'modelChanged',
-  'consecutiveFail', 'probeCursor', 'modelBaseline'
+  'consecutiveFail', 'probeCursor', 'modelBaseline', 'alertRuntime'
 ];
 
 /** 全新的运行态（入库/还原时重置检测状态） */
@@ -63,6 +63,7 @@ function normalizeProvider(p) {
   out.insecureSkipVerify = src.insecureSkipVerify === true ? true : src.insecureSkipVerify === false ? false : null;
   // 运行态一律重置
   Object.assign(out, freshRuntime());
+  delete out.alertRuntime;
   return out;
 }
 

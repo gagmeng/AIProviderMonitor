@@ -586,6 +586,7 @@ function renderNotify() {
   $('#smtpHost').value = g.smtpHost || '';
   $('#smtpPort').value = g.smtpPort || 465;
   $('#smtpSecure').checked = g.smtpSecure !== false;
+  if ($('#smtpInsecureSkipVerify')) $('#smtpInsecureSkipVerify').checked = Boolean(g.smtpInsecureSkipVerify);
   $('#smtpUser').value = g.smtpUser || '';
   $('#smtpPass').value = g.smtpPass || '';
   $('#mailFrom').value = g.mailFrom || '';
@@ -662,6 +663,7 @@ function saveNotify() {
       smtpHost: $('#smtpHost').value.trim(),
       smtpPort: int('#smtpPort', 465, 1, 65535),
       smtpSecure: $('#smtpSecure').checked,
+      smtpInsecureSkipVerify: Boolean($('#smtpInsecureSkipVerify') && $('#smtpInsecureSkipVerify').checked),
       smtpUser: $('#smtpUser').value.trim(),
       smtpPass: $('#smtpPass').value,
       mailFrom: $('#mailFrom').value.trim(),
@@ -675,6 +677,7 @@ function saveNotify() {
 ['wxEnable', 'qqEnable', 'dtEnable', 'autoStart', 'tgEnable', 'fsEnable', 'skEnable', 'scEnable', 'cwEnable',
  'alertRecoverNotify', 'alertOnModelChange', 'alertQuietEnabled', 'proxyEnabled', 'historyEnabled',
  'launchAtLogin', 'launchMinimized', 'probeRotate', 'insecureSkipVerify', 'modelHistoryEnabled',
+ 'smtpInsecureSkipVerify',
  'hotkeyEnabled', 'trayBalloonEnabled', 'autoUpdateCheck', 'dailyReportEnabled', 'smtpSecure']
   .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('change', saveNotify); });
 ['wxWebhook', 'qqWebhook', 'qqTarget', 'qqToken', 'dtWebhook', 'dtSecret', 'concurrency',
@@ -795,7 +798,7 @@ async function renderStats() {
   $('#stTable').innerHTML = `
     <div class="st-row st-head">
       <div>${tx('服务商')}</div><div>${tx('样本')}</div><div>${tx('可用率')}</div>
-      <div>${tx('在线/异常/离线')}</div><div>${tx('故障时长')}</div><div>${tx('平均延迟')}</div><div>${tx('P95')}</div><div>${tx('最后状态')}</div>
+      <div>${tx('在线/异常/离线/鉴权')}</div><div>${tx('故障时长')}</div><div>${tx('平均延迟')}</div><div>${tx('P95')}</div><div>${tx('最后状态')}</div>
     </div>` + rows.map((p) => {
     const cls = p.uptime >= 99 ? 'up' : p.uptime >= 90 ? 'degraded' : 'down';
     const si = statusInfo(p.lastStatus);
@@ -803,7 +806,7 @@ async function renderStats() {
       <div class="st-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div>
       <div>${p.samples}</div>
       <div><span class="st-uptime u-${cls}">${p.uptime}%</span></div>
-      <div class="st-mini">${p.upCount}/${p.degCount}/${p.downCount}</div>
+      <div class="st-mini">${p.upCount}/${p.degCount}/${p.downCount}/${p.authCount || 0}</div>
       <div class="st-mini">${fmtMsShort(p.downMs)}</div>
       <div>${p.latencyAvg != null ? p.latencyAvg + ' ms' : '—'}</div>
       <div>${p.latencyP95 != null ? p.latencyP95 + ' ms' : '—'}</div>

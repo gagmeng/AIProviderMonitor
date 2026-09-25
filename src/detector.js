@@ -3,6 +3,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const logger = require('./logger');
+const { headersForRedirect } = require('./httpguard');
 
 const DEFAULT_REQUEST_TIMEOUT = 20000;
 const DEFAULT_PROBE_TIMEOUT = 15000;
@@ -16,7 +17,7 @@ const MAX_REDIRECTS = 3;
 /** 惰性加载代理 agent（仅在配置了代理时才需要 https-proxy-agent，缺失则降级直连） */
 let ProxyAgentCtor = null;
 let proxyAgentChecked = false;
-function getProxyAgent(proxyUrl) {
+function getProxyAgent(proxyUrl, insecureSkipVerify) {
   if (!proxyUrl) return null;
   if (!proxyAgentChecked) {
     proxyAgentChecked = true;
@@ -28,7 +29,11 @@ function getProxyAgent(proxyUrl) {
     }
   }
   if (!ProxyAgentCtor) return null;
-  try { return new ProxyAgentCtor(proxyUrl); } catch (e) {
+  try {
+    // 代理自己建 TLS，request 上的 rejectUnauthorized 不一定生效
+    const opts = insecureSkipVerify ? { rejectUnauthorized: false } : undefined;
+    return opts ? new ProxyAgentCtor(proxyUrl, opts) : new ProxyAgentCtor(proxyUrl);
+  } catch (e) {
     logger.warn(`[代理] 代理地址无效: ${proxyUrl}`);
     return null;
   }
@@ -51,7 +56,7 @@ function fetchJSON(targetUrl, { method = 'GET', headers = {}, body = null, timeo
     const mod = u.protocol === 'http:' ? http : https;
     const opts = { method, headers, timeout };
     if (mod === https && insecureSkipVerify) opts.rejectUnauthorized = false;
-    const agent = getProxyAgent(proxy);
+    const agent = getProxyAgent(proxy, insecureSkipVerify);
     if (agent) opts.agent = agent;
     const req = mod.request(u, opts, (res) => {
       // 重定向跟随（≤3 跳）：http→https 等站点不再被误判离线
@@ -62,7 +67,9 @@ function fetchJSON(targetUrl, { method = 'GET', headers = {}, body = null, timeo
         catch (e) { reject(new Error(`重定向地址无效: ${res.headers.location}`)); return; }
         const m = res.statusCode === 303 ? 'GET' : method;
         resolve(fetchJSON(next, {
-          method: m, headers, body: m === 'GET' ? null : body,
+          method: m,
+          headers: headersForRedirect(u.toString(), next, headers),
+          body: m === 'GET' ? null : body,
           timeout, proxy, insecureSkipVerify, _redirects: _redirects + 1
         }));
         return;
@@ -170,7 +177,8 @@ function buildProbeRequest(base, modelId, provider) {
     const path = p.startsWith('/') ? p : `/${p}`;
     let body = String(provider.probeBody || '').trim();
     if (!body) body = JSON.stringify({ model: '{{model}}', messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 });
-    body = body.replace(/\{\{\s*model\s*\}\}/g, modelId);
+    // 函数替换，避免模型名里的引号、$ 破坏 JSON
+    body = body.replace(/\{\{\s*model\s*\}\}/g, () => JSON.stringify(String(modelId)).slice(1, -1));
     return { url: `${base}${path}`, body };
   }
   return {

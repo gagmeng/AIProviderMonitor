@@ -194,14 +194,14 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     // 私聊
     await sendQQ({ qqWebhook: `http://127.0.0.1:${p}`, qqTarget: '10001', qqTargetType: 'private', qqToken: 'sec' }, 'hello');
     assert.strictEqual(calls[0].url, '/send_private_msg');
-    assert.strictEqual(calls[0].body.user_id, '10001');
+    assert.strictEqual(calls[0].body.user_id, 10001);
     assert.strictEqual(calls[0].body.message, 'hello');
     assert.strictEqual(calls[0].auth, 'Bearer sec');
 
     // 群聊
     await sendQQ({ qqWebhook: `http://127.0.0.1:${p}/`, qqTarget: '20002', qqTargetType: 'group' }, 'hi');
     assert.strictEqual(calls[1].url, '/send_group_msg');
-    assert.strictEqual(calls[1].body.group_id, '20002');
+    assert.strictEqual(calls[1].body.group_id, 20002);
 
     // OneBot 错误 retcode 应抛出
     const srv2 = http.createServer((req, res) => { req.on('data', () => {}); req.on('end', () => { res.writeHead(200); res.end(JSON.stringify({ status: 'failed', retcode: 100, wording: 'account not found' })); }); });
@@ -260,15 +260,16 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     const notifyAlertStub = async (cfg, p, a) => { alertPushes.push({ p, a }); };
     const updateTrayStatus = () => {};
     const DATA_DIR = TMP;
+    const { diffBaseline } = require('../src/baseline');
     // 构造隔离环境执行真实 applyResult
     const fn = new Function('snapshot', 'logger', 'notifyModelChange', 'notifyAlert', 'statusText',
-      'db', 'history', 'alerts', 'updateTrayStatus', 'DATA_DIR', `
+      'db', 'history', 'alerts', 'updateTrayStatus', 'DATA_DIR', 'diffBaseline', `
       ${m[0]}
       return applyResult;
     `);
     const applyResult = fn(snapshot, logger, notifierStub.notifyModelChange, notifyAlertStub, statusText,
       { global: { historyEnabled: false, alertFailThreshold: 99, alertOnModelChange: true, alertCooldownMin: 0 }, providers: [] },
-      historyStub, alertsReal, updateTrayStatus, DATA_DIR);
+      historyStub, alertsReal, updateTrayStatus, DATA_DIR, diffBaseline);
 
     // 首次检测（status=unknown 基线）
     const p = { id: 1, name: 'A', status: 'unknown', modelsAvailable: [], modelsTotal: 0, notifyOnModelChange: true };
@@ -286,22 +287,22 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     assert.strictEqual(p.modelChanged, true, '失去模型应标记变动');
     assert.strictEqual(pushes.length, 1, '变动且开关开启应推送');
 
-    // 状态翻转（模型不变不可能 up→down，用 up→degraded+清空）
+    // 连接失败没有新清单：不把基线模型当成消失，也不把状态翻转算成模型变动
     applyResult(p, { status: 'down', modelsTotal: 2, modelsAvailable: [], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: '连接失败' }, 'auto');
-    assert.strictEqual(p.modelChanged, true);
-    assert.strictEqual(pushes.length, 2);
+    assert.strictEqual(p.modelChanged, false, '连接失败不应记成模型变动');
+    assert.strictEqual(pushes.length, 1);
 
     // 连续 down（无变化）→ 不推送
     applyResult(p, { status: 'down', modelsTotal: 2, modelsAvailable: [], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: '连接失败' }, 'auto');
     assert.strictEqual(p.modelChanged, false);
-    assert.strictEqual(pushes.length, 2, '连续相同结果不应重复推送');
+    assert.strictEqual(pushes.length, 1, '连续相同结果不应重复推送');
 
     // 开关关闭 → 变动但不推送
     p.status = 'up'; p.modelsAvailable = ['a']; p.modelsTotal = 2;
     p.notifyOnModelChange = false;
     applyResult(p, { status: 'up', modelsTotal: 3, modelsAvailable: ['a', 'x'], modelsUnavailable: [], modelDetails: [], checkedAt: Date.now(), error: null }, 'auto');
     assert.strictEqual(p.modelChanged, true, '模型总数+可用变化应标记变动');
-    assert.strictEqual(pushes.length, 2, '开关关闭不应推送');
+    assert.strictEqual(pushes.length, 1, '开关关闭不应推送');
   });
 
   // 5.8 导入导出模块

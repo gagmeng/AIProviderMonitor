@@ -112,6 +112,16 @@
 - **中英双语**：设置页一键切换（操作指南暂仅中文）
 - **自动检查更新**：启动约 30 秒静默检查（需安装 `electron-updater` 并配置发布源，否则跳过）
 
+### 9. v1.2.1
+
+- 月/年轮循不再因定时器上限变成约每秒检测一次
+- 模型变动只在集合真正变化时上报一次，状态翻转不再绕过故障消抖
+- 配置损坏时保留原文件，禁止用空库覆盖
+- 跨源重定向不再携带 API Key；通知代理遵循「代理已启用」
+- 菜单「检查更新」会提示结果；启动检查保持静默
+- 统计单独计入鉴权失败；邮件 TLS 与探测 TLS 分开
+- 日报错过发送分钟会在当天补发一次
+
 ---
 
 ## 界面预览
@@ -157,7 +167,7 @@ iOS 风格设计语言：SF 系统字体栈、毛玻璃侧栏、圆角卡片（1
 │  │            渲染进程 (preload.js 沙箱桥接)          │          │
 │  │                                                 │          │
 │  │  index.html + styles.css + app.js + icons.js    │          │
-│  │  仪表盘 / 服务商 / 通知 / 日志 四视图 SPA          │          │
+│  │  仪表盘 / 服务商 / 统计 / 通知 / 备份 / 设置 / 日志 │          │
 │  └─────────────────────────────────────────────────┘          │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -171,6 +181,10 @@ iOS 风格设计语言：SF 系统字体栈、毛玻璃侧栏、圆角卡片（1
 | 主进程模块 | `src/scheduler.js` | 每 Provider 独立定时器、并发池（默认 4）、手动检测去重、周期变更热重载 |
 | 主进程模块 | `src/detector.js` | HTTP(S) 探测引擎：模型列表拉取、逐模型可用性探测、失败原因分类 |
 | 主进程模块 | `src/notifier.js` | 三通道通知：企业微信 / OneBot v11 QQ / 钉钉加签 |
+| 主进程模块 | `src/alerts.js` | 故障消抖、恢复、静默/维护窗口、冷却；状态随配置落盘 |
+| 主进程模块 | `src/history.js` | 按天 JSONL 历史、可用率、鉴权失败计数 |
+| 主进程模块 | `src/mailer.js` | SMTP 日报，证书校验与探测分开 |
+| 主进程模块 | `src/baseline.js` | 可用模型基线差集，避免轮询误报 |
 | 主进程模块 | `src/logger.js` | 内存环形缓冲（600 条）+ 按天落盘 + 实时订阅推送 |
 | 预加载脚本 | `preload.js` | contextBridge 暴露类型安全的 `window.aipm` API（`contextIsolation: true`，`nodeIntegration: false`） |
 | 渲染进程 | `renderer/*` | 无框架原生 SPA：视图切换、状态渲染、事件委托、弹窗/Toast |
@@ -423,6 +437,11 @@ AIProviderMonitor/
 │   ├── transfer.js          #   服务商批量导入 / 导出（JSON/CSV/文本）
 │   ├── backup.js            #   备份与还原（手动 + 每日自动）
 │   └── logger.js            #   日志（内存缓冲 + 按天落盘 + 订阅）
+│   ├── mailer.js            #   SMTP 日报
+│   ├── updater.js           #   electron-updater 懒加载
+│   ├── baseline.js          #   模型变动基线
+│   ├── httpguard.js         #   重定向时剥离跨源鉴权头
+│   └── providerSchema.js    #   导入/备份字段归一
 ├── renderer/                # 渲染进程（无框架 SPA）
 │   ├── index.html           #   七视图布局（含统计）+ 弹窗
 │   ├── styles.css           #   iOS 风格设计系统
@@ -432,6 +451,7 @@ AIProviderMonitor/
 │   └── gen-icons.js         # SDF 算法生成应用图标（PNG/ICO）
 ├── tests/
 │   ├── smoke.js             # 模块冒烟测试（35 用例，mock 服务器）
+│   ├── unit-logic.js        # 定时器、基线、重定向、告警补发等单测
 │   ├── app-smoke.js         # Electron 应用级自检（--smoke-test）
 │   └── renderer-check.js    # 渲染层自检（真实窗口加载 + CSP 校验）
 ├── .eslintrc.json           # ESLint 规则
@@ -440,8 +460,8 @@ AIProviderMonitor/
 │   ├── icon.ico             # 多尺寸应用图标
 │   └── icon.png             # 256×256 PNG
 └── dist/                    # 打包产物
-    ├── AIProviderMonitor-1.1.1.exe          # NSIS 安装包
-    └── AIProviderMonitor-Portable-1.1.1.exe # 便携版
+    ├── AIProviderMonitor-1.2.1.exe          # NSIS 安装包
+    └── AIProviderMonitor-Portable-1.2.1.exe # 便携版
 ```
 
 ## 数据文件格式
@@ -494,7 +514,7 @@ AIProviderMonitor/
 状态为「异常（degraded）」：服务本身可达、能返回模型列表，但所有模型探测失败。展开详情查看每个模型的具体原因（最常见是 API Key 无权限或额度耗尽）。
 
 **Q: 探测会影响服务商计费吗？**
-每轮对每个模型发送一次 `max_tokens=1` 的最小请求，消耗极小。若模型很多且在意成本，可接受只拉列表不探测的折中（当前版本探测上限 8 个/轮已控制请求量）。
+每轮对每个模型发送一次 `max_tokens=1` 的最小请求，消耗极小。模型很多时可以把探测方式设为仅列表，或使用默认单轮上限 20 并开启轮询覆盖。
 
 **Q: 通知收到了但钉钉提示 sign not match？**
 「加签密钥 SECRET」与服务商机器人安全设置中的密钥不一致，或机器人实际使用的是关键词/IP 白名单校验却误填了密钥栏。两种校验方式二选一。

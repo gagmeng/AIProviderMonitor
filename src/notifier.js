@@ -3,22 +3,27 @@ const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
 const { URL } = require('url');
+const { headersForRedirect } = require('./httpguard');
 
 /** 懒加载 https-proxy-agent（可选依赖，缺失时退化为直连） */
-function getProxyAgent(proxyUrl) {
+function getProxyAgent(proxyUrl, insecureSkipVerify) {
   if (!proxyUrl) return null;
   try {
     const mod = require('https-proxy-agent');
     const AgentCtor = mod.HttpsProxyAgent || mod;
     if (typeof AgentCtor !== 'function') return null;
-    return new AgentCtor(proxyUrl);
+    const opts = insecureSkipVerify ? { rejectUnauthorized: false } : undefined;
+    return opts ? new AgentCtor(proxyUrl, opts) : new AgentCtor(proxyUrl);
   } catch (e) { return null; }
 }
 
 /** 通知代理解析：服务商独立代理 > 全局代理；服务商可关闭 */
 function resolveNotifyProxy(provider, g = {}) {
   if (provider && provider.useProxy === false) return '';
-  return (provider && provider.proxyUrl) || g.proxyUrl || '';
+  const own = String((provider && provider.proxyUrl) || '').trim();
+  if (own) return own;
+  if (g.proxyEnabled && String(g.proxyUrl || '').trim()) return String(g.proxyUrl).trim();
+  return '';
 }
 const logger = require('./logger');
 
@@ -49,7 +54,7 @@ function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders
     if (token) headers.Authorization = `Bearer ${token}`;
     const reqOpts = { method: 'POST', headers, timeout };
     if (mod === https && insecureSkipVerify) reqOpts.rejectUnauthorized = false;
-    const agent = getProxyAgent(proxy);
+    const agent = getProxyAgent(proxy, insecureSkipVerify);
     if (agent) reqOpts.agent = agent;
     const req = mod.request(u, reqOpts, (res) => {
       // 重定向跟随（≤3 跳；303 转 GET 对 webhook 无意义，直接报错提示检查地址）
@@ -59,7 +64,11 @@ function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders
         let next;
         try { next = new URL(res.headers.location, u).toString(); }
         catch (e) { reject(new Error(`重定向地址无效: ${res.headers.location}`)); return; }
-        resolve(post(next, payload, { timeout, token, headers: extraHeaders, raw, proxy, insecureSkipVerify, _redirects: _redirects + 1 }));
+        const nextHeaders = headersForRedirect(u.toString(), next, extraHeaders);
+        const keepToken = Boolean(headersForRedirect(u.toString(), next, token ? { Authorization: 'keep' } : {}).Authorization);
+        resolve(post(next, payload, {
+          timeout, token: keepToken ? token : '', headers: nextHeaders, raw, proxy, insecureSkipVerify, _redirects: _redirects + 1
+        }));
         return;
       }
       let data = '';
@@ -188,6 +197,15 @@ async function sendDingtalk(globalCfg, text, ctx = {}) {
 }
 
 /** QQ 上报：调用 OneBot v11 HTTP API（/send_private_msg 或 /send_group_msg） */
+function oneBotId(target) {
+  const s = String(target || '').trim();
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    if (Number.isSafeInteger(n)) return n;
+  }
+  return s;
+}
+
 async function sendQQ(globalCfg, text, ctx = {}) {
   const base = String(globalCfg.qqWebhook || '').trim().replace(/\/+$/, '');
   if (!base) throw new Error('未配置 QQ 机器人服务地址');
@@ -196,7 +214,8 @@ async function sendQQ(globalCfg, text, ctx = {}) {
   const token = String(globalCfg.qqToken || '').trim();
   const isGroup = globalCfg.qqTargetType === 'group';
   const path = isGroup ? '/send_group_msg' : '/send_private_msg';
-  const payload = isGroup ? { group_id: target, message: text } : { user_id: target, message: text };
+  const id = oneBotId(target);
+  const payload = isGroup ? { group_id: id, message: text } : { user_id: id, message: text };
   const res = await postRetry(base + path, payload, { token, ...sendOpts(globalCfg, ctx) });
   try {
     const j = JSON.parse(res);
@@ -379,5 +398,5 @@ module.exports = {
   notifyModelChange, notifyAlert, sendTest, broadcast,
   buildModelChangeText, buildAlertText, channelEnabled,
   sendQQ, sendWeixin, sendDingtalk, sendTelegram, sendFeishu, sendSlack, sendServerChan, sendCustom,
-  CHANNELS, CHANNEL_LABEL, getNotifyHealth, resolveNotifyProxy
+  CHANNELS, CHANNEL_LABEL, getNotifyHealth, resolveNotifyProxy, oneBotId
 };

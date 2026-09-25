@@ -19,6 +19,72 @@ function historyDir(dataDir) { return path.join(dataDir, DIR_NAME); }
 
 function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch (e) { /* ignore */ } }
 
+// 写入先入队，下一拍异步落盘，避免检测回调里同步写盘卡住界面。
+// 读取前 flushSync，保证同一次调用链里刚写入的记录可见。
+const writeQueue = [];
+let writeTimer = null;
+
+function enqueueWrite(file, text) {
+  writeQueue.push({ file, text });
+  if (!writeTimer) writeTimer = setImmediate(flushAsync);
+}
+
+function groupedQueue(batch) {
+  const byFile = new Map();
+  for (const job of batch) {
+    byFile.set(job.file, (byFile.get(job.file) || '') + job.text);
+  }
+  return byFile;
+}
+
+function flushAsync() {
+  writeTimer = null;
+  const batch = writeQueue.splice(0, writeQueue.length);
+  for (const [file, text] of groupedQueue(batch)) {
+    fs.appendFile(file, text, 'utf8', (err) => {
+      if (err) logger.warn(`[历史] 异步写入失败: ${err.message}`);
+    });
+  }
+}
+
+function flushSync() {
+  if (writeTimer) { clearImmediate(writeTimer); writeTimer = null; }
+  const batch = writeQueue.splice(0, writeQueue.length);
+  for (const [file, text] of groupedQueue(batch)) {
+    try {
+      ensureDir(path.dirname(file));
+      fs.appendFileSync(file, text, 'utf8');
+    } catch (e) {
+      logger.warn(`[历史] 写入失败: ${e.message}`);
+    }
+  }
+}
+
+/** 按块读行，避免把整天的 JSONL 一次读成一个大字符串 */
+function readLines(file, onLine) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch (e) { return; }
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    let leftover = '';
+    while (true) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      leftover += buf.toString('utf8', 0, n);
+      let idx;
+      while ((idx = leftover.indexOf('\n')) >= 0) {
+        const line = leftover.slice(0, idx).replace(/\r$/, '');
+        leftover = leftover.slice(idx + 1);
+        if (line.trim()) onLine(line);
+      }
+      if (leftover.length > 2 * 1024 * 1024) leftover = leftover.slice(-2048);
+    }
+    if (leftover.trim()) onLine(leftover.replace(/\r$/, ''));
+  } finally {
+    try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+  }
+}
+
 function dayKey(ts) {
   const d = new Date(ts);
   const p = (n) => String(n).padStart(2, '0');
@@ -50,7 +116,7 @@ function append(dataDir, provider, result) {
       unprobed: (result.modelsUnprobed || []).length,
       err: result.error ? String(result.error).slice(0, 200) : null
     };
-    fs.appendFileSync(fileFor(dataDir, rec.t), JSON.stringify(rec) + '\n', 'utf8');
+    enqueueWrite(fileFor(dataDir, rec.t), JSON.stringify(rec) + '\n');
     return rec;
   } catch (e) {
     logger.warn(`[历史] 写入失败: ${e.message}`);
@@ -71,7 +137,7 @@ function appendModels(dataDir, providerId, checkedAt, details) {
     if (!lines.length) return 0;
     const dir = historyDir(dataDir);
     ensureDir(dir);
-    fs.appendFileSync(modelFileFor(dataDir, t), lines.join('\n') + '\n', 'utf8');
+    enqueueWrite(modelFileFor(dataDir, t), lines.join('\n') + '\n');
     return lines.length;
   } catch (e) {
     logger.warn(`[历史] 单模型写入失败: ${e.message}`);
@@ -81,6 +147,7 @@ function appendModels(dataDir, providerId, checkedAt, details) {
 
 /** 读取某服务商指定时间范围内的单模型记录 */
 function readModelRange(dataDir, providerId, fromTs, toTs) {
+  flushSync();
   const dir = historyDir(dataDir);
   const out = [];
   let files;
@@ -93,14 +160,12 @@ function readModelRange(dataDir, providerId, fromTs, toTs) {
     const key = f.slice(6, 14);
     if (key < fromKey || key > toKey) continue;
     let text;
-    try { text = fs.readFileSync(path.join(dir, f), 'utf8'); } catch (e) { continue; }
-    for (const line of text.split('\n')) {
-      if (!line.trim()) continue;
+    readLines(path.join(dir, f), (line) => {
       try {
         const r = JSON.parse(line);
         if (r.id === Number(providerId) && r.t >= fromTs && r.t <= toTs) out.push(r);
       } catch (e) { /* 跳过损坏行 */ }
-    }
+    });
   }
   return out;
 }
@@ -130,6 +195,7 @@ function modelRates(dataDir, providerId, { hours = 24 } = {}) {
 
 /** 读取指定时间范围内的全部记录（按天分片定位，避免全量扫描） */
 function readRange(dataDir, fromTs, toTs) {
+  flushSync();
   const dir = historyDir(dataDir);
   const out = [];
   let files;
@@ -142,14 +208,12 @@ function readRange(dataDir, fromTs, toTs) {
     const key = f.slice(5, 13);
     if (key < fromKey || key > toKey) continue;
     let text;
-    try { text = fs.readFileSync(path.join(dir, f), 'utf8'); } catch (e) { continue; }
-    for (const line of text.split('\n')) {
-      if (!line.trim()) continue;
+    readLines(path.join(dir, f), (line) => {
       try {
         const r = JSON.parse(line);
         if (r.t >= fromTs && r.t <= toTs) out.push(r);
       } catch (e) { /* 跳过损坏行 */ }
-    }
+    });
   }
   out.sort((a, b) => a.t - b.t);
   return out;
@@ -184,6 +248,7 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
     const upCount = list.filter((r) => r.status === 'up').length;
     const degCount = list.filter((r) => r.status === 'degraded').length;
     const downCount = list.filter((r) => r.status === 'down').length;
+    const authCount = list.filter((r) => r.status === 'authfail').length;
     const lats = list.map((r) => r.latency).filter((v) => typeof v === 'number' && v >= 0).sort((a, b) => a - b);
     // 故障时长：连续非 up 样本按相邻采样间隔累加
     let downMs = 0;
@@ -213,6 +278,7 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
       samples: total,
       uptime: total ? Number(((upCount / total) * 100).toFixed(2)) : 0,
       upCount, degCount, downCount,
+      authCount,
       downMs,
       latencyAvg: lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : null,
       latencyP50: percentile(lats, 50),
@@ -226,6 +292,7 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
 
   const totalSamples = recs.length;
   const totalUp = recs.filter((r) => r.status === 'up').length;
+  const totalAuth = recs.filter((r) => r.status === 'authfail').length;
   const allLats = recs.map((r) => r.latency).filter((v) => typeof v === 'number' && v >= 0).sort((a, b) => a - b);
 
   return {
@@ -235,6 +302,7 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
       samples: totalSamples,
       providers: perProvider.length,
       uptime: totalSamples ? Number(((totalUp / totalSamples) * 100).toFixed(2)) : 0,
+      authCount: totalAuth,
       latencyAvg: allLats.length ? Math.round(allLats.reduce((a, b) => a + b, 0) / allLats.length) : null,
       latencyP95: percentile(allLats, 95)
     },
@@ -275,6 +343,7 @@ function series(dataDir, { hours = 24, providerId = null, buckets = 48 } = {}) {
 
 /** 清理超过保留天数的历史分片 */
 function prune(dataDir, keepDays = 30) {
+  flushSync();
   const dir = historyDir(dataDir);
   let files;
   try { files = fs.readdirSync(dir).filter((f) => /^(hist|mhist)-\d{8}\.jsonl$/.test(f)); } catch (e) { return 0; }
@@ -309,4 +378,4 @@ function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
   return [head.join(','), ...rows].join('\r\n');
 }
 
-module.exports = { append, appendModels, readRange, readModelRange, summarize, modelRates, series, prune, exportCSV, historyDir, modelFileFor, DIR_NAME };
+module.exports = { append, appendModels, readRange, readModelRange, summarize, modelRates, series, prune, exportCSV, historyDir, modelFileFor, DIR_NAME, flushSync };

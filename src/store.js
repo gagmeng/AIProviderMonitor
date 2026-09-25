@@ -92,6 +92,8 @@ const DEFAULT_GLOBAL = {
   mailTo: '',
   dailyReportEnabled: false,
   dailyReportTime: '08:00',
+  // 邮件证书校验与探测分开，避免一个开关关掉两边的 TLS 校验
+  smtpInsecureSkipVerify: false,
   // --- 自监控 ---
   selfmonSlowMs: 60000,
   selfmonQueueWarn: 20,
@@ -119,13 +121,31 @@ function ensureDir() {
 
 function loadAll() {
   ensureDir();
+  if (!fs.existsSync(DATA_FILE)) {
+    return { global: normalizeGlobal(), providers: [] };
+  }
+  let text;
   try {
-    const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    text = fs.readFileSync(DATA_FILE, 'utf8');
+  } catch (e) {
+    const err = new Error(`读取配置失败，已停止加载以免稍后用空配置覆盖原文件: ${e.message}`);
+    err.code = 'CONFIG_READ_FAILED';
+    throw err;
+  }
+  try {
+    const raw = JSON.parse(text);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('根节点不是对象');
+    }
     const g = normalizeGlobal(raw.global);
     const list = Array.isArray(raw.providers) ? raw.providers : [];
     return { global: g, providers: list };
   } catch (e) {
-    return { global: normalizeGlobal(), providers: [] };
+    const bad = `${DATA_FILE}.corrupt-${Date.now()}`;
+    try { fs.copyFileSync(DATA_FILE, bad); } catch (e2) { /* 副本失败也不改原文件 */ }
+    const err = new Error(`配置文件损坏（${e.message}）。原文件未改动${fs.existsSync(bad) ? `，副本: ${bad}` : ''}。在修复前禁止以空配置覆盖。`);
+    err.code = 'CONFIG_PARSE_FAILED';
+    throw err;
   }
 }
 

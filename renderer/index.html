@@ -547,7 +547,7 @@
               <div class="opt-row">
                 <div>
                   <div class="opt-title">跳过 TLS 证书校验</div>
-                  <div class="opt-sub">仅用于自签证书内网环境；有中间人风险，公网请勿开启</div>
+                  <div class="opt-sub">只影响服务商探测，不影响邮件。仅用于自签证书内网；公网请勿开启</div>
                 </div>
                 <label class="switch"><input type="checkbox" id="insecureSkipVerify" /><span class="knob"></span></label>
               </div>
@@ -588,7 +588,7 @@
               <div class="opt-row">
                 <div>
                   <div class="opt-title">静默时段</div>
-                  <div class="opt-sub">该时间段内不推送任何告警，支持跨零点（如 23:00 → 07:00）</div>
+                  <div class="opt-sub">时段内不推送，支持跨零点。结束后若故障仍在，下一轮补发一次，不会把静默期间的每一轮都补发</div>
                 </div>
                 <label class="switch"><input type="checkbox" id="alertQuietEnabled" /><span class="knob"></span></label>
               </div>
@@ -776,6 +776,13 @@
                   <div class="opt-sub">465 端口通常开启，587 端口通常关闭</div>
                 </div>
                 <label class="switch"><input type="checkbox" id="smtpSecure" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">跳过 SMTP 证书校验</div>
+                  <div class="opt-sub">只影响邮件，与上面的探测 TLS 开关分开。仅自签证书时开启</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="smtpInsecureSkipVerify" /><span class="knob"></span></label>
               </div>
               <div class="opt-row">
                 <div>

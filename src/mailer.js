@@ -18,7 +18,7 @@ async function sendMail(g, { subject, html }) {
     port,
     secure: g.smtpSecure !== false && (port === 465 || g.smtpSecure === true),
     auth: { user: String(g.smtpUser).trim(), pass: String(g.smtpPass) },
-    tls: g.insecureSkipVerify ? { rejectUnauthorized: false } : undefined
+    tls: g.smtpInsecureSkipVerify ? { rejectUnauthorized: false } : undefined
   });
   const from = String(g.mailFrom || g.smtpUser).trim();
   await transporter.sendMail({ from, to: String(g.mailTo).trim(), subject, html });

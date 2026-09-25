@@ -32,6 +32,7 @@ function dayTag(d = new Date()) {
 let fileStream = null;
 let streamDay = null;
 let streamPath = null;
+let writesSinceSizeCheck = 0;
 
 function baseFileFor(day) { return path.join(LOG_DIR, `aipm-${day}.log`); }
 
@@ -74,7 +75,10 @@ function ensureStream() {
     pruneOldLogs();
   }
   if (fileStream) {
-    // 体积超限则切分并重开
+    // 不必每条日志都 stat；约 40 条查一次体积
+    writesSinceSizeCheck++;
+    if (writesSinceSizeCheck < 40) return fileStream;
+    writesSinceSizeCheck = 0;
     if (streamPath && rotateBySize(streamPath)) closeStream();
     else return fileStream;
   }
@@ -98,6 +102,14 @@ function write(level, msg) {
   const s = ensureStream();
   if (s) { try { s.write(`[${line.t}] [${level.toUpperCase()}] ${line.msg}\n`); } catch (e) { /* ignore */ } }
   for (const fn of subscribers) { try { fn(line); } catch (e) { /* ignore */ } }
+}
+
+/** 退出前把流里的缓冲刷出去 */
+function flushSync() {
+  if (!fileStream) return;
+  try {
+    if (typeof fileStream.write === 'function') fileStream.write('');
+  } catch (e) { /* ignore */ }
 }
 
 /** 由主进程在配置变更时调用 */
@@ -135,5 +147,6 @@ module.exports = {
   configure,
   listFiles,
   pruneOldLogs,
+  flushSync,
   LOG_DIR
 };

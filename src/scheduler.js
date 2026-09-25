@@ -2,6 +2,14 @@
 const logger = require('./logger');
 const { detect } = require('./detector');
 
+/** Node setTimeout 超过 2^31-1 ms 会被钳成 1ms。月/年周期必须分段等待。 */
+const MAX_TIMER_MS = 2147483647;
+
+function clampTimerMs(ms) {
+  const n = Math.max(0, Math.floor(Number(ms) || 0));
+  return n > MAX_TIMER_MS ? MAX_TIMER_MS : n;
+}
+
 /**
  * 调度器：按每个 Provider 的轮循周期调度检测。
  *
@@ -73,14 +81,21 @@ class Scheduler {
 
   /** 设定定时器并记录计划信息 */
   _arm(id, delay, period) {
-    const firedAt = Date.now() + delay;   // 本轮计划触发时刻
+    const dueAt = Date.now() + delay;   // 真正到期时刻，可能远于单次 setTimeout 上限
+    const wait = clampTimerMs(delay);
     const tick = async () => {
       this.timers.delete(id);   // 触发后先摘除，检测完成后由 _afterCheck 续链
       if (this.stopped) return;
+      const remain = dueAt - Date.now();
+      // 本次只是 24.8 天分段，还没到周期点，继续等，不要检测
+      if (remain > 1500) {
+        this._arm(id, remain, period);
+        return;
+      }
       await this.runCheck(id, { reason: 'auto' });
-      this._afterCheck(id, firedAt, period);
+      this._afterCheck(id, dueAt, period);
     };
-    const handle = setTimeout(tick, delay);
+    const handle = setTimeout(tick, wait);
     this.timers.set(id, { handle, period });
   }
 
@@ -158,4 +173,4 @@ class Scheduler {
   runningList() { return [...this.running]; }
 }
 
-module.exports = { Scheduler };
+module.exports = { Scheduler, clampTimerMs, MAX_TIMER_MS };

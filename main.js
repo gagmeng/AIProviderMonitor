@@ -12,8 +12,10 @@ const transfer = require('./src/transfer');
 const { formatDuration } = require('./src/durfmt');
 const history = require('./src/history');
 const alerts = require('./src/alerts');
+const { diffBaseline } = require('./src/baseline');
 
 let db = { global: { ...DEFAULT_GLOBAL }, providers: [] };
+let persistBlocked = false;
 let win = null;
 let tray = null;
 let quitting = false;
@@ -26,14 +28,28 @@ const scheduler = new Scheduler({ concurrency: db.global.concurrency || 4 });
 
 // ---------- 数据层 ----------
 function persist() {
+  if (persistBlocked) {
+    logger.error('配置未能成功加载，已跳过保存，避免覆盖 providers.json');
+    return;
+  }
   try { saveAll(db); } catch (e) { logger.error(`保存数据失败: ${e.message}`); }
 }
 
 function load() {
-  db = loadAll();
+  try {
+    db = loadAll();
+    persistBlocked = false;
+  } catch (e) {
+    persistBlocked = true;
+    db = { global: { ...DEFAULT_GLOBAL }, providers: [] };
+    logger.error(e.message);
+    try {
+      dialog.showErrorBox('配置未能加载', `${e.message}\n\n修复 providers.json 之前，本次运行不会保存任何配置。`);
+    } catch (e2) { /* ignore */ }
+  }
   scheduler.setConcurrency(db.global.concurrency || 4);
   logger.configure(db.global);
-  applyLoginItem(db.global);
+  if (!persistBlocked) applyLoginItem(db.global);
 }
 
 function snapshot(provider) {
@@ -71,26 +87,26 @@ function applyResult(provider, result, reason) {
   // 轮询游标回写（detector 给出下一轮偏移；缺省保持原值）
   if (Number.isFinite(Number(result.probeCursor))) provider.probeCursor = Number(result.probeCursor);
 
-  // 变动判定：状态翻转 + 基线差集（新增/失去）。
-  // 基线 = 历史累计出现过的可用模型全集。轮询覆盖下每轮只探测子集，
-  // 用"本轮可用 vs 全集"判新增、用"不可用命中全集"判失去，避免子集轮换造成误报。
-  // 注意：不把 modelsTotal/未探测数量纳入判定，避免上游列表顺序抖动造成误报。
-  const baseline = new Set(Array.isArray(provider.modelBaseline) ? provider.modelBaseline : []);
-  // 首次检测（此前从未成功检测过）：仅建立基准，不算变动、不推送
   const firstRealCheck = !prev || prev.status === 'unknown';
-  const unSet = new Set(provider.modelsUnavailable);
-  let added = [];
-  let lost = [];
-  if (firstRealCheck) {
-    for (const m of provider.modelsAvailable) baseline.add(m);
-  } else {
-    added = provider.modelsAvailable.filter((m) => !baseline.has(m));
-    lost = [...baseline].filter((m) => unSet.has(m));
-    for (const m of added) baseline.add(m);
-  }
-  provider.modelBaseline = [...baseline];
+  // 基线只保留仍可用的模型。未探测的不记失去；已消失或本轮不可用的记一次失去后移出基线。
+  // 状态翻转不并入 modelChanged，避免绕过故障消抖。
+  // 连接失败 / 拉列表前鉴权失败时没有新清单，不能把基线模型当成「已消失」。
+  const listKnown = result.status === 'up' || result.status === 'degraded'
+    || (result.modelsAvailable || []).length > 0
+    || (result.modelsUnavailable || []).length > 0
+    || (result.modelsUnprobed || []).length > 0;
+  const diff = diffBaseline(provider.modelBaseline, {
+    available: provider.modelsAvailable,
+    unavailable: provider.modelsUnavailable,
+    unprobed: provider.modelsUnprobed,
+    firstCheck: firstRealCheck,
+    skip: !firstRealCheck && !listKnown
+  });
+  provider.modelBaseline = diff.baseline;
+  const added = diff.added;
+  const lost = diff.lost;
   const statusChanged = !firstRealCheck && prev.status !== provider.status;
-  const modelChanged = !firstRealCheck && (statusChanged || added.length > 0 || lost.length > 0);
+  const modelChanged = diff.modelChanged;
   provider.modelChanged = modelChanged;
 
   // 变动详情日志：明确列出新增/失去与状态翻转
@@ -150,7 +166,7 @@ function fmtMs(ms) {
 
 /** 状态报告：CSV */
 function buildReportCSV(sum) {
-  const head = ['服务商', '样本数', '可用率(%)', '在线次数', '异常次数', '离线次数', '累计故障时长', '平均延迟(ms)', 'P50(ms)', 'P95(ms)', '最大延迟(ms)', '最后状态'];
+  const head = ['服务商', '样本数', '可用率(%)', '在线次数', '异常次数', '离线次数', '鉴权失败次数', '累计故障时长', '平均延迟(ms)', 'P50(ms)', 'P95(ms)', '最大延迟(ms)', '最后状态'];
   const esc = (v) => {
     let s = String(v ?? '');
     if (/^[=+\-@]/.test(s)) s = '\t' + s;   // 公式注入防护
@@ -158,6 +174,7 @@ function buildReportCSV(sum) {
   };
   const rows = sum.perProvider.map((p) => [
     p.name, p.samples, p.uptime, p.upCount, p.degCount, p.downCount,
+    p.authCount || 0,
     fmtMs(p.downMs), p.latencyAvg ?? '', p.latencyP50 ?? '', p.latencyP95 ?? '', p.latencyMax ?? '', statusText(p.lastStatus)
   ].map(esc).join(','));
   return [head.join(','), ...rows].join('\r\n');
@@ -173,6 +190,7 @@ function buildReportHTML(sum) {
       <td style="text-align:right">${p.samples}</td>
       <td style="text-align:right;color:${color};font-weight:600">${p.uptime}%</td>
       <td style="text-align:right">${p.upCount}/${p.degCount}/${p.downCount}</td>
+      <td style="text-align:right">${p.authCount || 0}</td>
       <td style="text-align:right">${fmtMs(p.downMs)}</td>
       <td style="text-align:right">${p.latencyAvg ?? '—'}</td>
       <td style="text-align:right">${p.latencyP95 ?? '—'}</td>
@@ -205,12 +223,13 @@ function buildReportHTML(sum) {
       <th style="text-align:right;padding:10px">样本</th>
       <th style="text-align:right;padding:10px">可用率</th>
       <th style="text-align:right;padding:10px">在线/异常/离线</th>
+      <th style="text-align:right;padding:10px">鉴权失败</th>
       <th style="text-align:right;padding:10px">故障时长</th>
       <th style="text-align:right;padding:10px">平均延迟</th>
       <th style="text-align:right;padding:10px">P95</th>
       <th style="text-align:left;padding:10px">最后状态</th>
     </tr></thead>
-    <tbody>${rows || '<tr><td colspan="8" style="padding:24px;text-align:center;color:#8e8e93">暂无数据</td></tr>'}</tbody>
+    <tbody>${rows || '<tr><td colspan="9" style="padding:24px;text-align:center;color:#8e8e93">暂无数据</td></tr>'}</tbody>
   </table>
 </div></body></html>`;
 }
@@ -241,6 +260,7 @@ async function buildReportXLSX(sum) {
     { header: '在线次数', key: 'upCount', width: 10 },
     { header: '异常次数', key: 'degCount', width: 10 },
     { header: '离线次数', key: 'downCount', width: 10 },
+    { header: '鉴权失败', key: 'authCount', width: 10 },
     { header: '累计故障时长', key: 'downFor', width: 16 },
     { header: '平均延迟(ms)', key: 'latencyAvg', width: 14 },
     { header: 'P50(ms)', key: 'latencyP50', width: 10 },
@@ -252,6 +272,7 @@ async function buildReportXLSX(sum) {
     s2.addRow({
       name: p.name, samples: p.samples, uptime: p.uptime,
       upCount: p.upCount, degCount: p.degCount, downCount: p.downCount,
+      authCount: p.authCount || 0,
       downFor: fmtMs(p.downMs), latencyAvg: p.latencyAvg ?? '', latencyP50: p.latencyP50 ?? '',
       latencyP95: p.latencyP95 ?? '', latencyMax: p.latencyMax ?? '', lastStatus: statusText(p.lastStatus)
     });
@@ -362,23 +383,35 @@ function registerHotkey() {
 }
 
 /** 邮件日报：每天指定时刻发送一次（30 秒粒度轮询，由启动定时器驱动） */
+let reportInFlight = false;
 async function maybeDailyMail() {
+  if (reportInFlight || persistBlocked) return;
+  const g = db.global;
+  if (!g.dailyReportEnabled) return;
+  const { mailConfigValid, sendMail } = require('./src/mailer');
+  if (!mailConfigValid(g)) return;
+  const now = new Date();
+  const hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const reportTime = String(g.dailyReportTime || '08:00');
+  // 过了发送时刻仍补发一次，避免睡眠跨过那一分钟就丢当天日报
+  if (hm < reportTime) return;
+  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  if (g.lastReportDay === day) return;
+  reportInFlight = true;
+  const prevDay = g.lastReportDay;
+  g.lastReportDay = day;
+  persist();
   try {
-    const g = db.global;
-    if (!g.dailyReportEnabled) return;
-    const { mailConfigValid, sendMail } = require('./src/mailer');
-    if (!mailConfigValid(g)) return;
-    const now = new Date();
-    const hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    if (hm !== String(g.dailyReportTime || '08:00')) return;
-    const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    if (g.lastReportDay === day) return;
     const sum = history.summarize(DATA_DIR, { hours: 24 });
     await sendMail(g, { subject: `AI Provider 日报 ${day}（可用率 ${sum.overall.uptime}%）`, html: buildReportHTML(sum) });
-    db.global.lastReportDay = day;
-    persist();
     logger.info(`[邮件] 日报已发送至 ${g.mailTo}`);
-  } catch (e) { logger.error(`[邮件] 日报发送失败: ${e.message}`); }
+  } catch (e) {
+    g.lastReportDay = prevDay || '';
+    persist();
+    logger.error(`[邮件] 日报发送失败: ${e.message}`);
+  } finally {
+    reportInFlight = false;
+  }
 }
 
 // ---------- 自动启动检测 ----------
@@ -557,6 +590,8 @@ ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
     p.checkedAt = null;
     p.lastError = null;
     p.consecutiveFail = 0;
+    p.modelBaseline = [];
+    p.alertRuntime = null;
     alerts.resetState(p.id);
   }
   persist();
@@ -847,7 +882,7 @@ function createWindow() {
     {
       label: '帮助',
       submenu: [
-        { label: '检查更新', click: () => { if (appUpdater) appUpdater.check(false); } },
+        { label: '检查更新', click: () => { if (appUpdater) appUpdater.check(true); } },
         { label: '关于', click: () => { dialog.showMessageBox(win, { type: 'info', title: '关于', message: 'AI Provider Monitor v' + pkg.version, detail: 'AI 服务商可用性监控' }); } }
       ]
     }
@@ -917,7 +952,7 @@ if (process.argv.includes('--smoke-test') && fs.existsSync(path.join(__dirname, 
         const { createUpdater } = require('./src/updater');
         appUpdater = createUpdater({ app, dialog });
         if (app.isPackaged && db.global.autoUpdateCheck !== false) {
-          setTimeout(() => { if (appUpdater) appUpdater.check(true).catch(() => {}); }, 30000);
+          setTimeout(() => { if (appUpdater) appUpdater.check(false).catch(() => {}); }, 30000);
         }
       } catch (e) { logger.warn(`[更新] 初始化失败: ${e.message}`); }
       // 每日自动备份（保留最近 10 份）
@@ -931,7 +966,13 @@ if (process.argv.includes('--smoke-test') && fs.existsSync(path.join(__dirname, 
       updateTrayStatus();
     });
 
-    app.on('before-quit', () => { quitting = true; scheduler.stop(); try { globalShortcut.unregisterAll(); } catch (e) { /* ignore */ } });
+    app.on('before-quit', () => {
+      quitting = true;
+      scheduler.stop();
+      try { history.flushSync(); } catch (e) { /* ignore */ }
+      try { logger.flushSync(); } catch (e) { /* ignore */ }
+      try { globalShortcut.unregisterAll(); } catch (e) { /* ignore */ }
+    });
     app.on('window-all-closed', (e) => { /* 保持后台运行，由托盘退出 */ });
   }
 }

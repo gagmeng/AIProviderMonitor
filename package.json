@@ -1,7 +1,7 @@
 {
   "name": "ai-provider-monitor",
   "productName": "AI Provider Monitor",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "AI Provider 状态与可用模型监控",
   "main": "main.js",
   "author": "AIProviderMonitor",
@@ -10,6 +10,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node tests/smoke.js",
+    "test:unit": "node tests/unit-logic.js",
     "smoke": "electron . --smoke-test",
     "app-test": "electron . --smoke-test",
     "renderer-test": "electron tests/renderer-check.js",
@@ -22,11 +23,13 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "electron-updater": "^6.6.2",
+    "exceljs": "^4.4.0",
     "https-proxy-agent": "^7.0.6",
     "nodemailer": "^6.10.0"
   },
   "devDependencies": {
-    "electron": "33.2.0",
+    "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
     "eslint": "^8.57.0",
     "prettier": "^3.3.3"
