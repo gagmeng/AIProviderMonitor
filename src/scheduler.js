@@ -25,6 +25,7 @@ class Scheduler {
     this.timers = new Map();      // id -> { handle, firedAt }
     this.running = new Set();     // provider ids currently checking
     this.queue = [];
+    this.circuits = new Map();  // id -> { failures, openUntil }
     this.active = 0;
     this.concurrency = Math.max(1, concurrency);
     this.handlers = {};           // onResult / onState
@@ -96,7 +97,7 @@ class Scheduler {
       this._afterCheck(id, dueAt, period);
     };
     const handle = setTimeout(tick, wait);
-    this.timers.set(id, { handle, period });
+    this.timers.set(id, { handle, period, dueAt });
   }
 
   /**
@@ -129,6 +130,11 @@ class Scheduler {
   /** 入队一次检测（自动去重：同一 provider 进行中不重复入队） */
   runCheck(id, { reason = 'manual' } = {}) {
     return new Promise((resolve) => {
+      const circuit = this.circuits.get(id);
+      if (reason === 'auto' && circuit && circuit.openUntil > Date.now()) {
+        logger.warn(`Provider #${id} 熔断中，跳过自动检测（${Math.ceil((circuit.openUntil - Date.now()) / 1000)}s 后恢复）`);
+        return resolve(null);
+      }
       if (this.running.has(id) && reason === 'manual') {
         logger.debug(`Provider #${id} 检测进行中，忽略重复触发`);
         return resolve(null);
@@ -161,6 +167,19 @@ class Scheduler {
     try {
       const globalCfg = this.getGlobal ? this.getGlobal() : {};
       const result = await detect(provider, { globalCfg });
+      if (result && result.status === 'up') {
+        this.circuits.delete(provider.id);
+      } else {
+        const prev = this.circuits.get(provider.id) || { failures: 0, openUntil: 0 };
+        prev.failures++;
+        const threshold = Math.max(2, Number(globalCfg.circuitFailThreshold) || 5);
+        if (prev.failures >= threshold) {
+          prev.openUntil = Date.now() + Math.max(30, Number(globalCfg.circuitOpenSec) || 300) * 1000;
+          prev.failures = 0;
+          logger.warn(`[熔断] [${provider.name}] 连续失败达到 ${threshold} 次，暂停自动探测`);
+        }
+        this.circuits.set(provider.id, prev);
+      }
       this.emit('result', provider, result, job.reason);
       job.resolve(result);
     } catch (e) {
@@ -171,6 +190,8 @@ class Scheduler {
 
   isRunning(id) { return this.running.has(id); }
   runningList() { return [...this.running]; }
+  scheduleInfo() { return [...this.timers.entries()].map(([id, t]) => ({ id, dueAt: t.dueAt, period: t.period })); }
+  circuitInfo() { return [...this.circuits.entries()].map(([id, c]) => ({ id, failures: c.failures, openUntil: c.openUntil })); }
 }
 
 module.exports = { Scheduler, clampTimerMs, MAX_TIMER_MS };

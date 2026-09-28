@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
-const { normalizeProvider, mergeProvider, normalizeUrlKey } = require('./providerSchema');
+const { normalizeProvider, mergeProvider, normalizeUrlKey, ensureUniqueProviderIds } = require('./providerSchema');
 
 /**
  * 备份/还原模块
@@ -61,7 +61,7 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
 
   if (mode === 'overwrite') {
     if (backup.global) Object.assign(data.global, backup.global);
-    data.providers = backup.providers.map(normalizeProvider);
+    data.providers = ensureUniqueProviderIds(backup.providers.map(normalizeProvider));
     logger.info(`[还原] 覆盖还原完成：${data.providers.length} 个服务商`);
     return { mode, providers: data.providers.length, added: data.providers.length, updated: 0, skipped: 0 };
   }

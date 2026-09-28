@@ -82,7 +82,15 @@ function fetchJSON(targetUrl, { method = 'GET', headers = {}, body = null, timeo
           try { resolve(JSON.parse(data)); }
           catch (e) { reject(new Error(`响应不是有效 JSON (HTTP ${res.statusCode})`)); }
         } else {
-          reject(new Error(`HTTP ${res.statusCode}`));
+          const err = new Error(`HTTP ${res.statusCode}`);
+          err.statusCode = res.statusCode;
+          const retryAfter = res.headers['retry-after'];
+          if (retryAfter) {
+            const seconds = Number(retryAfter);
+            const at = Date.parse(retryAfter);
+            err.retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : (Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0);
+          }
+          reject(err);
         }
       });
     });
@@ -115,7 +123,7 @@ async function fetchWithRetry(url, opts, { retries = DEFAULT_RETRIES, tag = '', 
     } catch (e) {
       lastErr = e;
       if (attempt >= retries || !isRetryable(e)) break;
-      const wait = RETRY_BACKOFF_MS * Math.pow(2, attempt);
+      const wait = Math.min(60000, Number(e.retryAfterMs) > 0 ? Number(e.retryAfterMs) : RETRY_BACKOFF_MS * Math.pow(2, attempt));
       logger.debug(`${tag} ${what}失败（${e.message}），${wait} ms 后第 ${attempt + 1} 次重试`);
       await sleep(wait);
     }
@@ -154,6 +162,99 @@ function extractContent(payload) {
   try {
     return payload?.choices?.[0]?.message?.content ?? payload?.choices?.[0]?.text ?? '';
   } catch (e) { return ''; }
+}
+
+function valueAtPath(payload, path) {
+  return String(path || '').split('.').filter(Boolean)
+    .reduce((cur, key) => cur == null ? undefined : cur[key], payload);
+}
+
+function filterIgnoredModels(models, pattern) {
+  const raw = String(pattern || '').trim();
+  if (!raw) return models;
+  const re = new RegExp(raw, 'i');
+  return models.filter((id) => !re.test(String(id)));
+}
+
+function extractSSEDelta(line) {
+  const text = String(line || '').trim();
+  if (!text.startsWith('data:')) return '';
+  const raw = text.slice(5).trim();
+  if (!raw || raw === '[DONE]') return '';
+  try {
+    const obj = JSON.parse(raw);
+    return String(obj?.choices?.[0]?.delta?.content ?? obj?.choices?.[0]?.text ?? '');
+  } catch (e) { return ''; }
+}
+
+function measureOpenAIStream(base, modelId, provider, { headers, timeout, proxy, insecureSkipVerify }) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(`${base}/v1/chat/completions`);
+    const mod = u.protocol === 'http:' ? http : https;
+    const opts = { method: 'POST', headers, timeout };
+    if (mod === https && insecureSkipVerify) opts.rejectUnauthorized = false;
+    const agent = getProxyAgent(proxy, insecureSkipVerify);
+    if (agent) opts.agent = agent;
+    const started = Date.now();
+    let firstTokenAt = 0, chars = 0, pending = '';
+    const req = mod.request(u, opts, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume(); const err = new Error(`HTTP ${res.statusCode}`); err.statusCode = res.statusCode; reject(err); return;
+      }
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        pending += chunk;
+        const lines = pending.split(/\r?\n/); pending = lines.pop() || '';
+        for (const line of lines) {
+          const delta = extractSSEDelta(line);
+          if (delta) { if (!firstTokenAt) firstTokenAt = Date.now(); chars += delta.length; }
+        }
+      });
+      res.on('end', () => {
+        const ended = Date.now();
+        const generationMs = firstTokenAt ? Math.max(1, ended - firstTokenAt) : 0;
+        resolve({ firstTokenMs: firstTokenAt ? firstTokenAt - started : null, throughputTokensPerSec: generationMs ? Number(((chars / 4) / (generationMs / 1000)).toFixed(2)) : null, outputChars: chars });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('流式探测超时')));
+    req.on('error', reject);
+    req.write(JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'Reply with pong.' }], max_tokens: 16, stream: true }));
+    req.end();
+  });
+}
+
+function providerHeaders(provider) {
+  const headers = { 'Content-Type': 'application/json' };
+  const type = String((provider && provider.authType) || 'bearer');
+  if (provider && provider.apiKey && type !== 'none') {
+    const name = type === 'header' ? String(provider.authHeader || 'X-API-Key').trim() : 'Authorization';
+    const prefix = type === 'header' ? String(provider.authPrefix || '') : 'Bearer ';
+    if (name) headers[name] = `${prefix}${provider.apiKey}`;
+  }
+  const raw = String((provider && provider.customHeaders) || '').trim();
+  if (raw) {
+    let extra;
+    try { extra = JSON.parse(raw); } catch (e) { throw new Error('自定义请求头不是合法 JSON'); }
+    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('自定义请求头必须是 JSON 对象');
+    for (const [k, v] of Object.entries(extra)) if (k && v != null) headers[k] = String(v);
+  }
+  return headers;
+}
+
+function assertProbeResponse(payload, provider) {
+  const type = String((provider && provider.assertType) || 'none');
+  const expected = String((provider && provider.assertValue) || '');
+  if (type === 'none' || !expected) return true;
+  if (type === 'contains') {
+    if (!JSON.stringify(payload).includes(expected)) throw new Error(`响应断言失败：未包含 ${expected}`);
+    return true;
+  }
+  if (type === 'jsonPath') {
+    const value = expected.split('.').filter(Boolean).reduce((cur, key) => cur == null ? undefined : cur[key], payload);
+    if (value === undefined || value === null || value === false) throw new Error(`响应断言失败：路径 ${expected} 不存在或为空`);
+    return true;
+  }
+  throw new Error(`不支持的响应断言类型: ${type}`);
 }
 
 /**
@@ -198,8 +299,11 @@ async function detect(provider, opts = {}) {
   const g = opts.globalCfg || {};
   const base = String(provider.url || '').replace(/\/+$/, '');
   const tag = `[${provider.name}]`;
-  const headers = { 'Content-Type': 'application/json' };
-  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
+  let headers;
+  try { headers = providerHeaders(provider); }
+  catch (e) {
+    return { providerId: provider.id, checkedAt: Date.now(), status: 'down', latency: null, modelsTotal: 0, modelsAvailable: [], modelsUnavailable: [], modelsUnprobed: [], modelDetails: [], error: e.message, durationMs: 0, probeCursor: 0 };
+  }
 
   const num = (...vals) => {
     for (const v of vals) { const n = Number(v); if (Number.isFinite(n) && n > 0) return n; }
@@ -228,6 +332,10 @@ async function detect(provider, opts = {}) {
     modelsUnavailable: [],
     modelsUnprobed: [],
     modelDetails: [],
+    quotaRemaining: null,
+    quotaWarning: false,
+    firstTokenMs: null,
+    throughputTokensPerSec: null,
     error: null,
     durationMs: null,
     probeCursor: 0
@@ -238,14 +346,18 @@ async function detect(provider, opts = {}) {
   const stampDur = () => { result.durationMs = Date.now() - t0; };
   let models = [];
   let cursor = 0;
-  logger.info(`${tag} 检测开始 → GET ${base}/v1/models${proxy ? `（经代理 ${proxy}）` : ''}`);
+  const modelsPath = String(provider.modelsPath || '/v1/models');
+  const modelsUrl = `${base}${modelsPath.startsWith('/') ? modelsPath : '/' + modelsPath}`;
+  logger.info(`${tag} 检测开始 → GET ${modelsUrl}${proxy ? `（经代理 ${proxy}）` : ''}`);
   try {
-    const payload = await fetchWithRetry(`${base}/v1/models`, { headers, timeout: requestTimeout, proxy, insecureSkipVerify: tlsSkip },
+    const payload = await fetchWithRetry(modelsUrl, { headers, timeout: requestTimeout, proxy, insecureSkipVerify: tlsSkip },
       { retries, tag, what: '连接' });
     result.latency = Date.now() - t0;
     const fmt = Array.isArray(payload) ? 'array' : (payload && payload.data ? 'openai' : (payload && payload.models ? 'ollama' : 'unknown'));
     // 上游模型列表顺序可能抖动，先稳定排序再截取 probeLimit，避免每轮探测子集变化造成误报。
-    models = extractModelIds(payload).sort((a, b) => String(a).localeCompare(String(b)));
+    const allModels = extractModelIds(payload).sort((a, b) => String(a).localeCompare(String(b)));
+    models = filterIgnoredModels(allModels, provider.modelIgnorePattern);
+    if (models.length !== allModels.length) logger.info(`${tag} 模型忽略规则已排除 ${allModels.length - models.length} 个模型`);
     // 轮询覆盖：超出上限时按游标旋转，本轮探测不同子集，多轮覆盖全量（游标由主进程回写）。
     cursor = 0;
     if (probeRotate && models.length > probeLimit) {
@@ -270,6 +382,23 @@ async function detect(provider, opts = {}) {
     result.error = `连接失败: ${e.message}`;
     logger.error(`${tag} 连接失败（耗时 ${Date.now() - t0} ms，已重试 ${retries} 次）: ${e.message} → 状态 down`);
     return result;
+  }
+
+  // 可选配额端点：失败不影响服务健康状态，仅记录日志；字段路径兼容嵌套 JSON。
+  if (String(provider.quotaPath || '').trim()) {
+    const qp = String(provider.quotaPath).trim();
+    const quotaUrl = `${base}${qp.startsWith('/') ? qp : '/' + qp}`;
+    try {
+      const quotaPayload = await fetchWithRetry(quotaUrl, { headers, timeout: requestTimeout, proxy, insecureSkipVerify: tlsSkip },
+        { retries, tag, what: '配额查询' });
+      const value = Number(valueAtPath(quotaPayload, provider.quotaValuePath || 'remaining'));
+      if (Number.isFinite(value)) {
+        result.quotaRemaining = value;
+        const threshold = Number(provider.quotaWarnBelow);
+        result.quotaWarning = Number.isFinite(threshold) && threshold >= 0 && value <= threshold;
+        logger.info(`${tag} 配额剩余 ${value}${result.quotaWarning ? `（低于告警阈值 ${threshold}）` : ''}`);
+      } else logger.warn(`${tag} 配额字段 ${provider.quotaValuePath || 'remaining'} 不是有效数值`);
+    } catch (e) { logger.warn(`${tag} 配额查询失败（不影响健康状态）: ${e.message}`); }
   }
 
   result.modelsTotal = models.length;
@@ -301,12 +430,19 @@ async function detect(provider, opts = {}) {
   const t1 = Date.now();
   const probeOne = async (id) => {
     const ts = Date.now();
-    const { url, body } = buildProbeRequest(base, id, provider);
     try {
-      await fetchWithRetry(url, { method: 'POST', headers, body, timeout: probeTimeout, proxy },
-        { retries, tag, what: `探测 [${id}]` });
+      const configured = Array.isArray(provider.capabilityModes) ? provider.capabilityModes : [];
+      const modes = configured.length ? configured : [probeMode];
+      const capabilities = {};
+      for (const mode of modes) {
+        const { url, body } = buildProbeRequest(base, id, { ...provider, probeMode: mode });
+        const payload = await fetchWithRetry(url, { method: 'POST', headers, body, timeout: probeTimeout, proxy, insecureSkipVerify: tlsSkip },
+          { retries, tag, what: `探测 [${id}/${mode}]` });
+        assertProbeResponse(payload, provider);
+        capabilities[mode] = true;
+      }
       logger.info(`${tag} 探测 [${id}] → 可用（HTTP 200，${Date.now() - ts} ms）`);
-      return { id, ok: true, note: '', code: 200 };
+      return { id, ok: true, note: '', code: 200, latencyMs: Date.now() - ts, capabilities };
     } catch (e) {
       const msg = String(e.message || e);
       const codeMatch = /^HTTP (\d{3})\b/.exec(msg);
@@ -314,7 +450,7 @@ async function detect(provider, opts = {}) {
       // 400/413/422：请求已路由到模型但参数被拒 => 服务可用；404 = 模型不存在，401/403 = 鉴权失败
       if (/^HTTP (400|413|422)\b/.test(msg)) {
         logger.info(`${tag} 探测 [${id}] → 可用（${msg}，参数被拒但路由可达，${Date.now() - ts} ms）`);
-        return { id, ok: true, note: msg, code };
+        return { id, ok: true, note: msg, code, latencyMs: Date.now() - ts };
       }
       let reason;
       if (/^HTTP 404\b/.test(msg)) reason = '模型不存在（HTTP 404）';
@@ -324,12 +460,12 @@ async function detect(provider, opts = {}) {
       else if (/超时/.test(msg)) reason = '探测请求超时';
       else reason = msg;
       logger.warn(`${tag} 探测 [${id}] → 不可用（${reason}，${Date.now() - ts} ms）`);
-      return { id, ok: false, note: reason, code };
+      return { id, ok: false, note: reason, code, latencyMs: Date.now() - ts };
     }
   };
 
   const settled = await mapPool(probe, probeConcurrency, (id) => probeOne(id), probeJitterMs);
-  const details = settled.map((s) => ({ id: s.id, ok: s.ok, note: s.note }));
+  const details = settled.map((s) => ({ id: s.id, ok: s.ok, note: s.note, latencyMs: s.latencyMs, capabilities: s.capabilities || {} }));
   for (const s of settled) {
     if (s.ok) result.modelsAvailable.push(s.id);
     else result.modelsUnavailable.push(s.id);
@@ -344,6 +480,19 @@ async function detect(provider, opts = {}) {
   result.modelsAvailable = [...new Set(result.modelsAvailable)];
   result.modelsUnavailable = [...new Set(result.modelsUnavailable)].filter((id) => !result.modelsAvailable.includes(id));
   result.modelDetails = details;
+  const latencies = settled.map((s) => Number(s.latencyMs)).filter(Number.isFinite).sort((a, b) => a - b);
+  result.probeLatencyAvg = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null;
+  result.probeLatencyP95 = latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * 0.95))] : null;
+
+  // 可选的 OpenAI 兼容流式性能探测，只选一个已验证模型，避免成倍放大请求量。
+  if (provider.measureStreaming && result.modelsAvailable.length) {
+    try {
+      const metrics = await measureOpenAIStream(base, result.modelsAvailable[0], provider, { headers, timeout: probeTimeout, proxy, insecureSkipVerify: tlsSkip });
+      result.firstTokenMs = metrics.firstTokenMs;
+      result.throughputTokensPerSec = metrics.throughputTokensPerSec;
+      logger.info(`${tag} 流式性能：首 Token ${metrics.firstTokenMs ?? '—'} ms，吞吐 ${metrics.throughputTokensPerSec ?? '—'} token/s`);
+    } catch (e) { logger.warn(`${tag} 流式性能探测失败（不影响健康状态）: ${e.message}`); }
+  }
 
   if (result.modelsAvailable.length > 0) result.status = 'up';
   else if (probe.length > 0 && settled.every((s) => s.code === 401 || s.code === 403)) {
@@ -368,4 +517,4 @@ async function detect(provider, opts = {}) {
   return result;
 }
 
-module.exports = { detect, fetchJSON, fetchWithRetry, extractModelIds, extractContent, isRetryable, buildProbeRequest, resolveProxy, mapPool };
+module.exports = { detect, fetchJSON, fetchWithRetry, extractModelIds, extractContent, isRetryable, buildProbeRequest, resolveProxy, mapPool, providerHeaders, assertProbeResponse, valueAtPath, filterIgnoredModels, extractSSEDelta, measureOpenAIStream };

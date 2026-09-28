@@ -10,6 +10,8 @@ const LOG_DIR = process.env.AIPM_DATA_DIR
 const MAX_IN_MEMORY = 600;
 const buffer = [];
 const subscribers = new Set();
+const pendingDisk = [];
+let diskTimer = null;
 
 // 轮转策略（可由主进程通过 configure() 覆盖）
 let keepDays = 7;           // 保留最近 N 天的日志文件
@@ -94,22 +96,34 @@ function ensureStream() {
   return fileStream;
 }
 
+function flushPendingSync() {
+  if (diskTimer) { clearTimeout(diskTimer); diskTimer = null; }
+  const batch = pendingDisk.splice(0, pendingDisk.length);
+  if (!batch.length) return;
+  const byDay = new Map();
+  for (const item of batch) byDay.set(item.day, (byDay.get(item.day) || '') + item.text);
+  try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { return; }
+  for (const [day, text] of byDay) {
+    const file = baseFileFor(day);
+    rotateBySize(file);
+    try { fs.appendFileSync(file, text, 'utf8'); } catch (e) { /* ignore */ }
+  }
+}
+
 function write(level, msg) {
   if ((LEVELS[level] || 0) < (LEVELS[minLevel] || 0)) return;
   const line = { t: stamp(), level, msg: String(msg) };
   buffer.push(line);
   if (buffer.length > MAX_IN_MEMORY) buffer.shift();
-  const s = ensureStream();
-  if (s) { try { s.write(`[${line.t}] [${level.toUpperCase()}] ${line.msg}\n`); } catch (e) { /* ignore */ } }
+  pendingDisk.push({ day: dayTag(), text: `[${line.t}] [${level.toUpperCase()}] ${line.msg}\n` });
+  if (!diskTimer) diskTimer = setTimeout(flushPendingSync, 50);
   for (const fn of subscribers) { try { fn(line); } catch (e) { /* ignore */ } }
 }
 
 /** 退出前把流里的缓冲刷出去 */
 function flushSync() {
-  if (!fileStream) return;
-  try {
-    if (typeof fileStream.write === 'function') fileStream.write('');
-  } catch (e) { /* ignore */ }
+  flushPendingSync();
+  try { closeStream(); } catch (e) { /* ignore */ }
 }
 
 /** 由主进程在配置变更时调用 */

@@ -85,6 +85,11 @@ function inQuietHours(globalCfg, now = new Date()) {
 
 function inMaintWindow(provider, now = new Date()) {
   if (!provider || !provider.maintEnabled) return false;
+  const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const dates = String(provider.maintDates || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const weekdays = Array.isArray(provider.maintWeekdays) ? provider.maintWeekdays.map(Number) : [];
+  if (dates.length && !dates.includes(date)) return false;
+  if (weekdays.length && !weekdays.includes(now.getDay())) return false;
   const start = parseHM(provider.maintStart);
   const end = parseHM(provider.maintEnd);
   if (start == null || end == null || start === end) return false;
@@ -173,6 +178,16 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
     } else {
       alerts.push({ kind: 'modelChange', title: '模型变动', reason: '可用模型集合发生变化' });
       markSent(st, 'modelChange');
+    }
+  }
+
+  if (provider.quotaWarning) {
+    if (maint) suppressed.push({ kind: 'quota', why: '维护窗口' });
+    else if (quiet) suppressed.push({ kind: 'quota', why: '静默时段' });
+    else if (inCooldown(st, 'quota', cooldownMin)) suppressed.push({ kind: 'quota', why: '冷却中' });
+    else {
+      alerts.push({ kind: 'quota', title: '配额不足', reason: `当前剩余 ${provider.quotaRemaining}，告警阈值 ${provider.quotaWarnBelow}` });
+      markSent(st, 'quota');
     }
   }
 

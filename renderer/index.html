@@ -954,6 +954,41 @@
           <textarea id="fProbeBody" rows="2" placeholder='{"model":"{{model}}","messages":[{"role":"user","content":"ping"}],"max_tokens":1}'></textarea>
         </div>
         <div class="field-inline">
+          <div class="field"><label>模型列表路径</label><input type="text" id="fModelsPath" placeholder="/v1/models" /></div>
+          <div class="field"><label>鉴权方式</label><select id="fAuthType" class="select-input"><option value="bearer">Bearer Token</option><option value="header">自定义 Header</option><option value="none">无鉴权</option></select></div>
+        </div>
+        <div class="field-inline">
+          <div class="field"><label>鉴权 Header</label><input type="text" id="fAuthHeader" placeholder="X-API-Key" /></div>
+          <div class="field"><label>密钥前缀</label><input type="text" id="fAuthPrefix" placeholder="可选，如 Token " /></div>
+        </div>
+        <div class="field"><label>自定义请求头（JSON）</label><textarea id="fCustomHeaders" rows="2" placeholder='{"X-Tenant":"demo"}'></textarea></div>
+        <div class="field">
+          <label>能力矩阵 <span class="hint">多选会逐项验证，增加请求量</span></label>
+          <div class="field-inline">
+            <label class="checkbox"><input type="checkbox" id="fCapChat" /><span class="box"></span> Chat</label>
+            <label class="checkbox"><input type="checkbox" id="fCapEmbeddings" /><span class="box"></span> Embeddings</label>
+            <label class="checkbox"><input type="checkbox" id="fCapCompletions" /><span class="box"></span> Completions</label>
+          </div>
+        </div>
+        <div class="field-inline">
+          <div class="field"><label>响应断言</label><select id="fAssertType" class="select-input"><option value="none">不校验</option><option value="contains">包含文本</option><option value="jsonPath">JSON 路径存在</option></select></div>
+          <div class="field"><label>断言值</label><input type="text" id="fAssertValue" placeholder="关键词或 choices.0.message" /></div>
+        </div>
+        <div class="field"><label>模型忽略规则（正则）</label><input type="text" id="fModelIgnorePattern" placeholder="如 ^(deprecated-|text-embedding-)" /></div>
+        <div class="field-inline">
+          <div class="field"><label>配额查询路径</label><input type="text" id="fQuotaPath" placeholder="留空关闭；如 /v1/usage" /></div>
+          <div class="field"><label>剩余额度 JSON 路径</label><input type="text" id="fQuotaValuePath" placeholder="remaining 或 data.remaining" /></div>
+        </div>
+        <div class="field-inline">
+          <div class="field"><label>配额告警阈值</label><input type="number" id="fQuotaWarnBelow" min="0" step="any" placeholder="剩余额度小于等于此值时告警" /></div>
+          <div class="field"><label>首 Token / 吞吐探测 <span class="hint">额外发起一次 OpenAI 兼容流式请求</span></label><label class="switch"><input type="checkbox" id="fMeasureStreaming" /><span class="knob"></span></label></div>
+        </div>
+        <div class="field-inline">
+          <div class="field"><label>通知通道路由</label><input type="text" id="fNotifyChannels" placeholder="留空广播；如 weixin,slack" /></div>
+          <div class="field"><label>维护星期</label><input type="text" id="fMaintWeekdays" placeholder="0-6，逗号分隔；0=周日" /></div>
+        </div>
+        <div class="field"><label>维护日期</label><input type="text" id="fMaintDates" placeholder="YYYY-MM-DD，逗号分隔" /></div>
+        <div class="field-inline">
           <div class="field">
             <label>专用代理（可选）</label>
             <input type="text" id="fProxyUrl" placeholder="留空则使用全局代理设置" />

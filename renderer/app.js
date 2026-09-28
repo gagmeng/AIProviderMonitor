@@ -154,7 +154,7 @@ function renderDashboard() {
   if (chip) {
     chip.style.display = unreadN > 0 ? '' : 'none';
     chip.textContent = unreadN > 0 ? `${tx('未读')} ${unreadN}` : '';
-    chip.title = tx('点击清零');
+    chip.title = tx('点击确认全部告警');
   }
 
   const recent = [...state.providers].filter((p) => p.checkedAt).sort((a, b) => b.checkedAt - a.checkedAt).slice(0, 8);
@@ -187,12 +187,12 @@ $('#recentList').addEventListener('dblclick', (e) => {
   if (item) openDetail(Number(item.dataset.act));
 });
 
-// 未读徽标：点击清零
+// 未读徽标：用户显式确认全部告警
 $('#unreadChip').addEventListener('click', async () => {
   try { await window.aipm.clearUnread(); } catch (e) { /* 后端不可用时仅隐藏 */ }
   if (state.unread) state.unread.count = 0;
   $('#unreadChip').style.display = 'none';
-  toast(tx('已清零'));
+  toast(tx('告警已确认'));
 });
 
 function filteredProviders() {
@@ -241,6 +241,8 @@ function renderProviders() {
       const pct = total > 0 ? Math.round((avail / total) * 100) : 0;
       const cycleMin = fmtDuration(p.intervalSec);
       const checked = p.checkedAt ? fmtTime(p.checkedAt) : tx('未检测');
+      const schedule = (state.schedule || []).find((s) => s.id === p.id);
+      const nextTitle = schedule && schedule.dueAt ? ` title="下次检测：${fmtDate(schedule.dueAt)}"` : '';
       return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''}" data-id="${p.id}">
         <div class="col-sel"><label class="checkbox"><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
         <div class="col-name"><div class="provider-cell">
@@ -254,7 +256,7 @@ function renderProviders() {
         <div class="col-status"><span class="status-pill st-${si.cls}"><span class="status-dot ${si.cls} ${checking ? 'pulse' : ''}"></span>${checking ? tx('检测中') : si.text}</span></div>
         <div class="col-models"><div class="models-cell"><span class="models-bar"><i style="width:${pct}%;"></i></span><span class="models-text">${avail}/${total}</span></div></div>
         <div class="col-latency">${p.latency != null ? p.latency + ' ms' : '—'}</div>
-        <div class="col-cycle cycle-cell">${cycleMin}</div>
+        <div class="col-cycle cycle-cell"${nextTitle}>${cycleMin}</div>
         <div class="col-notify">${p.notifyOnModelChange ? `<span class="status-pill st-up">${tx('开启')}</span>` : `<span class="status-pill st-unknown">${tx('关闭')}</span>`}</div>
         <div class="col-checked checked-cell">${checked}${p.lastError ? `<br/><span class="st-down" style="font-size:11px;">${escapeHtml(p.lastError).slice(0, 26)}</span>` : ''}</div>
         <div class="col-ops">
@@ -368,6 +370,26 @@ function openProviderModal(id = null) {
   $('#fProbeLimit').value = p && p.probeLimit ? p.probeLimit : '';
   $('#fProbePath').value = p ? (p.probePath || '') : '';
   $('#fProbeBody').value = p ? (p.probeBody || '') : '';
+  $('#fModelsPath').value = p ? (p.modelsPath || '/v1/models') : '/v1/models';
+  $('#fAuthType').value = (p && p.authType) || 'bearer';
+  $('#fAuthHeader').value = p ? (p.authHeader || 'X-API-Key') : 'X-API-Key';
+  $('#fAuthPrefix').value = p ? (p.authPrefix || '') : '';
+  $('#fCustomHeaders').value = '';
+  $('#fCustomHeaders').placeholder = p && p.hasCustomHeaders ? tx('已配置，留空保持不变') : '{"X-Tenant":"demo"}';
+  const caps = new Set((p && p.capabilityModes) || []);
+  $('#fCapChat').checked = caps.has('chat');
+  $('#fCapEmbeddings').checked = caps.has('embeddings');
+  $('#fCapCompletions').checked = caps.has('completions');
+  $('#fAssertType').value = (p && p.assertType) || 'none';
+  $('#fAssertValue').value = p ? (p.assertValue || '') : '';
+  $('#fModelIgnorePattern').value = p ? (p.modelIgnorePattern || '') : '';
+  $('#fQuotaPath').value = p ? (p.quotaPath || '') : '';
+  $('#fQuotaValuePath').value = p ? (p.quotaValuePath || 'remaining') : 'remaining';
+  $('#fQuotaWarnBelow').value = p && p.quotaWarnBelow != null ? p.quotaWarnBelow : '';
+  $('#fMeasureStreaming').checked = p ? Boolean(p.measureStreaming) : false;
+  $('#fNotifyChannels').value = p && Array.isArray(p.notifyChannels) ? p.notifyChannels.join(',') : '';
+  $('#fMaintWeekdays').value = p && Array.isArray(p.maintWeekdays) ? p.maintWeekdays.join(',') : '';
+  $('#fMaintDates').value = p ? (p.maintDates || '') : '';
   $('#fProxyUrl').value = p ? (p.proxyUrl || '') : '';
   $('#fUseProxy').checked = p ? p.useProxy !== false : true;
   $('#fMaintEnabled').checked = p ? Boolean(p.maintEnabled) : false;
@@ -407,6 +429,22 @@ $('#pmSave').addEventListener('click', async () => {
     probeMode: $('#fProbeMode').value,
     probePath: $('#fProbePath').value.trim(),
     probeBody: $('#fProbeBody').value.trim(),
+    modelsPath: $('#fModelsPath').value.trim() || '/v1/models',
+    authType: $('#fAuthType').value,
+    authHeader: $('#fAuthHeader').value.trim() || 'X-API-Key',
+    authPrefix: $('#fAuthPrefix').value,
+    customHeaders: $('#fCustomHeaders').value.trim(),
+    capabilityModes: [['chat', '#fCapChat'], ['embeddings', '#fCapEmbeddings'], ['completions', '#fCapCompletions']].filter(([, sel]) => $(sel).checked).map(([mode]) => mode),
+    assertType: $('#fAssertType').value,
+    assertValue: $('#fAssertValue').value.trim(),
+    modelIgnorePattern: $('#fModelIgnorePattern').value.trim(),
+    quotaPath: $('#fQuotaPath').value.trim(),
+    quotaValuePath: $('#fQuotaValuePath').value.trim() || 'remaining',
+    quotaWarnBelow: $('#fQuotaWarnBelow').value === '' ? null : Number($('#fQuotaWarnBelow').value),
+    measureStreaming: $('#fMeasureStreaming').checked,
+    notifyChannels: $('#fNotifyChannels').value.split(',').map((s) => s.trim()).filter(Boolean),
+    maintWeekdays: $('#fMaintWeekdays').value.split(',').map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6),
+    maintDates: $('#fMaintDates').value.trim(),
     probeLimit: Number($('#fProbeLimit').value) > 0 ? Number($('#fProbeLimit').value) : null,
     proxyUrl: $('#fProxyUrl').value.trim(),
     useProxy: $('#fUseProxy').checked,
@@ -417,11 +455,14 @@ $('#pmSave').addEventListener('click', async () => {
   };
   if (editingId) {
     if (!data.apiKey) delete data.apiKey;
-    await window.aipm.updateProvider(editingId, data);
+    if (!data.customHeaders) delete data.customHeaders;
+    const r = await window.aipm.updateProvider(editingId, data);
+    if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
     toast(tx('已保存'));
   } else {
     if (!data.apiKey) data.apiKey = '';
-    await window.aipm.addProvider(data);
+    const r = await window.aipm.addProvider(data);
+    if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
     toast(tx('已添加'));
   }
   $('#providerModal').classList.remove('show');
@@ -455,6 +496,9 @@ function openDetail(id) {
     <div class="dm-item"><span>API Key</span><b>${p.apiKeyMasked || tx('未配置')}</b></div>
     <div class="dm-item"><span>${tx('轮循周期')}</span><b>${fmtDuration(p.intervalSec)}</b></div>
     <div class="dm-item"><span>${tx('最近检测')}</span><b>${p.checkedAt ? new Date(p.checkedAt).toLocaleString(lang() === 'en' ? 'en-US' : 'zh-CN') : '—'}</b></div>
+    ${p.quotaRemaining != null ? `<div class="dm-item"><span>剩余配额</span><b class="${p.quotaWarning ? 'st-down' : ''}">${p.quotaRemaining}</b></div>` : ''}
+    ${p.firstTokenMs != null ? `<div class="dm-item"><span>首 Token</span><b>${p.firstTokenMs} ms</b></div>` : ''}
+    ${p.throughputTokensPerSec != null ? `<div class="dm-item"><span>流式吞吐</span><b>${p.throughputTokensPerSec} token/s</b></div>` : ''}
     ${p.note ? `<div class="dm-item wide"><span>${tx('备注')}</span><b>${escapeHtml(p.note)}</b></div>` : ''}
     ${p.lastError ? `<div class="dm-item wide"><span>${tx('连接信息')}</span><b class="st-down">${escapeHtml(p.lastError)}</b></div>` : ''}`;
   $('#dmAvailCount').textContent = avail.length;
@@ -515,35 +559,40 @@ $('#detailModal').addEventListener('click', async (e) => {
 // ---------- 通知设置 ----------
 function renderNotify() {
   const g = state.global || {};
+  const secretValue = (sel, key) => {
+    const el = $(sel);
+    el.value = '';
+    el.placeholder = g[`${key}Configured`] ? tx('已配置，留空保持不变') : '';
+  };
   $('#wxEnable').checked = Boolean(g.notifyWeixinEnabled);
   $('#qqEnable').checked = Boolean(g.notifyQQEnabled);
   $('#dtEnable').checked = Boolean(g.notifyDingtalkEnabled);
-  $('#wxWebhook').value = g.weixinWebhook || '';
-  $('#qqWebhook').value = g.qqWebhook || '';
-  $('#dtWebhook').value = g.dingtalkWebhook || '';
-  $('#dtSecret').value = g.dingtalkSecret || '';
+  secretValue('#wxWebhook', 'weixinWebhook');
+  secretValue('#qqWebhook', 'qqWebhook');
+  secretValue('#dtWebhook', 'dingtalkWebhook');
+  secretValue('#dtSecret', 'dingtalkSecret');
   $('#qqTarget').value = g.qqTarget || '';
   $('#qqTargetType').value = g.qqTargetType === 'group' ? 'group' : 'private';
-  $('#qqToken').value = g.qqToken || '';
+  secretValue('#qqToken', 'qqToken');
   $('#autoStart').checked = g.autoStartCheckOnLaunch !== false;
   $('#concurrency').value = g.concurrency || 4;
   $('#closeAction').value = g.closeAction === 'exit' ? 'exit' : 'tray';
   // 扩展通知渠道
   $('#tgEnable').checked = Boolean(g.notifyTelegramEnabled);
-  $('#tgToken').value = g.telegramToken || '';
+  secretValue('#tgToken', 'telegramToken');
   $('#tgChatId').value = g.telegramChatId || '';
   $('#tgApiBase').value = g.telegramApiBase || '';
   $('#fsEnable').checked = Boolean(g.notifyFeishuEnabled);
-  $('#fsWebhook').value = g.feishuWebhook || '';
-  $('#fsSecret').value = g.feishuSecret || '';
+  secretValue('#fsWebhook', 'feishuWebhook');
+  secretValue('#fsSecret', 'feishuSecret');
   $('#skEnable').checked = Boolean(g.notifySlackEnabled);
-  $('#skWebhook').value = g.slackWebhook || '';
+  secretValue('#skWebhook', 'slackWebhook');
   $('#scEnable').checked = Boolean(g.notifyServerChanEnabled);
-  $('#scKey').value = g.serverchanKey || '';
+  secretValue('#scKey', 'serverchanKey');
   $('#cwEnable').checked = Boolean(g.notifyCustomEnabled);
-  $('#cwWebhook').value = g.customWebhook || '';
+  secretValue('#cwWebhook', 'customWebhook');
   $('#cwTemplate').value = g.customTemplate || '';
-  $('#cwHeaders').value = g.customHeaders || '';
+  secretValue('#cwHeaders', 'customHeaders');
   // 检测参数
   $('#probeLimit').value = g.probeLimit || 20;
   $('#requestTimeoutMs').value = g.requestTimeoutMs || 20000;
@@ -563,7 +612,7 @@ function renderNotify() {
   $('#alertQuietEnd').value = g.alertQuietEnd || '07:00';
   // 代理
   $('#proxyEnabled').checked = Boolean(g.proxyEnabled);
-  $('#proxyUrl').value = g.proxyUrl || '';
+  secretValue('#proxyUrl', 'proxyUrl');
   // 历史与日志
   $('#historyEnabled').checked = g.historyEnabled !== false;
   $('#modelHistoryEnabled').checked = g.modelHistoryEnabled !== false;
@@ -588,7 +637,7 @@ function renderNotify() {
   $('#smtpSecure').checked = g.smtpSecure !== false;
   if ($('#smtpInsecureSkipVerify')) $('#smtpInsecureSkipVerify').checked = Boolean(g.smtpInsecureSkipVerify);
   $('#smtpUser').value = g.smtpUser || '';
-  $('#smtpPass').value = g.smtpPass || '';
+  secretValue('#smtpPass', 'smtpPass');
   $('#mailFrom').value = g.mailFrom || '';
   $('#mailTo').value = g.mailTo || '';
 }
@@ -601,32 +650,36 @@ function saveNotify() {
       if (!Number.isFinite(v)) return def;
       return Math.max(min, Math.min(max, Math.round(v)));
     };
-    await window.aipm.setGlobal({
+    const secretPatch = (key, sel) => {
+      const value = $(sel).value.trim();
+      return value ? { [key]: value } : {};
+    };
+    const r = await window.aipm.setGlobal({
       notifyWeixinEnabled: $('#wxEnable').checked,
-      weixinWebhook: $('#wxWebhook').value.trim(),
+      ...secretPatch('weixinWebhook', '#wxWebhook'),
       notifyQQEnabled: $('#qqEnable').checked,
-      qqWebhook: $('#qqWebhook').value.trim(),
+      ...secretPatch('qqWebhook', '#qqWebhook'),
       qqTarget: $('#qqTarget').value.trim(),
       qqTargetType: $('#qqTargetType').value,
-      qqToken: $('#qqToken').value.trim(),
+      ...secretPatch('qqToken', '#qqToken'),
       notifyDingtalkEnabled: $('#dtEnable').checked,
-      dingtalkWebhook: $('#dtWebhook').value.trim(),
-      dingtalkSecret: $('#dtSecret').value.trim(),
+      ...secretPatch('dingtalkWebhook', '#dtWebhook'),
+      ...secretPatch('dingtalkSecret', '#dtSecret'),
       notifyTelegramEnabled: $('#tgEnable').checked,
-      telegramToken: $('#tgToken').value.trim(),
+      ...secretPatch('telegramToken', '#tgToken'),
       telegramChatId: $('#tgChatId').value.trim(),
       telegramApiBase: $('#tgApiBase').value.trim() || 'https://api.telegram.org',
       notifyFeishuEnabled: $('#fsEnable').checked,
-      feishuWebhook: $('#fsWebhook').value.trim(),
-      feishuSecret: $('#fsSecret').value.trim(),
+      ...secretPatch('feishuWebhook', '#fsWebhook'),
+      ...secretPatch('feishuSecret', '#fsSecret'),
       notifySlackEnabled: $('#skEnable').checked,
-      slackWebhook: $('#skWebhook').value.trim(),
+      ...secretPatch('slackWebhook', '#skWebhook'),
       notifyServerChanEnabled: $('#scEnable').checked,
-      serverchanKey: $('#scKey').value.trim(),
+      ...secretPatch('serverchanKey', '#scKey'),
       notifyCustomEnabled: $('#cwEnable').checked,
-      customWebhook: $('#cwWebhook').value.trim(),
+      ...secretPatch('customWebhook', '#cwWebhook'),
       customTemplate: $('#cwTemplate').value.trim(),
-      customHeaders: $('#cwHeaders').value.trim(),
+      ...secretPatch('customHeaders', '#cwHeaders'),
       probeLimit: int('#probeLimit', 20, 1, 100),
       requestTimeoutMs: int('#requestTimeoutMs', 20000, 1000, 120000),
       probeTimeoutMs: int('#probeTimeoutMs', 15000, 1000, 120000),
@@ -643,7 +696,7 @@ function saveNotify() {
       alertQuietStart: $('#alertQuietStart').value || '23:00',
       alertQuietEnd: $('#alertQuietEnd').value || '07:00',
       proxyEnabled: $('#proxyEnabled').checked,
-      proxyUrl: $('#proxyUrl').value.trim(),
+      ...secretPatch('proxyUrl', '#proxyUrl'),
       historyEnabled: $('#historyEnabled').checked,
       modelHistoryEnabled: $('#modelHistoryEnabled').checked,
       historyKeepDays: int('#historyKeepDays', 30, 1, 365),
@@ -665,13 +718,14 @@ function saveNotify() {
       smtpSecure: $('#smtpSecure').checked,
       smtpInsecureSkipVerify: Boolean($('#smtpInsecureSkipVerify') && $('#smtpInsecureSkipVerify').checked),
       smtpUser: $('#smtpUser').value.trim(),
-      smtpPass: $('#smtpPass').value,
+      ...secretPatch('smtpPass', '#smtpPass'),
       mailFrom: $('#mailFrom').value.trim(),
       mailTo: $('#mailTo').value.trim(),
       autoStartCheckOnLaunch: $('#autoStart').checked,
       concurrency: Math.max(1, Math.min(16, Number($('#concurrency').value) || 4)),
       closeAction: $('#closeAction').value === 'exit' ? 'exit' : 'tray'
     });
+    if (!r || !r.ok) toast((r && r.error) || tx('保存失败'), 'err');
   }, 350);
 }
 ['wxEnable', 'qqEnable', 'dtEnable', 'autoStart', 'tgEnable', 'fsEnable', 'skEnable', 'scEnable', 'cwEnable',

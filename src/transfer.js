@@ -30,6 +30,10 @@ function toJSON(providers) {
     notifyOnModelChange: Boolean(p.notifyOnModelChange), note: p.note || '',
     group: p.group || '', tags: p.tags || [], enabled: p.enabled !== false,
     probeMode: p.probeMode || 'chat', probePath: p.probePath || '', probeBody: p.probeBody || '',
+    modelsPath: p.modelsPath || '/v1/models', authType: p.authType || 'bearer', authHeader: p.authHeader || '', authPrefix: p.authPrefix || '',
+    customHeaders: p.customHeaders || '', capabilityModes: p.capabilityModes || [], assertType: p.assertType || 'none', assertValue: p.assertValue || '',
+    modelIgnorePattern: p.modelIgnorePattern || '', quotaPath: p.quotaPath || '', quotaValuePath: p.quotaValuePath || 'remaining', quotaWarnBelow: p.quotaWarnBelow ?? null, measureStreaming: Boolean(p.measureStreaming),
+    notifyChannels: p.notifyChannels || [], maintWeekdays: p.maintWeekdays || [], maintDates: p.maintDates || '',
     probeLimit: p.probeLimit ?? null, proxyUrl: p.proxyUrl || '', useProxy: p.useProxy !== false,
     maintEnabled: Boolean(p.maintEnabled), maintStart: p.maintStart || '02:00', maintEnd: p.maintEnd || '04:00',
     insecureSkipVerify: p.insecureSkipVerify === true ? true : p.insecureSkipVerify === false ? false : null

@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { ensureUniqueProviderIds } = require('./providerSchema');
 
 const DATA_DIR = process.env.AIPM_DATA_DIR
   || (process.env.PORTABLE_EXECUTABLE_DIR
@@ -52,6 +53,8 @@ const DEFAULT_GLOBAL = {
   requestTimeoutMs: 20000,
   probeTimeoutMs: 15000,
   retries: 1,
+  circuitFailThreshold: 5,
+  circuitOpenSec: 300,
   // --- 代理 ---
   proxyEnabled: false,
   proxyUrl: '',
@@ -138,7 +141,7 @@ function loadAll() {
       throw new Error('根节点不是对象');
     }
     const g = normalizeGlobal(raw.global);
-    const list = Array.isArray(raw.providers) ? raw.providers : [];
+    const list = ensureUniqueProviderIds(Array.isArray(raw.providers) ? raw.providers : []);
     return { global: g, providers: list };
   } catch (e) {
     const bad = `${DATA_FILE}.corrupt-${Date.now()}`;

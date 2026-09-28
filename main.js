@@ -13,6 +13,7 @@ const { formatDuration } = require('./src/durfmt');
 const history = require('./src/history');
 const alerts = require('./src/alerts');
 const { diffBaseline } = require('./src/baseline');
+const { validateProviderConfig, newNumericId } = require('./src/providerSchema');
 
 let db = { global: { ...DEFAULT_GLOBAL }, providers: [] };
 let persistBlocked = false;
@@ -29,10 +30,18 @@ const scheduler = new Scheduler({ concurrency: db.global.concurrency || 4 });
 // ---------- 数据层 ----------
 function persist() {
   if (persistBlocked) {
-    logger.error('配置未能成功加载，已跳过保存，避免覆盖 providers.json');
-    return;
+    const error = '配置未能成功加载，已跳过保存，避免覆盖 providers.json';
+    logger.error(error);
+    return { ok: false, error };
   }
-  try { saveAll(db); } catch (e) { logger.error(`保存数据失败: ${e.message}`); }
+  try {
+    saveAll(db);
+    return { ok: true };
+  } catch (e) {
+    const error = `保存数据失败: ${e.message}`;
+    logger.error(error);
+    return { ok: false, error };
+  }
 }
 
 function load() {
@@ -81,6 +90,12 @@ function applyResult(provider, result, reason) {
   provider.modelsUnavailable = result.modelsUnavailable || [];
   provider.modelsUnprobed = result.modelsUnprobed || [];
   provider.modelDetails = result.modelDetails || [];
+  provider.probeLatencyAvg = result.probeLatencyAvg == null ? null : result.probeLatencyAvg;
+  provider.probeLatencyP95 = result.probeLatencyP95 == null ? null : result.probeLatencyP95;
+  provider.quotaRemaining = result.quotaRemaining == null ? null : result.quotaRemaining;
+  provider.quotaWarning = Boolean(result.quotaWarning);
+  provider.firstTokenMs = result.firstTokenMs == null ? null : result.firstTokenMs;
+  provider.throughputTokensPerSec = result.throughputTokensPerSec == null ? null : result.throughputTokensPerSec;
   provider.checkedAt = result.checkedAt;
   provider.lastError = result.error || null;
 
@@ -340,6 +355,7 @@ function maybeBalloon(title, content) {
 
 function clearUnread() {
   if (!unreadAlerts.length) return;
+  logger.info(`[告警] 已确认 ${unreadAlerts.length} 条未读告警`);
   unreadAlerts.length = 0;
   updateTrayStatus();
   send('state-changed', publicState());
@@ -416,20 +432,31 @@ async function maybeDailyMail() {
 
 // ---------- 自动启动检测 ----------
 function startAutoChecks() {
-  if (!db.global.autoStartCheckOnLaunch) {
-    logger.info('未启用"启动即检测"，等待手动触发');
-    return;
-  }
   for (const p of db.providers) {
-    if (p.enabled !== false) scheduler.runCheck(p.id, { reason: 'startup' });
-    if (p.enabled !== false) scheduler.schedule(p);
+    if (p.enabled === false) continue;
+    if (db.global.autoStartCheckOnLaunch) scheduler.runCheck(p.id, { reason: 'startup' });
+    scheduler.schedule(p);
   }
+  if (!db.global.autoStartCheckOnLaunch) logger.info('未启用"启动即检测"，已保留周期轮循调度');
 }
 
 // ---------- IPC ----------
 function publicProvider(p) {
-  const { apiKey, ...rest } = p;
-  return { ...rest, hasApiKey: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : '' };
+  const { apiKey, customHeaders, ...rest } = p;
+  return { ...rest, hasApiKey: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : '', hasCustomHeaders: Boolean(customHeaders) };
+}
+const SECRET_GLOBAL_KEYS = [
+  'weixinWebhook', 'qqWebhook', 'qqToken', 'dingtalkWebhook', 'dingtalkSecret',
+  'telegramToken', 'feishuWebhook', 'feishuSecret', 'slackWebhook',
+  'serverchanKey', 'customWebhook', 'customHeaders', 'proxyUrl', 'smtpPass'
+];
+function publicGlobal(g) {
+  const out = { ...(g || {}) };
+  for (const key of SECRET_GLOBAL_KEYS) {
+    out[`${key}Configured`] = Boolean(out[key]);
+    out[key] = '';
+  }
+  return out;
 }
 function maskKey(k) {
   if (k.length <= 8) return k.slice(0, 2) + '****';
@@ -438,13 +465,14 @@ function maskKey(k) {
 function publicState() {
   return {
     providers: db.providers.map(publicProvider),
-    global: db.global,
+    global: publicGlobal(db.global),
     running: scheduler.runningList(),
+    schedule: scheduler.scheduleInfo(),
     dataFile: DATA_FILE,
     dataDir: DATA_DIR,
     logDir: logger.LOG_DIR,
     unread: { count: unreadAlerts.length, items: unreadAlerts.slice(-5).reverse() },
-    selfmon: { slowChecks: selfmon.slowChecks, queueWarns: selfmon.queueWarns, notifyFails: getNotifyHealth() }
+    selfmon: { slowChecks: selfmon.slowChecks, queueWarns: selfmon.queueWarns, notifyFails: getNotifyHealth(), circuits: scheduler.circuitInfo() }
   };
 }
 function send(channel, payload) {
@@ -457,7 +485,7 @@ ipcMain.handle('logs:clear', () => { logger.clear(); return { ok: true }; });
 logger.subscribe((line) => send('log:line', line));
 
 ipcMain.handle('provider:add', (e, data) => {
-  const id = Date.now() + Math.floor(Math.random() * 1000);
+  const id = newNumericId(new Set(db.providers.map((p) => p.id)));
   const p = {
     id,
     name: String(data.name || '').trim(),
@@ -471,6 +499,22 @@ ipcMain.handle('provider:add', (e, data) => {
     probeMode: String(data.probeMode || 'chat'),
     probePath: String(data.probePath || '').trim(),
     probeBody: String(data.probeBody || '').trim(),
+    modelsPath: String(data.modelsPath || '/v1/models').trim(),
+    authType: ['bearer', 'header', 'none'].includes(data.authType) ? data.authType : 'bearer',
+    authHeader: String(data.authHeader || 'X-API-Key').trim(),
+    authPrefix: String(data.authPrefix || ''),
+    customHeaders: String(data.customHeaders || '').trim(),
+    capabilityModes: Array.isArray(data.capabilityModes) ? data.capabilityModes : [],
+    assertType: String(data.assertType || 'none'),
+    assertValue: String(data.assertValue || '').trim(),
+    modelIgnorePattern: String(data.modelIgnorePattern || '').trim(),
+    quotaPath: String(data.quotaPath || '').trim(),
+    quotaValuePath: String(data.quotaValuePath || 'remaining').trim(),
+    quotaWarnBelow: data.quotaWarnBelow === '' || data.quotaWarnBelow == null ? null : Number(data.quotaWarnBelow),
+    measureStreaming: Boolean(data.measureStreaming),
+    notifyChannels: Array.isArray(data.notifyChannels) ? data.notifyChannels : [],
+    maintWeekdays: Array.isArray(data.maintWeekdays) ? data.maintWeekdays : [],
+    maintDates: String(data.maintDates || '').trim(),
     probeLimit: Number(data.probeLimit) > 0 ? Number(data.probeLimit) : null,
     proxyUrl: String(data.proxyUrl || '').trim(),
     useProxy: data.useProxy !== false,
@@ -491,8 +535,10 @@ ipcMain.handle('provider:add', (e, data) => {
     probeCursor: 0,
     modelBaseline: []
   };
+  try { validateProviderConfig(p); } catch (err) { return { ok: false, error: err.message }; }
   db.providers.push(p);
-  persist();
+  const saved = persist();
+  if (!saved.ok) { db.providers.pop(); return saved; }
   if (p.enabled !== false) scheduler.schedule(p);
   logger.info(`新增 Provider [${p.name}] ${p.url}`);
   send('state-changed', publicState());
@@ -503,6 +549,7 @@ ipcMain.handle('provider:update', (e, { id, data }) => {
   const p = db.providers.find((x) => x.id === Number(id));
   if (!p) return { ok: false, error: 'Provider 不存在' };
   const periodChanged = Number(data.intervalSec) !== Number(p.intervalSec);
+  const before = { ...p, tags: [...(p.tags || [])] };
   Object.assign(p, {
     name: String(data.name || p.name).trim(),
     url: String(data.url || p.url).trim().replace(/\/+$/, ''),
@@ -515,7 +562,23 @@ ipcMain.handle('provider:update', (e, { id, data }) => {
     probeMode: String(data.probeMode || p.probeMode || 'chat'),
     probePath: String(data.probePath ?? p.probePath ?? '').trim(),
     probeBody: String(data.probeBody ?? p.probeBody ?? '').trim(),
-    probeLimit: Number(data.probeLimit) > 0 ? Number(data.probeLimit) : (p.probeLimit || null),
+    modelsPath: String(data.modelsPath ?? p.modelsPath ?? '/v1/models').trim(),
+    authType: ['bearer', 'header', 'none'].includes(data.authType) ? data.authType : (p.authType || 'bearer'),
+    authHeader: String(data.authHeader ?? p.authHeader ?? 'X-API-Key').trim(),
+    authPrefix: String(data.authPrefix ?? p.authPrefix ?? ''),
+    customHeaders: String(data.customHeaders ?? p.customHeaders ?? '').trim(),
+    capabilityModes: Array.isArray(data.capabilityModes) ? data.capabilityModes : (p.capabilityModes || []),
+    assertType: String(data.assertType ?? p.assertType ?? 'none'),
+    assertValue: String(data.assertValue ?? p.assertValue ?? '').trim(),
+    modelIgnorePattern: String(data.modelIgnorePattern ?? p.modelIgnorePattern ?? '').trim(),
+    quotaPath: String(data.quotaPath ?? p.quotaPath ?? '').trim(),
+    quotaValuePath: String(data.quotaValuePath ?? p.quotaValuePath ?? 'remaining').trim(),
+    quotaWarnBelow: data.quotaWarnBelow === '' || data.quotaWarnBelow === null ? null : (Number.isFinite(Number(data.quotaWarnBelow)) ? Number(data.quotaWarnBelow) : (p.quotaWarnBelow ?? null)),
+    measureStreaming: data.measureStreaming !== undefined ? Boolean(data.measureStreaming) : Boolean(p.measureStreaming),
+    notifyChannels: Array.isArray(data.notifyChannels) ? data.notifyChannels : (p.notifyChannels || []),
+    maintWeekdays: Array.isArray(data.maintWeekdays) ? data.maintWeekdays : (p.maintWeekdays || []),
+    maintDates: String(data.maintDates ?? p.maintDates ?? '').trim(),
+    probeLimit: data.probeLimit === null ? null : (Number(data.probeLimit) > 0 ? Number(data.probeLimit) : (p.probeLimit || null)),
     proxyUrl: String(data.proxyUrl ?? p.proxyUrl ?? '').trim(),
     useProxy: data.useProxy !== undefined ? data.useProxy !== false : (p.useProxy !== false),
     maintEnabled: data.maintEnabled !== undefined ? Boolean(data.maintEnabled) : Boolean(p.maintEnabled),
@@ -524,7 +587,9 @@ ipcMain.handle('provider:update', (e, { id, data }) => {
     insecureSkipVerify: data.insecureSkipVerify === undefined ? (p.insecureSkipVerify ?? null)
       : (data.insecureSkipVerify === true ? true : data.insecureSkipVerify === false ? false : null)
   });
-  persist();
+  try { validateProviderConfig(p); } catch (err) { Object.assign(p, before); return { ok: false, error: err.message }; }
+  const saved = persist();
+  if (!saved.ok) { Object.assign(p, before); return saved; }
   // 仅在周期变化时重排定时器（schedule 内部也会保护未变化的定时器），
   // 避免编辑名称/备注等操作把轮循从头计时
   if (p.enabled !== false && periodChanged) scheduler.schedule(p);
@@ -537,9 +602,10 @@ ipcMain.handle('provider:delete', (e, id) => {
   const i = db.providers.findIndex((x) => x.id === Number(id));
   if (i < 0) return { ok: false };
   const [p] = db.providers.splice(i, 1);
+  const saved = persist();
+  if (!saved.ok) { db.providers.splice(i, 0, p); return saved; }
   scheduler.cancel(p.id);
   alerts.resetState(p.id);
-  persist();
   logger.info(`删除 Provider [${p.name}]`);
   send('state-changed', publicState());
   return { ok: true };
@@ -548,11 +614,14 @@ ipcMain.handle('provider:delete', (e, id) => {
 ipcMain.handle('provider:deleteMany', (e, ids) => {
   const set = new Set((ids || []).map(Number));
   const removed = [];
+  const before = db.providers;
   db.providers = db.providers.filter((p) => {
-    if (set.has(p.id)) { removed.push(p); scheduler.cancel(p.id); alerts.resetState(p.id); return false; }
+    if (set.has(p.id)) { removed.push(p); return false; }
     return true;
   });
-  persist();
+  const saved = persist();
+  if (!saved.ok) { db.providers = before; return saved; }
+  for (const p of removed) { scheduler.cancel(p.id); alerts.resetState(p.id); }
   logger.info(`批量删除 ${removed.length} 个 Provider`);
   send('state-changed', publicState());
   return { ok: true, removed: removed.length };
@@ -572,6 +641,7 @@ ipcMain.handle('provider:checkAll', () => {
 ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
   const p = db.providers.find((x) => x.id === Number(id));
   if (!p) return { ok: false };
+  const before = JSON.parse(JSON.stringify(p));
   p.enabled = Boolean(enabled);
   if (p.enabled) {
     // 重新启用：以当前时间基线立即调度（schedule 内部会按 checkedAt 判断是否补检）
@@ -594,19 +664,32 @@ ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
     p.alertRuntime = null;
     alerts.resetState(p.id);
   }
-  persist();
+  const saved = persist();
+  if (!saved.ok) {
+    Object.assign(p, before);
+    if (p.enabled) scheduler.schedule(p); else scheduler.cancel(p.id);
+    return saved;
+  }
   send('state-changed', publicState());
   updateTrayStatus();
   return { ok: true };
 });
 
 ipcMain.handle('global:set', (e, patch) => {
-  db.global = { ...db.global, ...patch };
+  const before = db.global;
+  const allowed = new Set(Object.keys(db.global || {}));
+  const safePatch = {};
+  for (const [key, value] of Object.entries((patch && typeof patch === 'object') ? patch : {})) {
+    if (allowed.has(key)) safePatch[key] = value;
+    else logger.warn(`[配置] 忽略未授权全局字段: ${key}`);
+  }
+  db.global = { ...db.global, ...safePatch };
+  const saved = persist();
+  if (!saved.ok) { db.global = before; return saved; }
   scheduler.setConcurrency(db.global.concurrency || 4);
   logger.configure(db.global);
   applyLoginItem(db.global);
   registerHotkey();
-  persist();
   logger.info('全局配置已更新');
   send('state-changed', publicState());
   return { ok: true };
@@ -755,8 +838,10 @@ ipcMain.handle('backup:pickFile', async () => {
 
 ipcMain.handle('backup:restore', (e, { filePath, mode }) => {
   try {
+    const before = JSON.stringify(db);
     const res = backup.restoreFrom(db, filePath, mode === 'merge' ? 'merge' : 'overwrite');
-    persist();
+    const saved = persist();
+    if (!saved.ok) { db = JSON.parse(before); return saved; }
     // 重建全部定时器并刷新前端
     scheduler.removeAll();
     for (const p of db.providers) {
@@ -830,8 +915,10 @@ ipcMain.handle('transfer:parse', (e, { text, format, delimiter }) => {
 
 ipcMain.handle('transfer:apply', (e, { items, mode }) => {
   try {
+    const before = JSON.stringify(db);
     const res = transfer.applyImport(db, items || [], mode === 'append' ? 'append' : 'merge');
-    persist();
+    const saved = persist();
+    if (!saved.ok) { db = JSON.parse(before); return saved; }
     // 新增的服务商加入轮循
     for (const p of db.providers) {
       if (p.enabled !== false && !scheduler.timers.has(p.id)) scheduler.schedule(p);
@@ -859,8 +946,13 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: false
     }
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url !== win.webContents.getURL()) event.preventDefault();
   });
 
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -905,8 +997,7 @@ function createWindow() {
     }
   });
   win.on('closed', () => { win = null; });
-  // 主界面获得焦点即清零未读（用户已看到）
-  win.on('focus', () => { if (unreadAlerts.length) clearUnread(); });
+  // 未读告警必须由用户显式确认，窗口获得焦点不再自动清零。
 }
 
 function createTray() {

@@ -79,6 +79,31 @@ test('detector: 自定义探测模板转义模型名', () => {
   assert.strictEqual(JSON.parse(r.body).model, 'a"b\\c');
 });
 
+test('detector: 自定义鉴权头与响应断言', () => {
+  const { providerHeaders, assertProbeResponse } = require('../src/detector');
+  const h = providerHeaders({ apiKey: 'secret', authType: 'header', authHeader: 'X-Key', authPrefix: 'Token ', customHeaders: '{"X-Tenant":"a"}' });
+  assert.strictEqual(h['X-Key'], 'Token secret');
+  assert.strictEqual(h['X-Tenant'], 'a');
+  assert.strictEqual(assertProbeResponse({ choices: [{ ok: true }] }, { assertType: 'jsonPath', assertValue: 'choices.0.ok' }), true);
+  assert.throws(() => assertProbeResponse({ a: 1 }, { assertType: 'contains', assertValue: 'missing' }), /断言失败/);
+});
+
+test('provider schema: 拒绝危险协议并修复重复 ID', () => {
+  const { validateProviderConfig, ensureUniqueProviderIds } = require('../src/providerSchema');
+  assert.throws(() => validateProviderConfig({ name: 'x', url: 'file:///x', intervalSec: 60 }), /HTTP/);
+  assert.doesNotThrow(() => validateProviderConfig({ name: 'x', url: 'https://x.test', intervalSec: 60, modelsPath: '/models' }));
+  const list = ensureUniqueProviderIds([{ id: 1 }, { id: 1 }, { id: 0 }]);
+  assert.strictEqual(new Set(list.map((p) => p.id)).size, 3);
+});
+
+test('detector: 模型忽略、JSON 路径与 SSE 增量解析', () => {
+  const { filterIgnoredModels, valueAtPath, extractSSEDelta } = require('../src/detector');
+  assert.deepStrictEqual(filterIgnoredModels(['gpt-4', 'deprecated-old', 'embed-1'], '^(deprecated|embed)'), ['gpt-4']);
+  assert.strictEqual(valueAtPath({ data: { remaining: 12 } }, 'data.remaining'), 12);
+  assert.strictEqual(extractSSEDelta('data: {"choices":[{"delta":{"content":"pong"}}]}'), 'pong');
+  assert.strictEqual(extractSSEDelta('data: [DONE]'), '');
+});
+
 test('notifier: 全局代理开关与 QQ 数字 id', () => {
   const { resolveNotifyProxy, oneBotId } = require('../src/notifier');
   assert.strictEqual(resolveNotifyProxy({ useProxy: true }, { proxyEnabled: false, proxyUrl: 'http://p:1' }), '');
@@ -105,6 +130,21 @@ test('alerts: 静默不记已告警，结束后补发一次', () => {
   assert.strictEqual(d2.alerts.length, 1);
   assert.strictEqual(d2.alerts[0].kind, 'down');
   assert.strictEqual(d2.inAlarm, true);
+});
+
+test('alerts: 维护日期与星期规则', () => {
+  const { inMaintWindow } = require('../src/alerts');
+  const p = { maintEnabled: true, maintStart: '01:00', maintEnd: '03:00', maintDates: '2026-01-02', maintWeekdays: [5] };
+  assert.strictEqual(inMaintWindow(p, new Date(2026, 0, 2, 2, 0)), true);
+  assert.strictEqual(inMaintWindow(p, new Date(2026, 0, 3, 2, 0)), false);
+});
+
+test('alerts: 配额低于阈值触发独立告警', () => {
+  const { evaluate, resetState } = require('../src/alerts');
+  const p = { id: 987654, name: 'quota', status: 'up', quotaWarning: true, quotaRemaining: 3, quotaWarnBelow: 5 };
+  resetState(p.id);
+  const out = evaluate({ alertCooldownMin: 10 }, p, { status: 'up' }, { firstCheck: false });
+  assert.strictEqual(out.alerts.some((a) => a.kind === 'quota'), true);
 });
 
 test('store: 损坏配置不当成空库，也不改原文件', () => {

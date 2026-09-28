@@ -45,6 +45,7 @@ function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(url); } catch (e) { return reject(new Error('Webhook URL 无效')); }
+    if (!['http:', 'https:'].includes(u.protocol)) return reject(new Error('Webhook 仅支持 HTTP/HTTPS'));
     const mod = u.protocol === 'http:' ? http : https;
     const body = raw ? String(payload) : JSON.stringify(payload);
     const headers = Object.assign(
@@ -73,7 +74,10 @@ function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders
       }
       let data = '';
       res.setEncoding('utf8');
-      res.on('data', (c) => { data += c; });
+      res.on('data', (c) => {
+        data += c;
+        if (data.length > 1024 * 1024) req.destroy(new Error('通知响应过大'));
+      });
       res.on('end', () => {
         if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
         else reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 120)}`));
@@ -361,7 +365,9 @@ function channelEnabled(globalCfg, ch) {
 /** 向所有已启用通道广播一段文本；任一通道失败只记日志不影响其它 */
 async function broadcast(globalCfg, text, ctx = {}) {
   const jobs = [];
+  const routes = ctx.provider && Array.isArray(ctx.provider.notifyChannels) ? ctx.provider.notifyChannels : [];
   for (const ch of CHANNELS) {
+    if (routes.length && !routes.includes(ch)) continue;
     if (!channelEnabled(globalCfg, ch)) continue;
     const label = CHANNEL_LABEL[ch] || ch;
     jobs.push(
