@@ -114,6 +114,50 @@ app.whenReady().then(async () => {
   console.log(`${st2OK ? 'PASS' : 'FAIL'}  统计页头部单行(820px窄窗)  ${JSON.stringify(st2)}`);
   if (!st2OK) bad++;
 
+  // 通道健康面板：已启用未发送 / 发送成功 / 连续失败 / 配置不完整 四态区分
+  // （历史缺陷：只在有发送记录时才不是「未使用」，导致刚启用钉钉仍显示未使用）
+  win.setSize(1180, 820);
+  await new Promise((r) => setTimeout(r, 300));
+  const health = await win.webContents.executeJavaScript(`(() => {
+    const cell = (ch) => {
+      const items = [...document.querySelectorAll('#notifyHealthList .health-item')];
+      const el = items.find((n) => n.querySelector('.health-name').textContent.trim() === ch);
+      if (!el) return null;
+      return {
+        dot: el.querySelector('.health-dot').className.replace('health-dot ', '').trim(),
+        meta: el.querySelector('.health-meta').textContent.trim()
+      };
+    };
+    // 通过页面全局绑定直接构造状态，绕开测试环境缺失的主进程 IPC
+    state = { ...state, global: { notifyDingtalkEnabled: true, dingtalkWebhookConfigured: true }, selfmon: { notifyHealth: {} } };
+    renderNotifyHealth();
+    const enabled = cell('钉钉');
+    state.selfmon.notifyHealth = { dingtalk: { fails: 0, lastOkAt: Date.now(), lastFailAt: 0, lastError: '' } };
+    renderNotifyHealth();
+    const okState = cell('钉钉');
+    state.selfmon.notifyHealth = { dingtalk: { fails: 3, lastOkAt: 0, lastFailAt: Date.now(), lastError: 'errcode=310000' } };
+    renderNotifyHealth();
+    const badState = cell('钉钉');
+    state.global = { notifyDingtalkEnabled: true, dingtalkWebhookConfigured: false };
+    state.selfmon.notifyHealth = {};
+    renderNotifyHealth();
+    const incomplete = cell('钉钉');
+    state.global = { notifyDingtalkEnabled: false };
+    renderNotifyHealth();
+    const disabled = cell('钉钉');
+    return { enabled, okState, badState, incomplete, disabled };
+  })()`);
+  const healthChecks = [
+    ['已启用未发送显示「已启用 · 待发送」', health.enabled && health.enabled.meta.includes('已启用') && health.enabled.dot === 'idle'],
+    ['发送成功显示绿灯与最后成功', health.okState && health.okState.dot === 'ok' && health.okState.meta.includes('最后成功')],
+    ['连续失败显示红灯与次数', health.badState && health.badState.dot === 'bad' && health.badState.meta.includes('3')],
+    ['开关开着但没填地址提示配置不完整', health.incomplete && health.incomplete.meta.includes('配置不完整')],
+    ['未启用的通道显示未使用', health.disabled && health.disabled.meta === '未使用' && health.disabled.dot === 'idle'],
+    ['已启用未发送时不再显示未使用', health.enabled && !health.enabled.meta.includes('未使用')]
+  ];
+  for (const [n, ok] of healthChecks) { if (!ok) bad++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}`); }
+  if (healthChecks.some(([, ok]) => !ok)) console.log('health probe:', JSON.stringify(health));
+
   console.log(bad === 0 ? 'UI-CHECK-OK' : 'UI-CHECK-FAILED');
   app.exit(bad === 0 ? 0 : 1);
 }).catch((e) => { console.error('UI-CHECK-ERROR', e); app.exit(1); });

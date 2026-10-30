@@ -679,6 +679,62 @@ html.dark code { background: var(--card-2); }
   font-size: 11px;
 }
 
+/* ================= 输入框内嵌按钮（API Key 眼睛/复制/清除） ================= */
+.input-suffix { position: relative; }
+.input-suffix input { padding-right: 34px; }
+.input-suffix #fKey { padding-right: 96px; }   /* 三个按钮，预留整条右侧空间 */
+.suffix-btn {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 26px; height: 26px; border: none; border-radius: 7px; cursor: pointer;
+  background: transparent; color: var(--text-3); padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .14s;
+}
+#fKeyCopy { right: 34px; }
+#fKeyClear { right: 62px; }
+.suffix-btn:hover { background: rgba(120,120,128,.16); color: var(--text); }
+.suffix-btn .icon { width: 15px; height: 15px; }
+.suffix-btn.clear:hover { background: rgba(255,69,58,.12); color: var(--red); }
+.suffix-btn.clear.armed { background: rgba(255,69,58,.14); color: var(--red); }
+/* label 行内的「清除已保存」小按钮 */
+.clear-saved {
+  margin-left: 8px; padding: 1px 7px; font-size: 11px; font-weight: 500;
+  border: 1px solid var(--sep); border-radius: 6px; background: transparent;
+  color: var(--red); cursor: pointer; transition: all .14s;
+}
+.clear-saved:hover { background: rgba(255,69,58,.1); border-color: rgba(255,69,58,.4); }
+.clear-saved.armed { background: var(--red); border-color: var(--red); color: #fff; }
+
+/* 复选框组换行（通知通道路由） */
+.field-inline.wrap { flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+
+/* ================= 通道健康面板 ================= */
+.health-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 28px; }
+.health-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 2px; border-bottom: 1px dashed var(--sep);
+  font-size: 13px; min-width: 0;
+}
+.health-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.health-dot.ok { background: var(--green); }
+.health-dot.bad { background: var(--red); }
+.health-dot.idle { background: var(--text-3); opacity: .35; }
+.health-name { font-weight: 600; flex: none; }
+.health-meta { margin-left: auto; color: var(--text-3); font-size: 11.5px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ================= 未读告警弹窗 ================= */
+.um-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 2px; border-bottom: 1px solid var(--sep); font-size: 13px;
+}
+.um-item:last-child { border-bottom: none; }
+.um-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--orange); flex: none; }
+.um-main { min-width: 0; }
+.um-name { font-weight: 600; }
+.um-title { color: var(--text-2); font-size: 12px; margin-top: 1px; }
+.um-time { margin-left: auto; color: var(--text-3); font-size: 11.5px; flex: none; }
+.um-empty { padding: 18px 0; text-align: center; color: var(--text-3); font-size: 13px; }
+
 /* ================= 统计视图 ================= */
 .stats-cards {
   display: grid;
@@ -722,7 +778,7 @@ html.dark code { background: var(--card-2); }
 .stats-table { width: 100%; }
 .st-row {
   display: grid;
-  grid-template-columns: 2fr .7fr .9fr 1.2fr .9fr 1fr .8fr 1fr;
+  grid-template-columns: 1.7fr .6fr .8fr 1.15fr .7fr .75fr .8fr .95fr .8fr .9fr;
   gap: 8px;
   align-items: center;
   padding: 11px 6px;

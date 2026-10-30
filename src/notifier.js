@@ -2,8 +2,11 @@
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { URL } = require('url');
 const { headersForRedirect } = require('./httpguard');
+const { DATA_DIR } = require('./store');
 
 /** 懒加载 https-proxy-agent（可选依赖，缺失时退化为直连） */
 function getProxyAgent(proxyUrl, insecureSkipVerify) {
@@ -114,15 +117,68 @@ function sendOpts(globalCfg = {}, ctx = {}) {
   return { proxy: resolveNotifyProxy(ctx.provider, globalCfg), insecureSkipVerify: Boolean(globalCfg.insecureSkipVerify) };
 }
 
-/** 各通道连续失败计数（自监控用；成功清零，达 3 次记 error 日志预警） */
-const notifyFailStreak = {};
-function noteResult(channel, ok) {
-  if (ok) { notifyFailStreak[channel] = 0; return; }
-  const n = (notifyFailStreak[channel] || 0) + 1;
-  notifyFailStreak[channel] = n;
-  if (n === 3) logger.error(`[自检] 通知通道「${CHANNEL_LABEL[channel] || channel}」连续失败 ${n} 次，请检查配置与网络`);
+/** 各通道健康状态（自监控用）：连续失败计数 + 最近成功/失败时刻与错误，供设置页健康面板展示 */
+const notifyHealth = {};
+// 健康状态落盘：进程内内存态一重启就清空，面板会退回「未使用」，与用户已启用的配置矛盾。
+// 写入频率仅由通知发送触发（告警级），量级极低，直接同步写即可，不做防抖。
+const HEALTH_FILE = path.join(DATA_DIR, 'notify-health.json');
+let healthLoaded = false;
+
+function loadHealth() {
+  if (healthLoaded) return;
+  healthLoaded = true;
+  try {
+    const raw = JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8'));
+    for (const ch of CHANNELS) {
+      const h = raw && raw[ch];
+      if (!h || typeof h !== 'object') continue;
+      notifyHealth[ch] = {
+        fails: Math.max(0, Number(h.fails) || 0),
+        lastOkAt: Number(h.lastOkAt) || 0,
+        lastFailAt: Number(h.lastFailAt) || 0,
+        lastError: String(h.lastError || '').slice(0, 200)
+      };
+    }
+  } catch (e) { /* 首次运行或文件损坏：从空状态开始，不影响发送 */ }
 }
-function getNotifyHealth() { return { ...notifyFailStreak }; }
+
+function saveHealth() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = `${HEALTH_FILE}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(notifyHealth, null, 2), 'utf8');
+    fs.renameSync(tmp, HEALTH_FILE);
+  } catch (e) { /* 落盘失败只影响面板展示，不能阻断通知 */ }
+}
+
+function noteResult(channel, ok, err) {
+  loadHealth();
+  const h = notifyHealth[channel] || (notifyHealth[channel] = { fails: 0, lastOkAt: 0, lastFailAt: 0, lastError: '' });
+  if (ok) {
+    h.fails = 0;
+    h.lastOkAt = Date.now();
+  } else {
+    h.fails++;
+    h.lastFailAt = Date.now();
+    h.lastError = String((err && err.message) || err || '').slice(0, 200);
+    if (h.fails === 3) logger.error(`[自检] 通知通道「${CHANNEL_LABEL[channel] || channel}」连续失败 ${h.fails} 次，请检查配置与网络`);
+  }
+  saveHealth();
+}
+function getNotifyHealth() {
+  loadHealth();
+  return JSON.parse(JSON.stringify(notifyHealth));
+}
+
+/** 清除某通道的健康记录（对应密钥被删除后，历史成功/失败不再代表当前配置） */
+function resetHealth(channels) {
+  loadHealth();
+  let changed = false;
+  for (const ch of Array.isArray(channels) ? channels : [channels]) {
+    if (notifyHealth[ch]) { delete notifyHealth[ch]; changed = true; }
+  }
+  if (changed) saveHealth();
+}
 
 function fmtProvider(p) {
   return `${p.name || 'Provider#' + p.id}`;
@@ -158,7 +214,8 @@ function buildModelChangeText(provider, prev, next, extra = {}) {
 function buildAlertText(provider, alert) {
   const lines = [];
   const head = alert.kind === 'recover' ? '【AI Provider 服务恢复】'
-    : alert.kind === 'authfail' ? '【AI Provider 密钥失效】' : '【AI Provider 服务异常】';
+    : alert.kind === 'authfail' ? '【AI Provider 密钥失效】'
+    : alert.kind === 'latency' ? '【AI Provider 延迟劣化】' : '【AI Provider 服务异常】';
   lines.push(head);
   lines.push(`服务商：${fmtProvider(provider)}`);
   lines.push(`地址：${provider.url || '—'}`);
@@ -373,7 +430,7 @@ async function broadcast(globalCfg, text, ctx = {}) {
     jobs.push(
       SENDERS[ch](globalCfg, text, ctx)
         .then(() => { noteResult(ch, true); logger.info(`[通知] ${label}推送成功${ctx.name ? ': ' + ctx.name : ''}`); })
-        .catch((e) => { noteResult(ch, false); logger.error(`[通知] ${label}推送失败: ${e.message}`); })
+        .catch((e) => { noteResult(ch, false, e); logger.error(`[通知] ${label}推送失败: ${e.message}`); })
     );
   }
   if (!jobs.length) logger.debug('[通知] 无已启用的通知通道，跳过推送');
@@ -397,12 +454,20 @@ async function sendTest(globalCfg, channel) {
   const text = `【AI Provider Monitor】测试消息 ${new Date().toLocaleString('zh-CN')}`;
   const fn = SENDERS[channel];
   if (!fn) throw new Error('未知通道');
-  return fn(globalCfg, text, { name: '测试', status: 'up', url: '' });
+  // 测试发送同样是真实请求，健康面板必须能看到结果，否则刚测通也仍显示「未使用」
+  try {
+    const res = await fn(globalCfg, text, { name: '测试', status: 'up', url: '' });
+    noteResult(channel, true);
+    return res;
+  } catch (e) {
+    noteResult(channel, false, e);
+    throw e;
+  }
 }
 
 module.exports = {
   notifyModelChange, notifyAlert, sendTest, broadcast,
   buildModelChangeText, buildAlertText, channelEnabled,
   sendQQ, sendWeixin, sendDingtalk, sendTelegram, sendFeishu, sendSlack, sendServerChan, sendCustom,
-  CHANNELS, CHANNEL_LABEL, getNotifyHealth, resolveNotifyProxy, oneBotId
+  CHANNELS, CHANNEL_LABEL, getNotifyHealth, noteResult, resetHealth, resolveNotifyProxy, oneBotId
 };

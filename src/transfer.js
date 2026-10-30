@@ -1,6 +1,6 @@
 'use strict';
 const logger = require('./logger');
-const { normalizeProvider, mergeProvider, normalizeUrlKey } = require('./providerSchema');
+const { normalizeProvider, mergeProvider, normalizeUrlKey, validateProviderConfig } = require('./providerSchema');
 
 /**
  * 服务商批量导入/导出模块
@@ -181,9 +181,17 @@ function parseImport(text, opts = {}) {
     if (!name && !url) { errors.push({ line: lineNo, msg: '名称与 URL 均为空，已跳过' }); return; }
     if (!name) { errors.push({ line: lineNo, msg: '缺少名称，已跳过' }); return; }
     if (!url) { errors.push({ line: lineNo, msg: `「${name}」缺少 URL，已跳过` }); return; }
-    // 允许 host:port 简写，导入时补 http://
-    const item = normalizeProvider({ ...r, name, url: /^https?:\/\//i.test(url) ? url : `http://${url}` });
-    items.push(item);
+    // host:port 简写补 http://；已带协议的按原样交给校验（file:/ws: 等会被拒绝而不是被改写）
+    const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(url);
+    const item = normalizeProvider({ ...r, name, url: hasScheme ? url : `http://${url}` });
+    // 导入与手工新增走同一套校验：非法 URL/正则/周期在这里拦下并在预览中标出行号，
+    // 否则坏正则会在运行时让 detector 误报「离线：Invalid regular expression」
+    try {
+      validateProviderConfig(item);
+      items.push(item);
+    } catch (e) {
+      errors.push({ line: lineNo, msg: `「${name}」校验失败：${e.message}` });
+    }
   });
   logger.info(`[导入导出] 解析导入文本（${format}${format === 'text' ? '/' + (opts.delimiter || 'tab') : ''}）：${items.length} 条有效，${errors.length} 条问题`);
   return { items, errors };
@@ -192,16 +200,20 @@ function parseImport(text, opts = {}) {
 /**
  * 将解析出的条目合并进当前列表。
  * mode='merge'：按 URL 去重（已存在更新配置，不存在新增）；mode='append'：全部新增（URL 重复也追加）。
- * 返回 { added, updated, skipped }
+ * 入库前对每条重新校验（防渲染层绕过 parseImport 直传）；校验失败计入 invalid 不入库。
+ * 返回 { added, updated, skipped, invalid }
  */
 function applyImport(db, items, mode = 'merge') {
-  let added = 0, updated = 0, skipped = 0;
+  let added = 0, updated = 0, skipped = 0, invalid = 0;
   const norm = normalizeUrlKey;
   if (mode === 'append') {
     for (const it of items) {
       // 无法识别的空 URL 不入库，计为跳过
       if (!norm(it.url)) { skipped++; continue; }
-      db.providers.push(normalizeProvider({ ...it, id: undefined }));
+      const p = normalizeProvider({ ...it, id: undefined });
+      // 先归一（补默认值）再校验；校验失败丢弃，防止坏正则/坏 URL 混进轮循
+      try { validateProviderConfig(p); } catch (e) { invalid++; continue; }
+      db.providers.push(p);
       added++;
     }
   } else {
@@ -209,6 +221,9 @@ function applyImport(db, items, mode = 'merge') {
     for (const it of items) {
       const key = norm(it.url);
       if (!key) { skipped++; continue; }
+      // 校验用归一化后的副本（默认值补齐后才有可比的周期/路径），
+      // 但合并仍用原始条目，避免 normalize 填补的默认 enabled 等字段覆盖现有配置
+      try { validateProviderConfig(normalizeProvider(it)); } catch (e) { invalid++; continue; }
       const exist = urlIndex.get(key);
       if (exist) {
         // 与现有记录逐字段一致 => 记为跳过，避免「更新数」虚高
@@ -222,8 +237,8 @@ function applyImport(db, items, mode = 'merge') {
       }
     }
   }
-  logger.info(`[导入导出] 导入完成（${mode}）：新增 ${added}，更新 ${updated}，跳过 ${skipped}`);
-  return { added, updated, skipped };
+  logger.info(`[导入导出] 导入完成（${mode}）：新增 ${added}，更新 ${updated}，跳过 ${skipped}${invalid ? `，校验失败丢弃 ${invalid}` : ''}`);
+  return { added, updated, skipped, invalid };
 }
 
 module.exports = { exportProviders, parseImport, applyImport, TEXT_DELIMITERS };

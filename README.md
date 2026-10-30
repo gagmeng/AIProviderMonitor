@@ -1,6 +1,6 @@
 # AI Provider Monitor
 
-一款基于 **Electron** 的 AI 服务商（AI Provider）状态与可用模型监控桌面应用。采用 iOS 风格界面设计，支持按服务商自定义周期自动轮循检测连接状态与模型可用性，并在**模型发生变动**时通过微信、QQ、钉钉实时推送通知。
+一款基于 **Electron** 的 AI 服务商（AI Provider）状态与可用模型监控桌面应用。采用 iOS 风格界面设计，支持按服务商自定义周期自动轮循检测连接状态与模型可用性，并在**模型发生变动**时通过微信、QQ、钉钉、Telegram、飞书、Slack、Server酱或自定义 Webhook 推送通知。
 
 适用于企业内部 AI 网关、OpenAI 兼容中转站、本地推理服务（vLLM / Ollama / One-API 等）的可用性巡检与模型变更监控。
 
@@ -69,8 +69,13 @@
 - **微信**：企业微信群机器人 Webhook
 - **QQ**：OneBot v11 HTTP 服务（NapCat / Lagrange / go-cqhttp），支持私聊与群聊、access_token 鉴权
 - **钉钉**：自定义群机器人 Webhook，支持官方**加签**安全设置
+- **Telegram**：Bot API `sendMessage`，可自定义 API 反代地址
+- **飞书**：自定义机器人 Webhook，支持可选加签
+- **Slack**：Incoming Webhook
+- **Server酱**：`sctapi.ftqq.com` / `sc.ftqq.com`
+- **自定义 Webhook**：任意 HTTP(S) 地址，JSON 模板支持 `{{text}}` `{{name}}` `{{status}}` `{{url}}` `{{time}}`
 
-三个通道相互独立、可同时开启，任一通道失败不影响其它通道。
+八个通道相互独立、可同时开启，任一通道失败不影响其它通道；通知页「通道健康」面板逐通道显示最近成功 / 失败状态。服务商编辑弹窗里的「通知通道路由」可把该服务商的告警限定到指定通道，不勾选则广播全部已启用通道。
 
 ### 4. 仪表盘
 
@@ -122,7 +127,7 @@
 - 统计单独计入鉴权失败；邮件 TLS 与探测 TLS 分开
 - 日报错过发送分钟会在当天补发一次
 
-### 当前增强能力
+同版本还包含：
 
 - Provider 支持自定义模型列表路径、Bearer / 自定义 Header / 无鉴权、自定义请求头。
 - 支持 Chat / Embeddings / Completions 能力矩阵探测，以及包含文本 / JSON 路径响应断言。
@@ -133,6 +138,21 @@
 - 支持正则模型忽略规则；可配置配额查询端点、剩余额度 JSON 路径和低配额告警阈值。
 - 可选 OpenAI 兼容流式性能探测，记录首 Token 延迟与估算吞吐（仅额外探测一个可用模型）。
 - 未读告警不再因窗口获得焦点而自动消失，需点击未读徽标显式确认。
+
+### 10. v1.4.0
+
+- **安全与校验收口**：导入 / 合并还原与手工新增走同一套 Schema 校验，坏正则、非 HTTP(S) 地址、未知通知通道在入口即拦下；备份覆盖还原的 global 一律经过归一化（数值钳位、时间格式校验、未知键丢弃）。
+- **密钥全生命周期**：设置页所有敏感项与 Provider 的 API Key / 自定义请求头 / 专用代理均可从界面清除（留空仍表示不修改）；Provider 代理地址在状态快照中掩码下发。
+- **延迟劣化告警**：服务在线但连接延迟连续 N 轮超过阈值时推送（阈值、轮数可配，受静默 / 维护窗口 / 冷却约束）。
+- **故障升级提醒**：故障持续指定分钟数仍未恢复时重复推送，避免长时间故障只提醒一次。
+- **未读告警逐条确认**：点击未读徽标打开列表，可逐条确认或一键全部确认。
+- **SLA 报表**：统计页与导出报告（HTML / CSV / Excel）新增故障次数、MTTR、最长故障三项指标。
+- **通知通道健康面板**：通知页实时展示 8 个通道最近一次推送成功 / 失败时间与连续失败次数；面板区分「未使用」「配置不完整」「已启用 · 待发送」「正常」「连续失败」五态，健康记录随数据目录持久化（`notify-health.json`），重启后不丢，点「测试」发送同样计入并立即刷新面板。
+- **日报去重标记持久化**：`lastReportDay` 纳入已知键白名单并做 `YYYY-MM-DD` 校验，修改任意设置后不会导致同一天重复发送日报；该键仅由主进程维护，渲染层写入会被 `global:set` 拒绝。
+- **凭据清除联动**：清除某通道的 Webhook / Token / Key 时同步重置该通道健康记录，避免新配置沿用旧的绿灯或红灯。
+- **批量编辑**：勾选多个服务商后可批量修改轮循周期、变动上报开关、分组与代理设置。
+- **API Key 显隐与复制**：编辑弹窗支持眼睛图标切换明文、一键复制。
+- 导出默认不再包含 API Key，勾选包含密钥时需二次确认；备份包含密钥时同样确认。
 
 ---
 
@@ -192,7 +212,7 @@ iOS 风格设计语言：SF 系统字体栈、毛玻璃侧栏、圆角卡片（1
 | 主进程模块 | `src/store.js` | providers.json 读写（原子 JSON 持久化），便携版/安装版数据目录自适应 |
 | 主进程模块 | `src/scheduler.js` | 每 Provider 独立定时器、并发池（默认 4）、手动检测去重、周期变更热重载 |
 | 主进程模块 | `src/detector.js` | HTTP(S) 探测引擎：模型列表拉取、逐模型可用性探测、失败原因分类 |
-| 主进程模块 | `src/notifier.js` | 三通道通知：企业微信 / OneBot v11 QQ / 钉钉加签 |
+| 主进程模块 | `src/notifier.js` | 8 通道通知（企业微信 / OneBot v11 QQ / 钉钉加签 / Telegram / 飞书 / Slack / Server酱 / 自定义 Webhook）+ 通道健康记录 |
 | 主进程模块 | `src/alerts.js` | 故障消抖、恢复、静默/维护窗口、冷却；状态随配置落盘 |
 | 主进程模块 | `src/history.js` | 按天 JSONL 历史、可用率、鉴权失败计数 |
 | 主进程模块 | `src/mailer.js` | SMTP 日报，证书校验与探测分开 |
@@ -261,13 +281,32 @@ applyResult(provider, result):
 时间：2026/9/11 10:56:03
 ```
 
-### 三通道通知实现（notifier.js）
+### 通知通道实现（notifier.js）
 
 | 通道 | 端点 | 请求体 | 鉴权 |
 |------|------|--------|------|
 | 企业微信 | 群机器人 Webhook | `{ msgtype:"text", text:{ content } }` | key in URL |
 | QQ (OneBot v11) | `{base}/send_private_msg` 或 `/send_group_msg` | `{ user_id \| group_id, message }` | `Authorization: Bearer <token>`；校验响应 `retcode===0` |
 | 钉钉 | 自定义机器人 Webhook | `{ msgtype:"text", text:{ content } }` | 加签：`timestamp + "\n" + secret` 的 HMAC-SHA256 Base64 附到 URL；校验响应 `errcode===0` |
+| Telegram | `{apiBase}/bot{token}/sendMessage` | `{ chat_id, text }` | token in URL |
+| 飞书 | 自定义机器人 Webhook | `{ msg_type:"text", content:{ text } }` | 可选加签 `timestamp + "\n" + secret`；校验响应 `code===0` |
+| Slack | Incoming Webhook | `{ text }` | URL 自带凭据；非 2xx 视为失败 |
+| Server酱 | `sctapi.ftqq.com/{key}.send`（`SCT` 开头）或 `sc.ftqq.com/{key}.send` | 表单 `title` + `desp` | key in URL |
+| 自定义 | 用户填写的任意 HTTP(S) URL | `{ text }`，模板与请求头可覆盖 | 由自定义请求头决定 |
+
+`channelEnabled(globalCfg, ch)` 判定「开关打开 **且** 凭据/目标齐全」，只有为真的通道才参与广播；单个通道抛错不影响其它通道，错误计入该通道健康记录。
+
+**通道健康（`notify-health.json`）**：每次真实发送（含「测试」按钮）调用 `noteResult(channel, ok, err)`，记录 `{ fails, lastOkAt, lastFailAt, lastError }`。渲染层拿到的是 `selfmon.notifyHealth` 深拷贝，按「开关 + 配置完整性 + 记录」渲染五态：
+
+| 状态 | 条件 | 展示 |
+| --- | --- | --- |
+| 未使用 | 通道开关关闭 | 灰点 + `未使用` |
+| 配置不完整 | 开关打开但缺 Webhook / Token / 目标 | 灰点 + `配置不完整` |
+| 已启用 · 待发送 | 开关打开且配置完整，但还没有发送记录 | 灰点 + `已启用 · 待发送` |
+| 正常 | 配置完整且 `lastOkAt` 存在、`fails === 0` | 绿点 + `正常 · 最后成功 {t}` |
+| 连续失败 | 配置完整且 `fails > 0` | 红点 + `连续失败 {n} 次 · {t}`，悬停显示 `lastError` |
+
+凭据被清除时（`global:clearSecrets`）对应通道的健康记录同步重置，避免新凭据沿用旧结论。
 
 ### 调度器设计（scheduler.js）
 
@@ -337,8 +376,11 @@ npm start
 
 # 运行测试
 npm test                # 模块冒烟测试（35 用例，mock HTTP 服务器，纯 Node）
+npm run test:unit       # 单元测试（定时器、基线、健康落盘、日报去重等）
 npm run app-test        # Electron 应用级自检（主进程 + 模块加载 + 资源存在性）
 npm run renderer-test   # 渲染层自检（真实 BrowserWindow，校验 CSP 与共享模块加载）
+npm run ui-check        # 界面行为自检（健康面板五态等 DOM 断言）
+npm run i18n-check      # i18n 缺键校验（扫描 tx() 与 data-i18n）
 
 # 代码规范
 npm run lint            # ESLint 检查
@@ -465,15 +507,18 @@ AIProviderMonitor/
 │   ├── smoke.js             # 模块冒烟测试（35 用例，mock 服务器）
 │   ├── unit-logic.js        # 定时器、基线、重定向、告警补发等单测
 │   ├── app-smoke.js         # Electron 应用级自检（--smoke-test）
-│   └── renderer-check.js    # 渲染层自检（真实窗口加载 + CSP 校验）
+│   ├── renderer-check.js    # 渲染层自检（真实窗口加载 + CSP 校验）
+│   ├── ui-check.js          # 界面行为自检（健康面板五态等 DOM 断言）
+│   └── i18n-check.js        # i18n 缺键校验（扫描 tx() 与 data-i18n）
 ├── .eslintrc.json           # ESLint 规则
 ├── .prettierrc.json         # Prettier 格式化配置
 ├── build/
 │   ├── icon.ico             # 多尺寸应用图标
 │   └── icon.png             # 256×256 PNG
 └── dist/                    # 打包产物
-    ├── AIProviderMonitor-1.3.0.exe          # NSIS 安装包
-    └── AIProviderMonitor-Portable-1.3.0.exe # 便携版
+    ├── AIProviderMonitor-1.4.0.exe          # NSIS 安装包
+    ├── AIProviderMonitor-Portable-1.4.0.exe # 便携版
+    └── SHA256SUMS-1.4.0.txt                 # 校验和
 ```
 
 ## 数据文件格式
@@ -518,6 +563,16 @@ AIProviderMonitor/
 }
 ```
 
+数据目录内的其他文件：
+
+| 文件 | 内容 |
+| --- | --- |
+| `providers.json` | 主配置（global + providers） |
+| `notify-health.json` | 通知通道健康记录（最近成功 / 失败时间、连续失败次数、最后错误） |
+| `history/hist-YYYYMMDD.jsonl` | 按天追加的检测采样 |
+| `history/mhist-YYYYMMDD.jsonl` | 按天追加的单模型探测结果 |
+| `logs/aipm-YYYYMMDD.log` | 运行日志（超限切分为 `.1` / `.2`） |
+
 ---
 
 ## 常见问题
@@ -533,6 +588,9 @@ AIProviderMonitor/
 
 **Q: QQ 测试消息失败 retcode=xxx？**
 确认 OneBot 实现的 HTTP 服务已开启且端口正确；`access_token` 两端一致；上报目标 QQ 号/群号正确且机器人有权限发送。
+
+**Q: 通道已经启用了，为什么健康面板还显示「未使用」？**
+1.4.0 起面板按「开关 + 配置完整性」判定：开关打开但没填 Webhook / Token / 目标会显示「配置不完整」，配置完整但还没发过消息显示「已启用 · 待发送」。点该通道的「测试」按钮即可看到结果，成功后立刻变绿。1.3.x 及更早版本只认发送记录且不落盘，重启后会退回「未使用」，升级到 1.4.0 即可。
 
 **Q: 关闭窗口后程序还在运行？**
 默认行为——关闭隐藏到托盘，后台轮循继续。可在 设置 → 点击关闭按钮时 改为「退出程序」；随时可通过托盘菜单或 `Ctrl+Q` 退出。

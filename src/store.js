@@ -48,6 +48,12 @@ const DEFAULT_GLOBAL = {
   alertQuietStart: '23:00',
   alertQuietEnd: '07:00',
   alertOnModelChange: true,
+  // 故障升级提醒：故障持续 N 分钟仍未恢复时重复推送，0 = 关闭
+  alertEscalateMin: 0,
+  // 延迟劣化告警：连接延迟连续 N 轮超过阈值时推送
+  latencyAlertEnabled: false,
+  latencyAlertMs: 5000,
+  latencyAlertConsecutive: 3,
   // --- 检测参数 ---
   probeLimit: 20,
   requestTimeoutMs: 20000,
@@ -95,6 +101,9 @@ const DEFAULT_GLOBAL = {
   mailTo: '',
   dailyReportEnabled: false,
   dailyReportTime: '08:00',
+  // 日报「今日已发」标记：必须在已知键白名单里，否则 normalizeGlobal 会把它剥离，
+  // 导致同一天保存任意设置后日报重复发送（main.js maybeDailyMail 依赖该键）
+  lastReportDay: '',
   // 邮件证书校验与探测分开，避免一个开关关掉两边的 TLS 校验
   smtpInsecureSkipVerify: false,
   // --- 自监控 ---
@@ -104,9 +113,68 @@ const DEFAULT_GLOBAL = {
   modelHistoryEnabled: true
 };
 
+// 全局配置归一化：数值钳位、时间格式校验、布尔宽容解析。
+// 主进程唯一入口——load / global:set / 备份还原 都经过这里，手改配置文件或
+// 还原外部备份时不可能再把越界值或乱格式时间写进 providers.json。
+const NUM_RANGES = {
+  concurrency: [1, 16, 4],
+  probeLimit: [1, 1000, 20],
+  requestTimeoutMs: [1000, 600000, 20000],
+  probeTimeoutMs: [1000, 600000, 15000],
+  retries: [0, 5, 1],
+  probeConcurrency: [1, 16, 8],
+  probeJitterMs: [0, 60000, 120],
+  circuitFailThreshold: [2, 1000, 5],
+  circuitOpenSec: [30, 86400, 300],
+  alertFailThreshold: [1, 100, 2],
+  alertCooldownMin: [0, 10080, 10],
+  alertEscalateMin: [0, 10080, 0],
+  latencyAlertMs: [100, 3600000, 5000],
+  latencyAlertConsecutive: [1, 100, 3],
+  smtpPort: [1, 65535, 465],
+  historyKeepDays: [1, 365, 30],
+  logKeepDays: [1, 365, 7],
+  logMaxFileMB: [1, 500, 10],
+  selfmonSlowMs: [0, 3600000, 60000],
+  selfmonQueueWarn: [0, 100000, 20]
+};
+const TIME_FIELDS = { alertQuietStart: '23:00', alertQuietEnd: '07:00', dailyReportTime: '08:00' };
+const HM_RE = /^(?:[01]?\d|2[0-3]):[0-5]\d$/;
+const BOOL_FIELDS = [
+  'notifyWeixinEnabled', 'notifyQQEnabled', 'notifyDingtalkEnabled', 'notifyTelegramEnabled',
+  'notifyFeishuEnabled', 'notifySlackEnabled', 'notifyServerChanEnabled', 'notifyCustomEnabled',
+  'alertRecoverNotify', 'alertOnModelChange', 'alertQuietEnabled', 'proxyEnabled',
+  'historyEnabled', 'modelHistoryEnabled', 'launchAtLogin', 'launchMinimized',
+  'autoStartCheckOnLaunch', 'probeRotate', 'insecureSkipVerify', 'autoUpdateCheck',
+  'trayBalloonEnabled', 'hotkeyEnabled', 'dailyReportEnabled', 'smtpSecure', 'smtpInsecureSkipVerify',
+  'latencyAlertEnabled'
+];
+const ENUM_FIELDS = {
+  theme: ['system', 'light', 'dark'],
+  closeAction: ['tray', 'exit'],
+  qqTargetType: ['private', 'group'],
+  lang: ['zh', 'en'],
+  logLevel: ['debug', 'info', 'warn', 'error']
+};
+
+function toBool(v, dflt) {
+  if (v === undefined || v === null || v === '') return dflt;
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v !== 0;
+  const s = String(v).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(s)) return true;
+  if (['0', 'false', 'no', 'off'].includes(s)) return false;
+  return dflt;
+}
+
 function normalizeGlobal(rawGlobal = {}) {
   const source = rawGlobal && typeof rawGlobal === 'object' ? rawGlobal : {};
-  const g = Object.assign({}, DEFAULT_GLOBAL, source);
+  // 只接受已知键：外部文件（备份/手改）里的未知键一律丢弃，防止垃圾字段永久滞留
+  const picked = {};
+  for (const k of Object.keys(DEFAULT_GLOBAL)) {
+    if (k in source) picked[k] = source[k];
+  }
+  const g = Object.assign({}, DEFAULT_GLOBAL, picked);
 
   // 旧版本的全局默认探测上限是 8。升级到当前配置版本时，
   // 将未迁移配置里的旧默认值自动提升为新的默认值 20。
@@ -114,6 +182,21 @@ function normalizeGlobal(rawGlobal = {}) {
   if (sourceVersion < CURRENT_CONFIG_VERSION && Number(source.probeLimit) === LEGACY_DEFAULT_PROBE_LIMIT) {
     g.probeLimit = DEFAULT_GLOBAL.probeLimit;
   }
+
+  for (const k of BOOL_FIELDS) g[k] = toBool(g[k], DEFAULT_GLOBAL[k]);
+  for (const [k, [min, max, dflt]] of Object.entries(NUM_RANGES)) {
+    const n = Number(g[k]);
+    g[k] = Number.isFinite(n) ? Math.round(Math.min(max, Math.max(min, n))) : dflt;
+  }
+  for (const [k, dflt] of Object.entries(TIME_FIELDS)) {
+    const v = typeof g[k] === 'string' ? g[k].trim() : '';
+    g[k] = HM_RE.test(v) ? v : dflt;
+  }
+  for (const [k, allowed] of Object.entries(ENUM_FIELDS)) {
+    if (!allowed.includes(g[k])) g[k] = DEFAULT_GLOBAL[k];
+  }
+  // 日报标记只接受 YYYY-MM-DD，其余（含外部篡改的乱值）一律清空，宁可多发一次也不永久漏发
+  g.lastReportDay = /^\d{4}-\d{2}-\d{2}$/.test(String(g.lastReportDay || '')) ? String(g.lastReportDay) : '';
   g.configVersion = CURRENT_CONFIG_VERSION;
   return g;
 }
@@ -166,4 +249,4 @@ function saveAll(data) {
   }
 }
 
-module.exports = { DATA_DIR, DATA_FILE, DEFAULT_GLOBAL, loadAll, saveAll, ensureDir };
+module.exports = { DATA_DIR, DATA_FILE, DEFAULT_GLOBAL, loadAll, saveAll, ensureDir, normalizeGlobal };

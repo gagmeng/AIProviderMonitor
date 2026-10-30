@@ -67,7 +67,7 @@ function readLines(file, onLine) {
   try {
     const buf = Buffer.alloc(64 * 1024);
     let leftover = '';
-    while (true) {
+    for (;;) {
       const n = fs.readSync(fd, buf, 0, buf.length, null);
       if (n <= 0) break;
       leftover += buf.toString('utf8', 0, n);
@@ -159,7 +159,6 @@ function readModelRange(dataDir, providerId, fromTs, toTs) {
   for (const f of files) {
     const key = f.slice(6, 14);
     if (key < fromKey || key > toKey) continue;
-    let text;
     readLines(path.join(dir, f), (line) => {
       try {
         const r = JSON.parse(line);
@@ -207,7 +206,6 @@ function readRange(dataDir, fromTs, toTs) {
   for (const f of files) {
     const key = f.slice(5, 13);
     if (key < fromKey || key > toKey) continue;
-    let text;
     readLines(path.join(dir, f), (line) => {
       try {
         const r = JSON.parse(line);
@@ -258,6 +256,25 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
       gaps.push(gap);
       if (list[i - 1].status !== 'up') downMs += gap;
     }
+    // 故障事件（SLA）：连续非 up 记为一次故障，时长 ≈ 恢复时刻 − 首个非 up 时刻。
+    // 窗口开头就在故障中的按首个样本起算，尾端未恢复的按统计终点截止——都是近似值。
+    let incidents = 0, mttrSum = 0, maxOutage = 0, openFrom = 0;
+    for (const r of list) {
+      if (r.status === 'up') {
+        if (openFrom) {
+          const dur = Math.max(0, r.t - openFrom);
+          mttrSum += dur;
+          if (dur > maxOutage) maxOutage = dur;
+          openFrom = 0;
+        }
+      } else if (!openFrom) { openFrom = r.t; incidents++; }
+    }
+    if (openFrom) {
+      const dur = Math.max(0, to - openFrom);
+      mttrSum += dur;
+      if (dur > maxOutage) maxOutage = dur;
+    }
+    const mttrMs = incidents ? Math.round(mttrSum / incidents) : 0;
     // 末尾样本仍处于非 up 时，故障仍在持续：按典型采样间隔把尾段补进统计，
     // 否则「正在发生的故障」会始终显示为 0。用间隔中位数的 2 倍封顶，
     // 避免长期无采样（数据陈旧）把故障时长放大成不真实的数值。
@@ -280,6 +297,9 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
       upCount, degCount, downCount,
       authCount,
       downMs,
+      incidents,
+      mttrMs,
+      maxOutageMs: maxOutage,
       latencyAvg: lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : null,
       latencyP50: percentile(lats, 50),
       latencyP95: percentile(lats, 95),
@@ -293,6 +313,7 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
   const totalSamples = recs.length;
   const totalUp = recs.filter((r) => r.status === 'up').length;
   const totalAuth = recs.filter((r) => r.status === 'authfail').length;
+  const totalIncidents = perProvider.reduce((a, p) => a + (p.incidents || 0), 0);
   const allLats = recs.map((r) => r.latency).filter((v) => typeof v === 'number' && v >= 0).sort((a, b) => a - b);
 
   return {
@@ -303,6 +324,7 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
       providers: perProvider.length,
       uptime: totalSamples ? Number(((totalUp / totalSamples) * 100).toFixed(2)) : 0,
       authCount: totalAuth,
+      incidents: totalIncidents,
       latencyAvg: allLats.length ? Math.round(allLats.reduce((a, b) => a + b, 0) / allLats.length) : null,
       latencyP95: percentile(allLats, 95)
     },

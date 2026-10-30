@@ -1,12 +1,12 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu, Tray, shell, dialog, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, shell, dialog, globalShortcut, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const pkg = require('./package.json');
-const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL } = require('./src/store');
+const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL, normalizeGlobal } = require('./src/store');
 const logger = require('./src/logger');
 const { Scheduler } = require('./src/scheduler');
-const { notifyModelChange, notifyAlert, sendTest, getNotifyHealth } = require('./src/notifier');
+const { notifyModelChange, notifyAlert, sendTest, getNotifyHealth, resetHealth } = require('./src/notifier');
 const backup = require('./src/backup');
 const transfer = require('./src/transfer');
 const { formatDuration } = require('./src/durfmt');
@@ -21,7 +21,8 @@ let win = null;
 let tray = null;
 let quitting = false;
 let appUpdater = null;
-const unreadAlerts = [];   // 未读告警（内存态，上限 50；打开主界面即清零）
+const unreadAlerts = [];   // 未读告警（内存态，上限 50；由用户在未读弹窗逐条或一键确认）
+let unreadSeq = 0;         // 未读告警自增 ID（供逐条确认）
 let lastBalloonAt = 0;     // 托盘气泡上次弹出时间（5 分钟节流）
 const selfmon = { slowChecks: 0, queueWarns: 0, lastQueueWarnAt: 0 };  // 自监控计数
 
@@ -181,7 +182,7 @@ function fmtMs(ms) {
 
 /** 状态报告：CSV */
 function buildReportCSV(sum) {
-  const head = ['服务商', '样本数', '可用率(%)', '在线次数', '异常次数', '离线次数', '鉴权失败次数', '累计故障时长', '平均延迟(ms)', 'P50(ms)', 'P95(ms)', '最大延迟(ms)', '最后状态'];
+  const head = ['服务商', '样本数', '可用率(%)', '在线次数', '异常次数', '离线次数', '鉴权失败次数', '累计故障时长', '故障次数', 'MTTR', '最长故障', '平均延迟(ms)', 'P50(ms)', 'P95(ms)', '最大延迟(ms)', '最后状态'];
   const esc = (v) => {
     let s = String(v ?? '');
     if (/^[=+\-@]/.test(s)) s = '\t' + s;   // 公式注入防护
@@ -190,7 +191,8 @@ function buildReportCSV(sum) {
   const rows = sum.perProvider.map((p) => [
     p.name, p.samples, p.uptime, p.upCount, p.degCount, p.downCount,
     p.authCount || 0,
-    fmtMs(p.downMs), p.latencyAvg ?? '', p.latencyP50 ?? '', p.latencyP95 ?? '', p.latencyMax ?? '', statusText(p.lastStatus)
+    fmtMs(p.downMs), p.incidents || 0, fmtMs(p.mttrMs), fmtMs(p.maxOutageMs),
+    p.latencyAvg ?? '', p.latencyP50 ?? '', p.latencyP95 ?? '', p.latencyMax ?? '', statusText(p.lastStatus)
   ].map(esc).join(','));
   return [head.join(','), ...rows].join('\r\n');
 }
@@ -207,6 +209,9 @@ function buildReportHTML(sum) {
       <td style="text-align:right">${p.upCount}/${p.degCount}/${p.downCount}</td>
       <td style="text-align:right">${p.authCount || 0}</td>
       <td style="text-align:right">${fmtMs(p.downMs)}</td>
+      <td style="text-align:right">${p.incidents || 0}</td>
+      <td style="text-align:right">${fmtMs(p.mttrMs)}</td>
+      <td style="text-align:right">${fmtMs(p.maxOutageMs)}</td>
       <td style="text-align:right">${p.latencyAvg ?? '—'}</td>
       <td style="text-align:right">${p.latencyP95 ?? '—'}</td>
       <td>${statusText(p.lastStatus)}</td>
@@ -240,11 +245,14 @@ function buildReportHTML(sum) {
       <th style="text-align:right;padding:10px">在线/异常/离线</th>
       <th style="text-align:right;padding:10px">鉴权失败</th>
       <th style="text-align:right;padding:10px">故障时长</th>
+      <th style="text-align:right;padding:10px">故障次数</th>
+      <th style="text-align:right;padding:10px">MTTR</th>
+      <th style="text-align:right;padding:10px">最长故障</th>
       <th style="text-align:right;padding:10px">平均延迟</th>
       <th style="text-align:right;padding:10px">P95</th>
       <th style="text-align:left;padding:10px">最后状态</th>
     </tr></thead>
-    <tbody>${rows || '<tr><td colspan="9" style="padding:24px;text-align:center;color:#8e8e93">暂无数据</td></tr>'}</tbody>
+    <tbody>${rows || '<tr><td colspan="12" style="padding:24px;text-align:center;color:#8e8e93">暂无数据</td></tr>'}</tbody>
   </table>
 </div></body></html>`;
 }
@@ -277,6 +285,9 @@ async function buildReportXLSX(sum) {
     { header: '离线次数', key: 'downCount', width: 10 },
     { header: '鉴权失败', key: 'authCount', width: 10 },
     { header: '累计故障时长', key: 'downFor', width: 16 },
+    { header: '故障次数', key: 'incidents', width: 10 },
+    { header: 'MTTR', key: 'mttr', width: 14 },
+    { header: '最长故障', key: 'maxOutage', width: 14 },
     { header: '平均延迟(ms)', key: 'latencyAvg', width: 14 },
     { header: 'P50(ms)', key: 'latencyP50', width: 10 },
     { header: 'P95(ms)', key: 'latencyP95', width: 10 },
@@ -288,7 +299,9 @@ async function buildReportXLSX(sum) {
       name: p.name, samples: p.samples, uptime: p.uptime,
       upCount: p.upCount, degCount: p.degCount, downCount: p.downCount,
       authCount: p.authCount || 0,
-      downFor: fmtMs(p.downMs), latencyAvg: p.latencyAvg ?? '', latencyP50: p.latencyP50 ?? '',
+      downFor: fmtMs(p.downMs), incidents: p.incidents || 0,
+      mttr: fmtMs(p.mttrMs), maxOutage: fmtMs(p.maxOutageMs),
+      latencyAvg: p.latencyAvg ?? '', latencyP50: p.latencyP50 ?? '',
       latencyP95: p.latencyP95 ?? '', latencyMax: p.latencyMax ?? '', lastStatus: statusText(p.lastStatus)
     });
   }
@@ -305,16 +318,8 @@ function updateTrayStatus() {
     const deg = db.providers.filter((p) => p.status === 'degraded').length;
     const down = db.providers.filter((p) => p.status === 'down').length;
     const auth = db.providers.filter((p) => p.status === 'authfail').length;
-    const bad = deg + down + auth;
-    const mark = (down + auth) > 0 ? '●' : deg > 0 ? '▲' : '✓';
     const unread = unreadAlerts.length;
-    tray.setToolTip(`AI Provider Monitor ${mark}\n在线 ${up} · 异常 ${deg} · 离线 ${down}${auth ? ` · 鉴权失败 ${auth}` : ''}${unread ? `\n未读告警 ${unread} 条（点击托盘查看）` : ''}`);
-    if (process.platform === 'win32') {
-      tray.setTitle && tray.setTitle('');
-    }
-    if (bad > 0 && win && !win.isDestroyed()) {
-      win.setOverlayIcon && win.setOverlayIcon(null, `${bad} 个服务商异常`);
-    }
+    tray.setToolTip(`AI Provider Monitor\n在线 ${up} · 异常 ${deg} · 离线 ${down}${auth ? ` · 鉴权失败 ${auth}` : ''}${unread ? `\n未读告警 ${unread} 条（点击托盘查看）` : ''}`);
   } catch (e) { /* ignore */ }
 }
 
@@ -335,7 +340,7 @@ scheduler.getGlobal = () => db.global;
 function pushUnread(provider, alertsArr) {
   const now = Date.now();
   for (const a of alertsArr) {
-    unreadAlerts.push({ t: now, providerId: provider.id, name: provider.name, kind: a.kind, title: a.title });
+    unreadAlerts.push({ id: ++unreadSeq, t: now, providerId: provider.id, name: provider.name, kind: a.kind, title: a.title });
   }
   while (unreadAlerts.length > 50) unreadAlerts.shift();
   const first = alertsArr[0];
@@ -442,8 +447,14 @@ function startAutoChecks() {
 
 // ---------- IPC ----------
 function publicProvider(p) {
-  const { apiKey, customHeaders, ...rest } = p;
-  return { ...rest, hasApiKey: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : '', hasCustomHeaders: Boolean(customHeaders) };
+  const { apiKey, customHeaders, proxyUrl, ...rest } = p;
+  return {
+    ...rest,
+    hasApiKey: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : '',
+    hasCustomHeaders: Boolean(customHeaders),
+    // 代理地址常含 user:pass@ 凭据，与其它密钥同样掩码下发
+    hasProxyUrl: Boolean(proxyUrl), proxyUrlMasked: proxyUrl ? maskKey(proxyUrl) : ''
+  };
 }
 const SECRET_GLOBAL_KEYS = [
   'weixinWebhook', 'qqWebhook', 'qqToken', 'dingtalkWebhook', 'dingtalkSecret',
@@ -472,7 +483,7 @@ function publicState() {
     dataDir: DATA_DIR,
     logDir: logger.LOG_DIR,
     unread: { count: unreadAlerts.length, items: unreadAlerts.slice(-5).reverse() },
-    selfmon: { slowChecks: selfmon.slowChecks, queueWarns: selfmon.queueWarns, notifyFails: getNotifyHealth(), circuits: scheduler.circuitInfo() }
+    selfmon: { slowChecks: selfmon.slowChecks, queueWarns: selfmon.queueWarns, notifyHealth: getNotifyHealth(), circuits: scheduler.circuitInfo() }
   };
 }
 function send(channel, payload) {
@@ -627,6 +638,21 @@ ipcMain.handle('provider:deleteMany', (e, ids) => {
   return { ok: true, removed: removed.length };
 });
 
+/** 按需取回明文 Key（编辑弹窗眼睛图标用）：状态快照始终掩码，仅显式请求时返回 */
+ipcMain.handle('provider:revealKey', (e, id) => {
+  const p = db.providers.find((x) => x.id === Number(id));
+  if (!p) return { ok: false, error: 'Provider 不存在' };
+  return { ok: true, apiKey: String(p.apiKey || '') };
+});
+
+/** 复制 Key 到剪贴板：在主进程完成，明文不进渲染层 */
+ipcMain.handle('provider:copyKey', (e, id) => {
+  const p = db.providers.find((x) => x.id === Number(id));
+  if (!p || !p.apiKey) return { ok: false, error: '未保存 API Key' };
+  clipboard.writeText(String(p.apiKey));
+  return { ok: true };
+});
+
 ipcMain.handle('provider:checkNow', (e, ids) => {
   const list = (ids || []).map(Number);
   for (const id of list) scheduler.runCheck(id, { reason: 'manual' });
@@ -677,13 +703,17 @@ ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
 
 ipcMain.handle('global:set', (e, patch) => {
   const before = db.global;
-  const allowed = new Set(Object.keys(db.global || {}));
+  // configVersion 与 lastReportDay 只由主进程维护：前者是迁移标记，后者是日报去重状态，
+  // 允许渲染层写入会让日报被误跳过或迁移逻辑失效
+  const READONLY_GLOBAL = new Set(['configVersion', 'lastReportDay']);
+  const allowed = new Set(Object.keys(db.global || {}).filter((k) => !READONLY_GLOBAL.has(k)));
   const safePatch = {};
   for (const [key, value] of Object.entries((patch && typeof patch === 'object') ? patch : {})) {
     if (allowed.has(key)) safePatch[key] = value;
     else logger.warn(`[配置] 忽略未授权全局字段: ${key}`);
   }
-  db.global = { ...db.global, ...safePatch };
+  // 归一化兜底：钳位数值、校验时间与枚举格式（前端约束之外的最后一道防线）
+  db.global = normalizeGlobal({ ...db.global, ...safePatch });
   const saved = persist();
   if (!saved.ok) { db.global = before; return saved; }
   scheduler.setConcurrency(db.global.concurrency || 4);
@@ -695,13 +725,39 @@ ipcMain.handle('global:set', (e, patch) => {
   return { ok: true };
 });
 
+/** 清除已保存的全局敏感配置（只允许 SECRET_GLOBAL_KEYS 内的键） */
+ipcMain.handle('global:clearSecrets', (e, keys) => {
+  const list = (Array.isArray(keys) ? keys : []).map(String).filter((k) => SECRET_GLOBAL_KEYS.includes(k));
+  if (!list.length) return { ok: false, error: '未指定要清除的密钥' };
+  const before = db.global;
+  db.global = { ...db.global };
+  for (const k of list) db.global[k] = '';
+  const saved = persist();
+  if (!saved.ok) { db.global = before; return saved; }
+  // 通道凭据被清空后，旧的成功/失败记录不再代表当前配置，一并清掉健康状态
+  const AFFECTED = {
+    weixinWebhook: ['weixin'], qqWebhook: ['qq'], dingtalkWebhook: ['dingtalk'],
+    telegramToken: ['telegram'], feishuWebhook: ['feishu'], slackWebhook: ['slack'],
+    serverchanKey: ['serverchan'], customWebhook: ['custom']
+  };
+  const stale = new Set();
+  for (const k of list) for (const ch of AFFECTED[k] || []) stale.add(ch);
+  if (stale.size) resetHealth([...stale]);
+  logger.info(`[配置] 已清除 ${list.length} 项敏感配置（${list.join(', ')}）`);
+  send('state-changed', publicState());
+  return { ok: true };
+});
+
 ipcMain.handle('notify:test', async (e, channel) => {
   try {
     await sendTest(db.global, channel);
     logger.info(`[通知] 测试消息发送成功 (${channel})`);
+    // 测试结果已计入通道健康，立即推状态让面板刷新（否则要等下一次轮询才变绿）
+    send('state-changed', publicState());
     return { ok: true };
   } catch (err) {
     logger.error(`[通知] 测试失败 (${channel}): ${err.message}`);
+    send('state-changed', publicState());
     return { ok: false, error: err.message };
   }
 });
@@ -747,6 +803,55 @@ ipcMain.handle('history:modelRates', (e, { providerId, hours } = {}) => {
 });
 
 ipcMain.handle('app:clearUnread', () => { clearUnread(); return { ok: true }; });
+
+/** 逐条确认未读告警 */
+ipcMain.handle('app:ackUnread', (e, id) => {
+  const i = unreadAlerts.findIndex((a) => a.id === Number(id));
+  if (i < 0) return { ok: false, error: '告警不存在或已确认' };
+  const [a] = unreadAlerts.splice(i, 1);
+  logger.info(`[告警] 已确认 1 条未读告警（${a.name}：${a.title}）`);
+  updateTrayStatus();
+  send('state-changed', publicState());
+  return { ok: true };
+});
+
+/** 批量编辑选中的服务商：仅应用提交的字段，整体一次落盘 */
+ipcMain.handle('provider:bulkUpdate', (e, { ids, patch } = {}) => {
+  const set = new Set((ids || []).map(Number));
+  const targets = db.providers.filter((p) => set.has(p.id));
+  if (!targets.length) return { ok: false, error: '未选中任何服务商' };
+  const tri = (v) => (v === true || v === false ? v : undefined);
+  const clean = {};
+  if (patch && Number(patch.intervalSec) > 0) clean.intervalSec = Math.max(5, Math.round(Number(patch.intervalSec)));
+  if (patch) {
+    const n = tri(patch.notifyOnModelChange);
+    if (n !== undefined) clean.notifyOnModelChange = n;
+    const u = tri(patch.useProxy);
+    if (u !== undefined) clean.useProxy = u;
+  }
+  if (patch && typeof patch.group === 'string') clean.group = patch.group.trim();
+  if (!Object.keys(clean).length) return { ok: false, error: '没有要修改的字段' };
+  const before = new Map(targets.map((p) => [p, { intervalSec: p.intervalSec, notifyOnModelChange: p.notifyOnModelChange, group: p.group, useProxy: p.useProxy }]));
+  let invalid = null;
+  for (const p of targets) {
+    Object.assign(p, clean);
+    try { validateProviderConfig(p); }
+    catch (err) { invalid = `[${p.name}] ${err.message}`; break; }
+  }
+  if (invalid) {
+    for (const p of targets) Object.assign(p, before.get(p));
+    return { ok: false, error: invalid };
+  }
+  const saved = persist();
+  if (!saved.ok) { for (const p of targets) Object.assign(p, before.get(p)); return saved; }
+  // 周期变了才重排定时器，其余字段改动不打扰既有节奏
+  if (clean.intervalSec !== undefined) {
+    for (const p of targets) { if (p.enabled !== false) scheduler.schedule(p); }
+  }
+  logger.info(`批量更新 ${targets.length} 个 Provider（${Object.keys(clean).join(', ')}）`);
+  send('state-changed', publicState());
+  return { ok: true, updated: targets.length };
+});
 
 ipcMain.handle('mail:test', async () => {
   try {
@@ -873,7 +978,6 @@ ipcMain.handle('backup:runAuto', () => {
 ipcMain.handle('transfer:export', (e, { format, delimiter, withKey, filePath }) => {
   try {
     const content = transfer.exportProviders(db.providers, { format, delimiter, withKey });
-    const ext = format === 'csv' ? 'csv' : format === 'text' ? 'txt' : 'json';
     if (!filePath) {
       // 无路径：纯预览，只返回内容不落盘（避免在数据目录堆积 providers-*.json 快照）
       return { ok: true, path: null, content };

@@ -2,7 +2,8 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
-const { normalizeProvider, mergeProvider, normalizeUrlKey, ensureUniqueProviderIds } = require('./providerSchema');
+const { normalizeProvider, mergeProvider, normalizeUrlKey, ensureUniqueProviderIds, validateProviderConfig } = require('./providerSchema');
+const { normalizeGlobal } = require('./store');
 
 /**
  * 备份/还原模块
@@ -50,27 +51,45 @@ function parseBackupFile(filePath) {
   return { global: raw.global || null, providers: raw.providers };
 }
 
+/** 过滤掉校验不通过的条目（normalizeProvider 归一后仍非法的说明源数据有问题），返回 { valid, invalid } */
+function partitionValid(list) {
+  const valid = [];
+  let invalid = 0;
+  for (const raw of Array.isArray(list) ? list : []) {
+    const p = normalizeProvider(raw);
+    try {
+      validateProviderConfig(p);
+      valid.push(p);
+    } catch (e) {
+      invalid++;
+      logger.warn(`[还原] 条目校验失败，已丢弃「${p.name || '未命名'}」: ${e.message}`);
+    }
+  }
+  return { valid, invalid };
+}
+
 /**
  * 从备份文件还原。
- * mode = 'overwrite'：global 与 providers 全部替换为备份内容
+ * mode = 'overwrite'：global 与 providers 全部替换为备份内容（global 过归一化，非法条目丢弃）
  * mode = 'merge'：providers 按 id 合并（url 相同视为同一服务商去重），global 不动
- * 返回 { providers, added, updated, skipped }
+ * 返回 { providers, added, updated, skipped, invalid }
  */
 function restoreFrom(data, filePath, mode = 'overwrite') {
   const backup = parseBackupFile(filePath);
 
   if (mode === 'overwrite') {
-    if (backup.global) Object.assign(data.global, backup.global);
-    data.providers = ensureUniqueProviderIds(backup.providers.map(normalizeProvider));
-    logger.info(`[还原] 覆盖还原完成：${data.providers.length} 个服务商`);
-    return { mode, providers: data.providers.length, added: data.providers.length, updated: 0, skipped: 0 };
+    if (backup.global) data.global = normalizeGlobal(backup.global);
+    const { valid, invalid } = partitionValid(backup.providers);
+    data.providers = ensureUniqueProviderIds(valid);
+    logger.info(`[还原] 覆盖还原完成：${data.providers.length} 个服务商${invalid ? `，丢弃 ${invalid} 个非法条目` : ''}`);
+    return { mode, providers: data.providers.length, added: data.providers.length, updated: 0, skipped: 0, invalid };
   }
 
   // merge
   let added = 0, updated = 0, skipped = 0;
+  const { valid, invalid } = partitionValid(backup.providers);
   const urlIndex = new Map(data.providers.map((p) => [normalizeUrlKey(p.url), p]));
-  for (const raw of backup.providers) {
-    const p = normalizeProvider(raw);
+  for (const p of valid) {
     if (!p.name && !p.url) { skipped++; continue; }
     const key = normalizeUrlKey(p.url) || `id:${p.id}`;
     const exist = urlIndex.get(key);
@@ -84,8 +103,8 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
       added++;
     }
   }
-  logger.info(`[还原] 合并还原完成：新增 ${added}，更新 ${updated}，跳过 ${skipped}`);
-  return { mode, providers: data.providers.length, added, updated, skipped };
+  logger.info(`[还原] 合并还原完成：新增 ${added}，更新 ${updated}，跳过 ${skipped}${invalid ? `，丢弃 ${invalid} 个非法条目` : ''}`);
+  return { mode, providers: data.providers.length, added, updated, skipped, invalid };
 }
 
 // 条目归一/合并已收敛到 providerSchema（与导入导出共用同一实现）

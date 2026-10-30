@@ -110,6 +110,8 @@ function render() {
   if (view === 'dashboard') renderDashboard();
   if (view === 'providers') renderProviders();
   if (view === 'stats') renderStats();
+  // 只刷新健康面板，不整页 renderNotify——后者会清空正在输入的密钥输入框
+  if (view === 'notify' || view === 'settings') renderNotifyHealth();
   $('#footRunning').textContent = state.running.length;
   applyLang();
 }
@@ -148,13 +150,13 @@ function renderDashboard() {
   $('#statDown').textContent = down;
   $('#statAuthfail').textContent = auth;
   $('#statModels').textContent = models;
-  // 未读告警徽标
+  // 未读告警徽标（点击打开未读列表，可逐条或全部确认）
   const unreadN = (state.unread && state.unread.count) || 0;
   const chip = $('#unreadChip');
   if (chip) {
     chip.style.display = unreadN > 0 ? '' : 'none';
     chip.textContent = unreadN > 0 ? `${tx('未读')} ${unreadN}` : '';
-    chip.title = tx('点击确认全部告警');
+    chip.title = tx('点击查看未读告警');
   }
 
   const recent = [...state.providers].filter((p) => p.checkedAt).sort((a, b) => b.checkedAt - a.checkedAt).slice(0, 8);
@@ -187,13 +189,54 @@ $('#recentList').addEventListener('dblclick', (e) => {
   if (item) openDetail(Number(item.dataset.act));
 });
 
-// 未读徽标：用户显式确认全部告警
-$('#unreadChip').addEventListener('click', async () => {
-  try { await window.aipm.clearUnread(); } catch (e) { /* 后端不可用时仅隐藏 */ }
-  if (state.unread) state.unread.count = 0;
-  $('#unreadChip').style.display = 'none';
+// 未读徽标：打开未读列表弹窗（逐条确认 / 全部确认）
+$('#unreadChip').addEventListener('click', () => openUnreadModal());
+
+function openUnreadModal() {
+  renderUnreadList();
+  $('#unreadModal').classList.add('show');
+}
+function renderUnreadList() {
+  const items = (state.unread && state.unread.items) || [];
+  const wrap = $('#umList');
+  if (!items.length) {
+    wrap.innerHTML = `<div class="um-empty">${tx('暂无未读告警')}</div>`;
+    return;
+  }
+  wrap.innerHTML = items.map((a) => `
+    <div class="um-item">
+      <span class="um-dot"></span>
+      <div class="um-main">
+        <div class="um-name">${escapeHtml(a.name)}</div>
+        <div class="um-title">${escapeHtml(a.title)}</div>
+      </div>
+      <span class="um-time">${fmtDate(a.t)}</span>
+      <button class="btn small ghost" data-umack="${a.id}">${tx('确认')}</button>
+    </div>`).join('');
+}
+$('#umList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-umack]');
+  if (!btn) return;
+  try { await window.aipm.ackUnread(Number(btn.dataset.umack)); } catch (err) { /* 主进程不可用时忽略 */ }
+  if (state.unread) {
+    state.unread.items = state.unread.items.filter((a) => a.id !== Number(btn.dataset.umack));
+    state.unread.count = Math.max(0, (state.unread.count || 1) - 1);
+  }
+  renderUnreadList();
+  renderDashboard();
   toast(tx('告警已确认'));
 });
+$('#umAckAll').addEventListener('click', async () => {
+  try { await window.aipm.clearUnread(); } catch (e) { /* 后端不可用时仅隐藏 */ }
+  if (state.unread) state.unread.count = 0;
+  $('#unreadModal').classList.remove('show');
+  $('#unreadChip').style.display = 'none';
+  renderDashboard();
+  toast(tx('告警已确认'));
+});
+$('#umClose').innerHTML = icon('close');
+$('#umClose').addEventListener('click', () => $('#unreadModal').classList.remove('show'));
+$('#unreadModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
 
 function filteredProviders() {
   const q = ($('#searchInput').value || '').trim().toLowerCase();
@@ -277,6 +320,7 @@ function renderProviders() {
   selBox.indeterminate = selCount > 0 && !allChecked;
   $('#selAllText').textContent = allChecked && list.length ? tx('取消全选') : tx('全选');
   $('#btnCheckSel').disabled = selected.size === 0;
+  $('#btnEditSel').disabled = selected.size === 0;
   $('#btnDelSel').disabled = selected.size === 0;
   $('#btnDelSel').textContent = selected.size > 0 ? `${tx('删除')} (${selected.size})` : tx('删除');
 }
@@ -329,6 +373,41 @@ $('#selAll').addEventListener('change', () => {
   renderProviders();
 });
 $('#btnCheckSel').addEventListener('click', () => { window.aipm.checkNow([...selected]); toast(tx('已对 {n} 个服务商触发检测', { n: selected.size })); });
+
+// ---------- 批量编辑 ----------
+$('#bmClose').innerHTML = icon('close');
+$('#btnEditSel').addEventListener('click', () => {
+  if (!selected.size) return;
+  $('#bError').textContent = '';
+  $('#bmCount').textContent = tx('{n} 个服务商', { n: selected.size });
+  $('#bInterval').value = '';
+  $('#bNotify').value = '';
+  $('#bGroup').value = '';
+  $('#bProxy').value = '';
+  $('#bulkModal').classList.add('show');
+});
+$('#bmClose').addEventListener('click', () => $('#bulkModal').classList.remove('show'));
+$('#bmCancel').addEventListener('click', () => $('#bulkModal').classList.remove('show'));
+$('#bulkModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
+$('#bmSave').addEventListener('click', async () => {
+  const patch = {};
+  const interval = Number($('#bInterval').value);
+  if ($('#bInterval').value !== '' && Number.isFinite(interval) && interval > 0) {
+    patch.intervalSec = toSecondsUI(interval, $('#bIntervalUnit').value);
+  } else if ($('#bInterval').value !== '') {
+    $('#bError').textContent = tx('轮循周期无效'); return;
+  }
+  if ($('#bNotify').value === 'on') patch.notifyOnModelChange = true;
+  if ($('#bNotify').value === 'off') patch.notifyOnModelChange = false;
+  if ($('#bGroup').value.trim() !== '') patch.group = $('#bGroup').value.trim();
+  if ($('#bProxy').value === 'on') patch.useProxy = true;
+  if ($('#bProxy').value === 'off') patch.useProxy = false;
+  if (!Object.keys(patch).length) { $('#bError').textContent = tx('请至少填写一项要修改的内容'); return; }
+  const r = await window.aipm.bulkUpdateProviders([...selected], patch);
+  if (!r || !r.ok) { $('#bError').textContent = (r && r.error) || tx('保存失败'); return; }
+  $('#bulkModal').classList.remove('show');
+  toast(tx('批量更新完成：{n} 个服务商', { n: r.updated }));
+});
 $('#btnDelSel').addEventListener('click', () => {
   const n = selected.size;
   confirmDialog(tx('批量删除'), tx('确定删除选中的 {n} 个服务商吗？该操作不可撤销。', { n }), async () => {
@@ -348,17 +427,98 @@ const fromSecondsUI = (sec) => window.durfmt.fromSeconds(sec);
 (function initIntervalUnitSelect() {
   const sel = $('#fIntervalUnit');
   sel.innerHTML = INTERVAL_UNITS.map((u) => `<option value="${u.key}">${u.label}</option>`).join('');
+  const bsel = $('#bIntervalUnit');
+  if (bsel) bsel.innerHTML = INTERVAL_UNITS.map((u) => `<option value="${u.key}">${u.label}</option>`).join('');
 })();
+
+// ----- API Key 眼睛/复制/清除，及自定义请求头、专用代理的「清除已保存」 -----
+const pmClearState = { apiKey: false, customHeaders: false, proxyUrl: false };
+
+function armClear(btn, armed, armedText) {
+  btn.classList.toggle('armed', armed);
+  if (btn.classList.contains('suffix-btn')) btn.classList.toggle('clear', true);
+  if (btn.tagName === 'BUTTON' && !btn.classList.contains('suffix-btn')) {
+    btn.textContent = armed ? (armedText || tx('将清除')) : tx('清除已保存');
+  }
+}
+
+$('#fKeyEye').innerHTML = icon('eye');
+$('#fKeyCopy').innerHTML = icon('copy');
+$('#fKeyClear').innerHTML = icon('trash');
+// 眼睛：明文显示时若输入框为空（编辑已有 Key），按需向主进程取回真实 Key 回填；
+// 收起时清掉「由回显填入」的内容，恢复「留空则不修改」语义；用户手输的内容不受影响。
+$('#fKeyEye').addEventListener('click', async () => {
+  const inp = $('#fKey');
+  if (inp.type === 'password') {
+    if (!inp.value && editingId) {
+      try {
+        const r = await window.aipm.revealKey(editingId);
+        if (r && r.ok && r.apiKey) { inp.value = r.apiKey; inp.dataset.revealed = '1'; }
+      } catch (e) { /* 取回失败则仅切换显隐 */ }
+    }
+    inp.type = 'text';
+    $('#fKeyEye').innerHTML = icon('eyeOff');
+  } else {
+    inp.type = 'password';
+    if (inp.dataset.revealed === '1') { inp.value = ''; delete inp.dataset.revealed; }
+    $('#fKeyEye').innerHTML = icon('eye');
+  }
+});
+// 用户一旦手动编辑，回显内容视为已作主，收起时不再清空
+$('#fKey').addEventListener('input', () => { delete $('#fKey').dataset.revealed; });
+$('#fKeyCopy').addEventListener('click', async () => {
+  const v = $('#fKey').value;
+  if (v) { await navigator.clipboard.writeText(v); toast(tx('已复制')); return; }
+  // 输入框为空但服务商已存 Key（未回显）：直接在主进程复制，明文不进渲染层
+  if (editingId) {
+    try {
+      const r = await window.aipm.copyKey(editingId);
+      if (r && r.ok) { toast(tx('已复制')); return; }
+      toast((r && r.error) || tx('复制失败'), 'err');
+    } catch (e) { toast(tx('复制失败'), 'err'); }
+    return;
+  }
+  toast(tx('请先输入内容再复制'), 'err');
+});
+$('#fKeyClear').addEventListener('click', () => {
+  pmClearState.apiKey = !pmClearState.apiKey;
+  if (pmClearState.apiKey) $('#fKey').value = '';
+  armClear($('#fKeyClear'), pmClearState.apiKey);
+  $('#fKey').placeholder = pmClearState.apiKey ? tx('保存时将清除已保存的密钥') : ($('#fKey').dataset.keepPh || 'sk-...');
+});
+$('#fHeadersClear').addEventListener('click', () => {
+  pmClearState.customHeaders = !pmClearState.customHeaders;
+  if (pmClearState.customHeaders) $('#fCustomHeaders').value = '';
+  armClear($('#fHeadersClear'), pmClearState.customHeaders);
+});
+$('#fProxyClear').addEventListener('click', () => {
+  pmClearState.proxyUrl = !pmClearState.proxyUrl;
+  if (pmClearState.proxyUrl) $('#fProxyUrl').value = '';
+  armClear($('#fProxyClear'), pmClearState.proxyUrl);
+});
 
 function openProviderModal(id = null) {
   editingId = id;
   $('#pmTitle').textContent = id ? tx('编辑服务商') : tx('新增服务商');
   $('#fError').textContent = '';
   const p = id ? state.providers.find((x) => x.id === id) : null;
+  pmClearState.apiKey = false;
+  pmClearState.customHeaders = false;
+  pmClearState.proxyUrl = false;
+  armClear($('#fKeyClear'), false);
+  armClear($('#fHeadersClear'), false);
+  armClear($('#fProxyClear'), false);
+  $('#fKeyClear').style.display = p && p.hasApiKey ? '' : 'none';
+  $('#fHeadersClear').style.display = p && p.hasCustomHeaders ? '' : 'none';
+  $('#fProxyClear').style.display = p && p.hasProxyUrl ? '' : 'none';
   $('#fName').value = p ? p.name : '';
   $('#fUrl').value = p ? p.url : '';
   $('#fKey').value = '';
-  $('#fKey').placeholder = p && p.hasApiKey ? tx('已保存（{mask}），留空则不修改', { mask: p.apiKeyMasked }) : 'sk-...';
+  $('#fKey').type = 'password';
+  delete $('#fKey').dataset.revealed;
+  $('#fKeyEye').innerHTML = icon('eye');
+  $('#fKey').dataset.keepPh = p && p.hasApiKey ? tx('已保存（{mask}），留空则不修改', { mask: p.apiKeyMasked }) : 'sk-...';
+  $('#fKey').placeholder = $('#fKey').dataset.keepPh;
   const iv = fromSecondsUI(p ? p.intervalSec : 300);
   $('#fInterval').value = iv.value;
   $('#fIntervalUnit').value = iv.unit;
@@ -387,10 +547,13 @@ function openProviderModal(id = null) {
   $('#fQuotaValuePath').value = p ? (p.quotaValuePath || 'remaining') : 'remaining';
   $('#fQuotaWarnBelow').value = p && p.quotaWarnBelow != null ? p.quotaWarnBelow : '';
   $('#fMeasureStreaming').checked = p ? Boolean(p.measureStreaming) : false;
-  $('#fNotifyChannels').value = p && Array.isArray(p.notifyChannels) ? p.notifyChannels.join(',') : '';
+  // 通知通道路由：复选框组（空 = 广播全部已启用通道）
+  const routes = new Set((p && p.notifyChannels) || []);
+  $$('#fNotifyChannelsBox input[data-nch]').forEach((c) => { c.checked = routes.has(c.dataset.nch); });
   $('#fMaintWeekdays').value = p && Array.isArray(p.maintWeekdays) ? p.maintWeekdays.join(',') : '';
   $('#fMaintDates').value = p ? (p.maintDates || '') : '';
-  $('#fProxyUrl').value = p ? (p.proxyUrl || '') : '';
+  $('#fProxyUrl').value = '';
+  $('#fProxyUrl').placeholder = p && p.hasProxyUrl ? tx('已保存（{mask}），留空则不修改', { mask: p.proxyUrlMasked }) : tx('留空则使用全局代理设置');
   $('#fUseProxy').checked = p ? p.useProxy !== false : true;
   $('#fMaintEnabled').checked = p ? Boolean(p.maintEnabled) : false;
   $('#fMaintStart').value = (p && p.maintStart) || '02:00';
@@ -442,7 +605,7 @@ $('#pmSave').addEventListener('click', async () => {
     quotaValuePath: $('#fQuotaValuePath').value.trim() || 'remaining',
     quotaWarnBelow: $('#fQuotaWarnBelow').value === '' ? null : Number($('#fQuotaWarnBelow').value),
     measureStreaming: $('#fMeasureStreaming').checked,
-    notifyChannels: $('#fNotifyChannels').value.split(',').map((s) => s.trim()).filter(Boolean),
+    notifyChannels: $$('#fNotifyChannelsBox input[data-nch]').filter((c) => c.checked).map((c) => c.dataset.nch),
     maintWeekdays: $('#fMaintWeekdays').value.split(',').map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6),
     maintDates: $('#fMaintDates').value.trim(),
     probeLimit: Number($('#fProbeLimit').value) > 0 ? Number($('#fProbeLimit').value) : null,
@@ -454,8 +617,13 @@ $('#pmSave').addEventListener('click', async () => {
     insecureSkipVerify: $('#fTlsVerify').value === 'follow' ? null : $('#fTlsVerify').value === 'skip'
   };
   if (editingId) {
-    if (!data.apiKey) delete data.apiKey;
-    if (!data.customHeaders) delete data.customHeaders;
+    // 留空 = 不修改；点过「清除」按钮 = 显式提交空串让主进程清掉
+    if (pmClearState.apiKey) data.apiKey = '';
+    else if (!data.apiKey) delete data.apiKey;
+    if (pmClearState.customHeaders) data.customHeaders = '';
+    else if (!data.customHeaders) delete data.customHeaders;
+    if (pmClearState.proxyUrl) data.proxyUrl = '';
+    else if (!data.proxyUrl) delete data.proxyUrl;
     const r = await window.aipm.updateProvider(editingId, data);
     if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
     toast(tx('已保存'));
@@ -471,7 +639,10 @@ $('#providerModal').addEventListener('click', (e) => { if (e.target === e.curren
 $('#detailModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
 
 // ---------- 详情弹窗 ----------
+let detailSeq = 0;   // 请求序号：快速重开详情时旧响应不得写入新弹窗
+
 function openDetail(id) {
+  const seq = ++detailSeq;
   const p = state.providers.find((x) => x.id === id);
   if (!p) return;
   const si = statusInfo(p.status);
@@ -529,11 +700,12 @@ function openDetail(id) {
       upWrap.style.display = 'none';
     }
   }
-  // v1.2.0：单模型 24h 可用率徽标（异步追加，失败静默）
+  // v1.2.0：单模型 24h 可用率徽标（异步追加，失败静默；序号防串弹窗）
   (async () => {
     try {
       const r = await window.aipm.historyModelRates({ providerId: id, hours: 24 });
       if (!r || !r.ok || !Array.isArray(r.models)) return;
+      if (seq !== detailSeq) return;
       const rateByMid = new Map(r.models.map((m) => [String(m.mid), m.rate]));
       $$('#dmAvail .model-tag').forEach((el) => {
         const rate = rateByMid.get(el.dataset.copy);
@@ -557,12 +729,57 @@ $('#detailModal').addEventListener('click', async (e) => {
 });
 
 // ---------- 通知设置 ----------
+/** 设置页敏感字段：注入「清除已保存」小按钮（一次注入，renderNotify 按 Configured 标志显隐） */
+const SECRET_CLEAR_FIELDS = [
+  ['#wxWebhook', 'weixinWebhook'], ['#qqWebhook', 'qqWebhook'], ['#qqToken', 'qqToken'],
+  ['#dtWebhook', 'dingtalkWebhook'], ['#dtSecret', 'dingtalkSecret'],
+  ['#tgToken', 'telegramToken'], ['#fsWebhook', 'feishuWebhook'], ['#fsSecret', 'feishuSecret'],
+  ['#skWebhook', 'slackWebhook'], ['#scKey', 'serverchanKey'],
+  ['#cwWebhook', 'customWebhook'], ['#cwHeaders', 'customHeaders'],
+  ['#proxyUrl', 'proxyUrl'], ['#smtpPass', 'smtpPass']
+];
+function initSecretClearButtons() {
+  for (const [sel, key] of SECRET_CLEAR_FIELDS) {
+    const el = $(sel);
+    if (!el || (el.parentElement && el.parentElement.classList.contains('input-suffix'))) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'input-suffix';
+    el.replaceWith(wrap);
+    wrap.appendChild(el);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'suffix-btn clear';
+    btn.dataset.clear = key;
+    btn.title = tx('清除已保存');
+    btn.innerHTML = icon('trash');
+    btn.style.display = 'none';
+    wrap.appendChild(btn);
+  }
+}
+// 事件委托：点击清除按钮 → 调 global:clearSecrets，成功后本地同步 Configured 标志
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-clear]');
+  if (!btn) return;
+  const key = btn.dataset.clear;
+  try {
+    const r = await window.aipm.clearSecrets([key]);
+    if (!r || !r.ok) { toast((r && r.error) || tx('保存失败'), 'err'); return; }
+    if (state.global) state.global[`${key}Configured`] = false;
+    const input = btn.parentElement.querySelector('input,textarea');
+    if (input) { input.placeholder = ''; input.dataset.i18nPh = ''; }
+    btn.style.display = 'none';
+    toast(tx('已清除'));
+  } catch (err) { toast(tx('保存失败'), 'err'); }
+});
+
 function renderNotify() {
   const g = state.global || {};
   const secretValue = (sel, key) => {
     const el = $(sel);
     el.value = '';
     el.placeholder = g[`${key}Configured`] ? tx('已配置，留空保持不变') : '';
+    const btn = el.parentElement.querySelector('[data-clear]');
+    if (btn) btn.style.display = g[`${key}Configured`] ? '' : 'none';
   };
   $('#wxEnable').checked = Boolean(g.notifyWeixinEnabled);
   $('#qqEnable').checked = Boolean(g.notifyQQEnabled);
@@ -606,10 +823,14 @@ function renderNotify() {
   $('#alertFailThreshold').value = g.alertFailThreshold || 2;
   $('#alertRecoverNotify').checked = g.alertRecoverNotify !== false;
   $('#alertCooldownMin').value = g.alertCooldownMin == null ? 10 : g.alertCooldownMin;
+  $('#alertEscalateMin').value = g.alertEscalateMin == null ? 0 : g.alertEscalateMin;
   $('#alertOnModelChange').checked = g.alertOnModelChange !== false;
   $('#alertQuietEnabled').checked = Boolean(g.alertQuietEnabled);
   $('#alertQuietStart').value = g.alertQuietStart || '23:00';
   $('#alertQuietEnd').value = g.alertQuietEnd || '07:00';
+  $('#latencyAlertEnabled').checked = Boolean(g.latencyAlertEnabled);
+  $('#latencyAlertMs').value = g.latencyAlertMs == null ? 5000 : g.latencyAlertMs;
+  $('#latencyAlertConsecutive').value = g.latencyAlertConsecutive == null ? 3 : g.latencyAlertConsecutive;
   // 代理
   $('#proxyEnabled').checked = Boolean(g.proxyEnabled);
   secretValue('#proxyUrl', 'proxyUrl');
@@ -640,6 +861,82 @@ function renderNotify() {
   secretValue('#smtpPass', 'smtpPass');
   $('#mailFrom').value = g.mailFrom || '';
   $('#mailTo').value = g.mailTo || '';
+  renderNotifyHealth();
+}
+
+/**
+ * 通道是否「已启用且配置完整」（与主进程 channelEnabled 同规则）。
+ * 健康记录只在真实发送后才有，因此不能只看 health 判断「未使用」——
+ * 否则刚启用、还没发过消息的通道会被误标成未使用。
+ */
+function channelReady(g, ch) {
+  switch (ch) {
+    case 'weixin': return Boolean(g.notifyWeixinEnabled && g.weixinWebhookConfigured);
+    case 'qq': return Boolean(g.notifyQQEnabled && g.qqWebhookConfigured && g.qqTarget);
+    case 'dingtalk': return Boolean(g.notifyDingtalkEnabled && g.dingtalkWebhookConfigured);
+    case 'telegram': return Boolean(g.notifyTelegramEnabled && g.telegramTokenConfigured && g.telegramChatId);
+    case 'feishu': return Boolean(g.notifyFeishuEnabled && g.feishuWebhookConfigured);
+    case 'slack': return Boolean(g.notifySlackEnabled && g.slackWebhookConfigured);
+    case 'serverchan': return Boolean(g.notifyServerChanEnabled && g.serverchanKeyConfigured);
+    case 'custom': return Boolean(g.notifyCustomEnabled && g.customWebhookConfigured);
+    default: return false;
+  }
+}
+
+/** 通道开关是否打开（与 channelReady 配合区分「没启用」和「启用了但没填全」） */
+function channelSwitchedOn(g, ch) {
+  const key = {
+    weixin: 'notifyWeixinEnabled', qq: 'notifyQQEnabled', dingtalk: 'notifyDingtalkEnabled',
+    telegram: 'notifyTelegramEnabled', feishu: 'notifyFeishuEnabled', slack: 'notifySlackEnabled',
+    serverchan: 'notifyServerChanEnabled', custom: 'notifyCustomEnabled'
+  }[ch];
+  return Boolean(key && g[key]);
+}
+
+/** 通知通道健康面板：正常（绿）/ 连续失败（红）/ 已启用待发送 / 配置不完整 / 未使用 */
+function renderNotifyHealth() {
+  const wrap = $('#notifyHealthList');
+  if (!wrap) return;
+  const health = (state.selfmon && state.selfmon.notifyHealth) || {};
+  const g = state.global || {};
+  const LABELS = { weixin: '微信', qq: 'QQ', dingtalk: '钉钉', telegram: 'Telegram', feishu: '飞书', slack: 'Slack', serverchan: 'Server酱', custom: tx('自定义') };
+  let readyCount = 0;
+  let usedCount = 0;
+  wrap.innerHTML = Object.keys(LABELS).map((ch) => {
+    const h = health[ch];
+    const ready = channelReady(g, ch);
+    const on = channelSwitchedOn(g, ch);
+    if (ready) readyCount++;
+    let dot = 'idle';
+    // 未启用/配置不全一律不展示历史成功记录，避免换成新配置后仍显示旧的绿灯；
+    // 开关已开但缺地址/Token 时单独提示「配置不完整」，这比笼统的「未使用」更能指出问题。
+    let meta = tx('未使用');
+    if (ready) {
+      if (h && h.fails > 0) {
+        usedCount++;
+        dot = 'bad';
+        meta = `${tx('连续失败 {n} 次', { n: h.fails })} · ${fmtTime(h.lastFailAt)}`;
+      } else if (h && h.lastOkAt) {
+        usedCount++;
+        dot = 'ok';
+        meta = `${tx('正常')} · ${tx('最后成功 {t}', { t: fmtTime(h.lastOkAt) })}`;
+      } else {
+        meta = tx('已启用 · 待发送');
+      }
+    } else if (on) {
+      meta = tx('配置不完整');
+    }
+    const errTip = ready && h && h.lastError ? ` title="${escapeHtml(h.lastError)}"` : '';
+    return `<div class="health-item"${errTip}>
+      <span class="health-dot ${dot}"></span>
+      <span class="health-name">${escapeHtml(LABELS[ch])}</span>
+      <span class="health-meta">${escapeHtml(meta)}</span>
+    </div>`;
+  }).join('');
+  const hint = $('#nhHint');
+  if (!readyCount) hint.textContent = tx('尚未启用任何通知通道');
+  else if (!usedCount) hint.textContent = tx('发送过通知后这里会显示各通道最近的成功 / 失败状态');
+  else hint.textContent = '';
 }
 let notifySaveTimer = null;
 function saveNotify() {
@@ -691,10 +988,14 @@ function saveNotify() {
       alertFailThreshold: int('#alertFailThreshold', 2, 1, 20),
       alertRecoverNotify: $('#alertRecoverNotify').checked,
       alertCooldownMin: int('#alertCooldownMin', 10, 0, 1440),
+      alertEscalateMin: int('#alertEscalateMin', 0, 0, 1440),
       alertOnModelChange: $('#alertOnModelChange').checked,
       alertQuietEnabled: $('#alertQuietEnabled').checked,
       alertQuietStart: $('#alertQuietStart').value || '23:00',
       alertQuietEnd: $('#alertQuietEnd').value || '07:00',
+      latencyAlertEnabled: $('#latencyAlertEnabled').checked,
+      latencyAlertMs: int('#latencyAlertMs', 5000, 100, 3600000),
+      latencyAlertConsecutive: int('#latencyAlertConsecutive', 3, 1, 100),
       proxyEnabled: $('#proxyEnabled').checked,
       ...secretPatch('proxyUrl', '#proxyUrl'),
       historyEnabled: $('#historyEnabled').checked,
@@ -731,13 +1032,14 @@ function saveNotify() {
 ['wxEnable', 'qqEnable', 'dtEnable', 'autoStart', 'tgEnable', 'fsEnable', 'skEnable', 'scEnable', 'cwEnable',
  'alertRecoverNotify', 'alertOnModelChange', 'alertQuietEnabled', 'proxyEnabled', 'historyEnabled',
  'launchAtLogin', 'launchMinimized', 'probeRotate', 'insecureSkipVerify', 'modelHistoryEnabled',
- 'smtpInsecureSkipVerify',
+ 'smtpInsecureSkipVerify', 'latencyAlertEnabled',
  'hotkeyEnabled', 'trayBalloonEnabled', 'autoUpdateCheck', 'dailyReportEnabled', 'smtpSecure']
   .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('change', saveNotify); });
 ['wxWebhook', 'qqWebhook', 'qqTarget', 'qqToken', 'dtWebhook', 'dtSecret', 'concurrency',
  'tgToken', 'tgChatId', 'tgApiBase', 'fsWebhook', 'fsSecret', 'skWebhook', 'scKey',
  'cwWebhook', 'cwTemplate', 'cwHeaders', 'probeLimit', 'requestTimeoutMs', 'probeTimeoutMs', 'retries',
- 'alertFailThreshold', 'alertCooldownMin', 'alertQuietStart', 'alertQuietEnd', 'proxyUrl',
+ 'alertFailThreshold', 'alertCooldownMin', 'alertEscalateMin', 'alertQuietStart', 'alertQuietEnd', 'proxyUrl',
+ 'latencyAlertMs', 'latencyAlertConsecutive',
  'historyKeepDays', 'logKeepDays', 'logMaxFileMB', 'probeConcurrency', 'probeJitterMs', 'hotkey',
  'dailyReportTime', 'smtpHost', 'smtpPort', 'smtpUser', 'smtpPass', 'mailFrom', 'mailTo']
   .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('input', saveNotify); });
@@ -825,12 +1127,17 @@ function statsHours() {
   return v > 0 ? v : 24;
 }
 
+// 请求序号：快速切换时间范围/视图时，旧响应不得覆盖新数据
+let statsSeq = 0;
+
 async function renderStats() {
+  const seq = ++statsSeq;
   const hours = statsHours();
   const [sum, ser] = await Promise.all([
     window.aipm.historySummary({ hours }),
     window.aipm.historySeries({ hours, buckets: 48 })
   ]);
+  if (seq !== statsSeq) return;
   if (!sum.ok) { $('#stTable').innerHTML = `<div class="empty">${tx('统计读取失败：')}${escapeHtml(sum.error || '')}</div>`; return; }
 
   const o = sum.overall;
@@ -846,13 +1153,15 @@ async function renderStats() {
 
   const rows = sum.perProvider;
   if (!rows.length) {
-    $('#stTable').innerHTML = `<div class="empty">${tx('该时间范围内暂无检测记录')}</div>`;
+    if (seq === statsSeq) $('#stTable').innerHTML = `<div class="empty">${tx('该时间范围内暂无检测记录')}</div>`;
     return;
   }
+  if (seq !== statsSeq) return;
   $('#stTable').innerHTML = `
     <div class="st-row st-head">
       <div>${tx('服务商')}</div><div>${tx('样本')}</div><div>${tx('可用率')}</div>
-      <div>${tx('在线/异常/离线/鉴权')}</div><div>${tx('故障时长')}</div><div>${tx('平均延迟')}</div><div>${tx('P95')}</div><div>${tx('最后状态')}</div>
+      <div>${tx('在线/异常/离线/鉴权')}</div><div>${tx('故障次数')}</div><div>${tx('MTTR')}</div><div>${tx('最长故障')}</div>
+      <div>${tx('平均延迟')}</div><div>${tx('P95')}</div><div>${tx('最后状态')}</div>
     </div>` + rows.map((p) => {
     const cls = p.uptime >= 99 ? 'up' : p.uptime >= 90 ? 'degraded' : 'down';
     const si = statusInfo(p.lastStatus);
@@ -861,7 +1170,9 @@ async function renderStats() {
       <div>${p.samples}</div>
       <div><span class="st-uptime u-${cls}">${p.uptime}%</span></div>
       <div class="st-mini">${p.upCount}/${p.degCount}/${p.downCount}/${p.authCount || 0}</div>
-      <div class="st-mini">${fmtMsShort(p.downMs)}</div>
+      <div class="st-mini">${p.incidents || 0}</div>
+      <div class="st-mini">${p.mttrMs ? fmtMsShort(p.mttrMs) : '—'}</div>
+      <div class="st-mini">${p.maxOutageMs ? fmtMsShort(p.maxOutageMs) : '—'}</div>
       <div>${p.latencyAvg != null ? p.latencyAvg + ' ms' : '—'}</div>
       <div>${p.latencyP95 != null ? p.latencyP95 + ' ms' : '—'}</div>
       <div><span class="status-pill st-${si.cls}">${si.text}</span></div>
@@ -1025,18 +1336,32 @@ $('#bkOpenDir').addEventListener('click', async () => {
 
 $('#bkSaveAs').addEventListener('click', async () => {
   $('#bkHint').textContent = '';
-  const r = await window.aipm.backupSaveAs();
-  $('#bkHint').textContent = r.ok ? tx('已备份') : (r.canceled ? '' : tx('失败: ') + r.error);
-  $('#bkHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
-  if (r.ok) toast(tx('备份完成'));
+  const doSave = async () => {
+    const r = await window.aipm.backupSaveAs();
+    $('#bkHint').textContent = r.ok ? tx('已备份') : (r.canceled ? '' : tx('失败: ') + r.error);
+    $('#bkHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
+    if (r.ok) toast(tx('备份完成'));
+  };
+  if (hasAnySecret()) {
+    confirmDialog(tx('备份包含密钥'), tx('备份文件包含明文密钥（API Key、通知凭据等），请妥善保管。确定继续吗？'), doSave, { danger: false });
+    return;
+  }
+  await doSave();
 });
 
 $('#bkQuick').addEventListener('click', async () => {
   $('#bkHint').textContent = '';
-  const r = await window.aipm.backupExport();
-  $('#bkHint').textContent = r.ok ? tx('已备份到备份目录') : tx('失败: ') + r.error;
-  $('#bkHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
-  if (r.ok) { toast(tx('备份完成')); renderBackup(); }
+  const doSave = async () => {
+    const r = await window.aipm.backupExport();
+    $('#bkHint').textContent = r.ok ? tx('已备份到备份目录') : tx('失败: ') + r.error;
+    $('#bkHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
+    if (r.ok) { toast(tx('备份完成')); renderBackup(); }
+  };
+  if (hasAnySecret()) {
+    confirmDialog(tx('备份包含密钥'), tx('备份文件包含明文密钥（API Key、通知凭据等），请妥善保管。确定继续吗？'), doSave, { danger: false });
+    return;
+  }
+  await doSave();
 });
 
 function bkSelectedMode() {
@@ -1110,13 +1435,21 @@ function bindSeg(segId, onPick) {
 }
 
 // ----- 导出 -----
+/** 当前配置里是否存有任何明文密钥（导出/备份前确认用） */
+function hasAnySecret() {
+  if (state.providers.some((p) => p.hasApiKey || p.hasCustomHeaders || p.hasProxyUrl)) return true;
+  const g = state.global || {};
+  return Object.keys(g).some((k) => k.endsWith('Configured') && g[k]);
+}
+
 $('#btnExport').addEventListener('click', () => {
   if (state.providers.length === 0) { toast(tx('暂无服务商可导出'), 'err'); return; }
   emState = { format: 'json', delimiter: 'tab' };
   $$('#emFormat .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.fmt === 'json'));
   $$('#emDelim .seg-item').forEach((b) => b.classList.toggle('active', b.dataset.d === 'tab'));
   $('#emDelimField').style.display = 'none';
-  $('#emWithKey').checked = true;
+  // 默认不导出密钥：需要时再手动打开并经过一次确认
+  $('#emWithKey').checked = false;
   $('#emError').textContent = '';
   refreshExportPreview();
   $('#exportModal').classList.add('show');
@@ -1144,15 +1477,29 @@ async function refreshExportPreview() {
 }
 
 $('#emCopy').addEventListener('click', async () => {
+  if ($('#emWithKey').checked && state.providers.some((p) => p.hasApiKey)) {
+    confirmDialog(tx('包含 API Key'), tx('复制内容包含明文 API Key，请注意剪贴板与目标位置的保管。确定继续吗？'), async () => {
+      await navigator.clipboard.writeText($('#emPreview').textContent);
+      toast(tx('已复制到剪贴板'));
+    }, { danger: false });
+    return;
+  }
   await navigator.clipboard.writeText($('#emPreview').textContent);
   toast(tx('已复制到剪贴板'));
 });
 
 $('#emSave').addEventListener('click', async () => {
-  const r = await window.aipm.transferExportSaveAs({ format: emState.format, delimiter: emState.delimiter, withKey: $('#emWithKey').checked });
-  if (r.canceled) return;
-  if (r.ok) { toast(tx('已导出到文件')); $('#exportModal').classList.remove('show'); }
-  else $('#emError').textContent = r.error;
+  const doSave = async () => {
+    const r = await window.aipm.transferExportSaveAs({ format: emState.format, delimiter: emState.delimiter, withKey: $('#emWithKey').checked });
+    if (r.canceled) return;
+    if (r.ok) { toast(tx('已导出到文件')); $('#exportModal').classList.remove('show'); }
+    else $('#emError').textContent = r.error;
+  };
+  if ($('#emWithKey').checked && state.providers.some((p) => p.hasApiKey)) {
+    confirmDialog(tx('包含 API Key'), tx('导出文件将包含明文 API Key，请妥善保管。确定继续吗？'), doSave, { danger: false });
+    return;
+  }
+  await doSave();
 });
 
 // ----- 导入 -----
@@ -1259,5 +1606,6 @@ $('#openLogDir').addEventListener('click', () => window.aipm.openPath(state.logD
 window.aipm.onStateChanged((s) => { state = s; render(); });
 window.aipm.getState().then((s) => { state = s; render(); });
 window.aipm.getAppVersion().then((v) => { $('#appVersion').textContent = 'V' + v; }).catch(() => {});
+initSecretClearButtons();
 initStaticIcons();
 render();

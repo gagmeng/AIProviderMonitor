@@ -102,6 +102,7 @@
           </label>
           <span class="toolbar-sep"></span>
           <button class="btn small" id="btnCheckSel" disabled></button>
+          <button class="btn small" id="btnEditSel" disabled>编辑</button>
           <button class="btn small danger" id="btnDelSel" disabled>删除</button>
           <span class="toolbar-sep"></span>
           <button class="btn small ghost" id="btnImport"></button>
@@ -144,6 +145,15 @@
       <section class="view" id="view-notify">
         <header class="view-head"><h1>通知</h1></header>
         <div class="notify-grid">
+          <div class="panel" style="grid-column:1/-1;">
+            <div class="panel-head">
+              <h2><span class="panel-ic" data-icon="activity"></span>通道健康</h2>
+              <span class="hint" id="nhHint"></span>
+            </div>
+            <div class="panel-body">
+              <div class="health-list" id="notifyHealthList"></div>
+            </div>
+          </div>
           <div class="panel">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="wechat"></span>微信（企业微信群机器人）</h2>
@@ -580,6 +590,33 @@
               </div>
               <div class="opt-row">
                 <div>
+                  <div class="opt-title">故障升级提醒（分钟）</div>
+                  <div class="opt-sub">故障持续该分钟数仍未恢复时重复推送；0 表示关闭</div>
+                </div>
+                <input type="number" id="alertEscalateMin" min="0" max="1440" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">延迟劣化告警</div>
+                  <div class="opt-sub">服务在线但连接延迟连续多轮超过阈值时推送，补齐「能用但很难用」的盲区</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="latencyAlertEnabled" /><span class="knob"></span></label>
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">延迟阈值（毫秒）</div>
+                </div>
+                <input type="number" id="latencyAlertMs" min="100" max="3600000" step="100" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
+                  <div class="opt-title">连续超阈值轮数</div>
+                  <div class="opt-sub">连续 N 轮超过阈值才推送，避免单次抖动误报</div>
+                </div>
+                <input type="number" id="latencyAlertConsecutive" min="1" max="100" class="num-input" />
+              </div>
+              <div class="opt-row">
+                <div>
                   <div class="opt-title">模型变动告警</div>
                   <div class="opt-sub">全局开关，与每个服务商的「模型变化上报」取与</div>
                 </div>
@@ -905,7 +942,12 @@
         </div>
         <div class="field">
           <label>API Key</label>
-          <input type="password" id="fKey" placeholder="sk-..." />
+          <div class="input-suffix">
+            <input type="password" id="fKey" placeholder="sk-..." autocomplete="off" />
+            <button type="button" class="suffix-btn" id="fKeyEye" data-i18n-title title="显示 / 隐藏"></button>
+            <button type="button" class="suffix-btn" id="fKeyCopy" data-i18n-title title="复制"></button>
+            <button type="button" class="suffix-btn clear" id="fKeyClear" data-i18n-title title="保存时清除已保存的密钥" style="display:none;"></button>
+          </div>
         </div>
         <div class="field-inline">
           <div class="field">
@@ -961,7 +1003,10 @@
           <div class="field"><label>鉴权 Header</label><input type="text" id="fAuthHeader" placeholder="X-API-Key" /></div>
           <div class="field"><label>密钥前缀</label><input type="text" id="fAuthPrefix" placeholder="可选，如 Token " /></div>
         </div>
-        <div class="field"><label>自定义请求头（JSON）</label><textarea id="fCustomHeaders" rows="2" placeholder='{"X-Tenant":"demo"}'></textarea></div>
+        <div class="field">
+          <label>自定义请求头（JSON）<button type="button" class="clear-saved" id="fHeadersClear" style="display:none;"></button></label>
+          <textarea id="fCustomHeaders" rows="2" placeholder='{"X-Tenant":"demo"}'></textarea>
+        </div>
         <div class="field">
           <label>能力矩阵 <span class="hint">多选会逐项验证，增加请求量</span></label>
           <div class="field-inline">
@@ -984,13 +1029,27 @@
           <div class="field"><label>首 Token / 吞吐探测 <span class="hint">额外发起一次 OpenAI 兼容流式请求</span></label><label class="switch"><input type="checkbox" id="fMeasureStreaming" /><span class="knob"></span></label></div>
         </div>
         <div class="field-inline">
-          <div class="field"><label>通知通道路由</label><input type="text" id="fNotifyChannels" placeholder="留空广播；如 weixin,slack" /></div>
-          <div class="field"><label>维护星期</label><input type="text" id="fMaintWeekdays" placeholder="0-6，逗号分隔；0=周日" /></div>
+          <div class="field">
+            <label>通知通道路由 <span class="hint">不勾选 = 广播到全部已启用通道</span></label>
+            <div class="field-inline wrap" id="fNotifyChannelsBox">
+              <label class="checkbox"><input type="checkbox" data-nch="weixin" /><span class="box"></span> 微信</label>
+              <label class="checkbox"><input type="checkbox" data-nch="qq" /><span class="box"></span> QQ</label>
+              <label class="checkbox"><input type="checkbox" data-nch="dingtalk" /><span class="box"></span> 钉钉</label>
+              <label class="checkbox"><input type="checkbox" data-nch="telegram" /><span class="box"></span> Telegram</label>
+              <label class="checkbox"><input type="checkbox" data-nch="feishu" /><span class="box"></span> 飞书</label>
+              <label class="checkbox"><input type="checkbox" data-nch="slack" /><span class="box"></span> Slack</label>
+              <label class="checkbox"><input type="checkbox" data-nch="serverchan" /><span class="box"></span> Server酱</label>
+              <label class="checkbox"><input type="checkbox" data-nch="custom" /><span class="box"></span> 自定义</label>
+            </div>
+          </div>
         </div>
-        <div class="field"><label>维护日期</label><input type="text" id="fMaintDates" placeholder="YYYY-MM-DD，逗号分隔" /></div>
+        <div class="field-inline">
+          <div class="field"><label>维护星期</label><input type="text" id="fMaintWeekdays" placeholder="0-6，逗号分隔；0=周日" /></div>
+          <div class="field"><label>维护日期</label><input type="text" id="fMaintDates" placeholder="YYYY-MM-DD，逗号分隔" /></div>
+        </div>
         <div class="field-inline">
           <div class="field">
-            <label>专用代理（可选）</label>
+            <label>专用代理（可选）<button type="button" class="clear-saved" id="fProxyClear" style="display:none;"></button></label>
             <input type="text" id="fProxyUrl" placeholder="留空则使用全局代理设置" />
           </div>
           <div class="field">
@@ -1086,7 +1145,7 @@
             <div class="opt-title">包含 API Key</div>
             <div class="opt-sub">导出文件将包含明文密钥，请妥善保管</div>
           </div>
-          <label class="switch"><input type="checkbox" id="emWithKey" checked /><span class="knob"></span></label>
+          <label class="switch"><input type="checkbox" id="emWithKey" /><span class="knob"></span></label>
         </div>
         <div class="field" style="margin-top:6px;">
           <label>预览</label>
@@ -1153,8 +1212,68 @@
     </div>
   </div>
 
-  <!-- 确认弹窗（置于最后，保证显示在其它弹窗之上） -->
-  <div class="modal-mask top" id="confirmModal">
+      <!-- 未读告警弹窗 -->
+      <div class="modal-mask" id="unreadModal">
+        <div class="modal">
+          <div class="modal-head">
+            <h3>未读告警</h3>
+            <button class="icon-btn" id="umClose"></button>
+          </div>
+          <div class="modal-body">
+            <div id="umList" data-i18n-skip></div>
+          </div>
+          <div class="modal-foot center">
+            <button class="btn ghost" id="umAckAll">全部确认</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 批量编辑弹窗 -->
+      <div class="modal-mask" id="bulkModal">
+        <div class="modal slim">
+          <div class="modal-head">
+            <h3>批量编辑 <span class="hint" id="bmCount"></span></h3>
+            <button class="icon-btn" id="bmClose"></button>
+          </div>
+          <div class="modal-body">
+            <div class="field">
+              <label>轮循周期</label>
+              <div class="interval-row">
+                <input type="number" id="bInterval" min="1" placeholder="留空不修改" />
+                <select id="bIntervalUnit" class="select-input unit-select"></select>
+              </div>
+            </div>
+            <div class="field">
+              <label>模型变化时上报</label>
+              <select id="bNotify" class="select-input">
+                <option value="">不修改</option>
+                <option value="on">开启</option>
+                <option value="off">关闭</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>分组</label>
+              <input type="text" id="bGroup" list="groupOptions" placeholder="留空不修改" />
+            </div>
+            <div class="field">
+              <label>代理</label>
+              <select id="bProxy" class="select-input">
+                <option value="">不修改</option>
+                <option value="on">启用（跟随全局代理）</option>
+                <option value="off">停用（直连）</option>
+              </select>
+            </div>
+            <div class="form-error" id="bError"></div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" id="bmCancel">取消</button>
+            <button class="btn primary" id="bmSave">应用到选中</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 确认弹窗（置于最后，保证显示在其它弹窗之上） -->
+      <div class="modal-mask top" id="confirmModal">
     <div class="modal slim">
       <div class="modal-body confirm-body">
         <div class="confirm-ic" id="cfIcon"></div>

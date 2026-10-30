@@ -1,11 +1,11 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
+const { DATA_DIR } = require('./store');
 
-const LOG_DIR = process.env.AIPM_DATA_DIR
-  ? path.join(process.env.AIPM_DATA_DIR, 'logs')
-  : path.join(process.env.APPDATA || path.join(os.homedir(), '.config'), 'ai-provider-monitor', 'logs');
+// 日志目录跟随数据目录（便携版 exe 旁 AIPM-Data、AIPM_DATA_DIR 覆盖、默认 APPDATA），
+// 与 store.js 保持同一来源，避免便携版出现「数据在 U 盘、日志在 APPDATA」的分裂。
+const LOG_DIR = path.join(DATA_DIR, 'logs');
 
 const MAX_IN_MEMORY = 600;
 const buffer = [];
@@ -31,18 +31,7 @@ function dayTag(d = new Date()) {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
 }
 
-let fileStream = null;
-let streamDay = null;
-let streamPath = null;
-let writesSinceSizeCheck = 0;
-
 function baseFileFor(day) { return path.join(LOG_DIR, `aipm-${day}.log`); }
-
-function closeStream() {
-  if (fileStream) { try { fileStream.end(); } catch (e) { /* ignore */ } }
-  fileStream = null;
-  streamPath = null;
-}
 
 /** 单文件超限时切成 aipm-YYYYMMDD.log.1 / .2 … */
 function rotateBySize(file) {
@@ -69,31 +58,12 @@ function pruneOldLogs() {
   } catch (e) { /* ignore */ }
 }
 
-function ensureStream() {
-  const today = dayTag();
-  // 跨天：关闭旧流、清理过期文件
-  if (fileStream && streamDay !== today) {
-    closeStream();
-    pruneOldLogs();
-  }
-  if (fileStream) {
-    // 不必每条日志都 stat；约 40 条查一次体积
-    writesSinceSizeCheck++;
-    if (writesSinceSizeCheck < 40) return fileStream;
-    writesSinceSizeCheck = 0;
-    if (streamPath && rotateBySize(streamPath)) closeStream();
-    else return fileStream;
-  }
-  try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-    const file = baseFileFor(today);
-    rotateBySize(file);
-    fileStream = fs.createWriteStream(file, { flags: 'a' });
-    streamDay = today;
-    streamPath = file;
-    pruneOldLogs();
-  } catch (e) { fileStream = null; }
-  return fileStream;
+/** 跨天时顺手清理过期文件 */
+let lastPruneDay = dayTag();
+function maybePrune() {
+  if (dayTag() === lastPruneDay) return;
+  lastPruneDay = dayTag();
+  pruneOldLogs();
 }
 
 function flushPendingSync() {
@@ -103,6 +73,7 @@ function flushPendingSync() {
   const byDay = new Map();
   for (const item of batch) byDay.set(item.day, (byDay.get(item.day) || '') + item.text);
   try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { return; }
+  maybePrune();
   for (const [day, text] of byDay) {
     const file = baseFileFor(day);
     rotateBySize(file);
@@ -120,10 +91,9 @@ function write(level, msg) {
   for (const fn of subscribers) { try { fn(line); } catch (e) { /* ignore */ } }
 }
 
-/** 退出前把流里的缓冲刷出去 */
+/** 退出前把缓冲刷出去（写路径全部是同步 append，flush 即落盘） */
 function flushSync() {
   flushPendingSync();
-  try { closeStream(); } catch (e) { /* ignore */ }
 }
 
 /** 由主进程在配置变更时调用 */

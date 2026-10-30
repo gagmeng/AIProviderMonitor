@@ -12,6 +12,7 @@ const RUNTIME_FIELDS = [
   'consecutiveFail', 'probeCursor', 'modelBaseline', 'alertRuntime', 'quotaRemaining', 'quotaWarning', 'firstTokenMs', 'throughputTokensPerSec'
 ];
 const PROBE_MODES = new Set(['chat', 'embeddings', 'completions', 'custom', 'none']);
+const NOTIFY_CHANNELS = new Set(['weixin', 'qq', 'dingtalk', 'telegram', 'feishu', 'slack', 'serverchan', 'custom']);
 
 function newNumericId(used = new Set()) {
   let id;
@@ -61,6 +62,12 @@ function validateProviderConfig(p) {
   if (p.modelIgnorePattern) { try { new RegExp(String(p.modelIgnorePattern)); } catch (e) { throw new Error('模型忽略规则不是有效正则表达式'); } }
   if (p.quotaPath && !String(p.quotaPath).trim().startsWith('/')) throw new Error('配额路径必须以 / 开头');
   if (p.quotaWarnBelow != null && p.quotaWarnBelow !== '' && !Number.isFinite(Number(p.quotaWarnBelow))) throw new Error('配额告警阈值必须是数字');
+  if (p.notifyChannels != null) {
+    if (!Array.isArray(p.notifyChannels)) throw new Error('通知通道路由必须是数组');
+    for (const c of p.notifyChannels) {
+      if (!NOTIFY_CHANNELS.has(String(c))) throw new Error(`未知的通知通道: ${c}`);
+    }
+  }
   return true;
 }
 
@@ -119,7 +126,7 @@ function normalizeProvider(p) {
   out.quotaValuePath = String(src.quotaValuePath || 'remaining');
   out.quotaWarnBelow = src.quotaWarnBelow === '' || src.quotaWarnBelow == null ? null : Number(src.quotaWarnBelow);
   out.measureStreaming = Boolean(src.measureStreaming);
-  out.notifyChannels = Array.isArray(src.notifyChannels) ? src.notifyChannels.map(String) : [];
+  out.notifyChannels = Array.isArray(src.notifyChannels) ? src.notifyChannels.map(String).filter((c) => NOTIFY_CHANNELS.has(c)) : [];
   out.maintWeekdays = Array.isArray(src.maintWeekdays) ? src.maintWeekdays.map(Number).filter((n) => n >= 0 && n <= 6) : [];
   out.maintDates = String(src.maintDates || '');
   out.probeLimit = Number(src.probeLimit) > 0 ? Number(src.probeLimit) : null;
@@ -155,4 +162,4 @@ function mergeProvider(exist, incoming) {
   return changed;
 }
 
-module.exports = { RUNTIME_FIELDS, freshRuntime, boolVal, normalizeUrlKey, cleanUrl, normalizeProvider, mergeProvider, validateProviderConfig, ensureUniqueProviderIds, newNumericId };
+module.exports = { RUNTIME_FIELDS, freshRuntime, boolVal, normalizeUrlKey, cleanUrl, normalizeProvider, mergeProvider, validateProviderConfig, ensureUniqueProviderIds, newNumericId, NOTIFY_CHANNELS };

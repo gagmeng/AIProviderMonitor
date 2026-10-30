@@ -101,12 +101,16 @@ function fetchJSON(targetUrl, { method = 'GET', headers = {}, body = null, timeo
   });
 }
 
-/** 判断错误是否值得重试：网络层抖动与 5xx/429 可重试；4xx 语义明确不重试 */
+/** 判断错误是否值得重试：网络层抖动与 408/429/5xx 可重试；其余 4xx 语义明确不重试 */
 function isRetryable(err) {
   const msg = String((err && err.message) || err);
-  if (/^HTTP 4(0[0-9]|1[0-9]|2[0-9])\b/.test(msg) && !/^HTTP 429\b/.test(msg)) return false;
-  if (/^HTTP 429\b/.test(msg)) return true;
-  if (/^HTTP 5\d\d\b/.test(msg)) return true;
+  const m = /^HTTP (\d{3})\b/.exec(msg);
+  if (m) {
+    const code = Number(m[1]);
+    if (code === 408 || code === 429) return true;   // 请求超时 / 速率受限，等一下再试有意义
+    if (code >= 500) return true;
+    return false;
+  }
   if (/超时|timeout|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|EHOSTUNREACH|ENETUNREACH/i.test(msg)) return true;
   if (/响应不是有效 JSON/.test(msg)) return false;
   return true;

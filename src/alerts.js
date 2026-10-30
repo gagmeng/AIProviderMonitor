@@ -20,13 +20,17 @@ const DEFAULTS = {
   alertQuietEnabled: false,
   alertQuietStart: '23:00',
   alertQuietEnd: '07:00',
-  alertOnModelChange: true
+  alertOnModelChange: true,
+  alertEscalateMin: 0,
+  latencyAlertEnabled: false,
+  latencyAlertMs: 5000,
+  latencyAlertConsecutive: 3
 };
 
 const runtime = new Map();
 
 function freshState() {
-  return { consecutiveFail: 0, inAlarm: false, lastSent: {} };
+  return { consecutiveFail: 0, inAlarm: false, latencyHigh: 0, lastSent: {} };
 }
 
 function stateOf(id) {
@@ -42,6 +46,8 @@ function bindState(provider) {
   if (saved && typeof saved === 'object') {
     const n = Number(saved.consecutiveFail);
     st.consecutiveFail = Number.isFinite(n) && n > 0 ? n : 0;
+    const lh = Number(saved.latencyHigh);
+    st.latencyHigh = Number.isFinite(lh) && lh > 0 ? lh : 0;
     st.inAlarm = Boolean(saved.inAlarm);
     if (saved.lastSent && typeof saved.lastSent === 'object') st.lastSent = { ...saved.lastSent };
   }
@@ -54,6 +60,7 @@ function writeState(provider, st) {
   provider.alertRuntime = {
     consecutiveFail: st.consecutiveFail,
     inAlarm: Boolean(st.inAlarm),
+    latencyHigh: st.latencyHigh || 0,
     lastSent: { ...st.lastSent }
   };
 }
@@ -147,6 +154,48 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
       });
       markSent(st, failKind);
       st.inAlarm = true;
+    }
+  }
+
+  // 故障升级：故障持续 N 分钟仍未恢复时重复提醒（0 = 关闭），受维护窗口与静默时段约束
+  const escalateMin = Math.max(0, Number(cfg(globalCfg, 'alertEscalateMin')) || 0);
+  if (!isUp && st.inAlarm && escalateMin > 0 && !alerts.some((a) => a.kind === failKind)) {
+    if (maint) {
+      suppressed.push({ kind: 'escalate', why: '维护窗口' });
+    } else if (quiet) {
+      suppressed.push({ kind: 'escalate', why: '静默时段' });
+    } else if (Date.now() - (st.lastSent[failKind] || 0) >= escalateMin * 60000) {
+      alerts.push({
+        kind: failKind,
+        title: `${failTitle}（持续未恢复）`,
+        reason: `故障已持续超过 ${escalateMin} 分钟仍未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`
+      });
+      markSent(st, failKind);
+    }
+  }
+
+  // 延迟劣化：仅统计在线状态下的连接延迟，连续 N 轮超过阈值才告警；
+  // 计数不受静默/维护影响（持续累积），推送仍受冷却约束，劣化持续期间按冷却节奏重复提醒。
+  const latMs = Number(provider.latency);
+  const latThreshold = Number(cfg(globalCfg, 'latencyAlertMs'));
+  const latConsec = Math.max(1, Number(cfg(globalCfg, 'latencyAlertConsecutive')) || 1);
+  const latBad = Boolean(cfg(globalCfg, 'latencyAlertEnabled'))
+    && isUp && Number.isFinite(latMs) && latMs > 0 && latMs >= latThreshold;
+  st.latencyHigh = latBad ? (st.latencyHigh || 0) + 1 : 0;
+  if (st.latencyHigh >= latConsec) {
+    if (maint) {
+      suppressed.push({ kind: 'latency', why: '维护窗口' });
+    } else if (quiet) {
+      suppressed.push({ kind: 'latency', why: '静默时段' });
+    } else if (inCooldown(st, 'latency', cooldownMin)) {
+      suppressed.push({ kind: 'latency', why: '冷却中' });
+    } else {
+      alerts.push({
+        kind: 'latency',
+        title: '延迟劣化',
+        reason: `连续 ${st.latencyHigh} 轮连接延迟 ≥ ${latThreshold} ms（当前 ${latMs} ms）`
+      });
+      markSent(st, 'latency');
     }
   }
 

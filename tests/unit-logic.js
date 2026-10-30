@@ -174,5 +174,196 @@ test('history: 鉴权失败单独计数，且写入后立即可读', () => {
   assert.strictEqual(sum.perProvider[0].downCount, 0);
 });
 
+// ---------- v1.4：global 归一 / 408 重试 / 导入校验 / SLA / 延迟告警 / 升级 / 通道健康 ----------
+
+test('store: normalizeGlobal 钳位数值、校验时间、丢弃未知键、宽容布尔', () => {
+  const store = require('../src/store');
+  const g = store.normalizeGlobal({
+    concurrency: 999, retries: -3, alertQuietStart: '25:99', dailyReportTime: 'bad',
+    notifyWeixinEnabled: 'true', historyEnabled: 0, unknownJunkKey: 'x',
+    probeLimit: 8, configVersion: 1
+  });
+  assert.strictEqual(g.concurrency, 16, '越界数值钳到上限');
+  assert.strictEqual(g.retries, 0, '负数钳到下限');
+  assert.strictEqual(g.alertQuietStart, '23:00', '非法时间回退默认');
+  assert.strictEqual(g.dailyReportTime, '08:00');
+  assert.strictEqual(g.notifyWeixinEnabled, true, '字符串 true 解析为布尔');
+  assert.strictEqual(g.historyEnabled, false, '0 解析为 false');
+  assert.strictEqual('unknownJunkKey' in g, false, '未知键一律丢弃');
+  assert.strictEqual(g.probeLimit, 20, '旧默认 8 迁移到 20');
+  assert.strictEqual(g.latencyAlertEnabled, false, '新字段有默认值');
+});
+
+test('store: lastReportDay 保留合法日期、丢弃乱值（日报去重标记不得被剥离）', () => {
+  const store = require('../src/store');
+  const kept = store.normalizeGlobal({ ...store.DEFAULT_GLOBAL, lastReportDay: '2026-10-30' });
+  assert.strictEqual(kept.lastReportDay, '2026-10-30', '合法 YYYY-MM-DD 必须保留');
+  const cleaned = store.normalizeGlobal({ ...store.DEFAULT_GLOBAL, lastReportDay: 'yesterday' });
+  assert.strictEqual(cleaned.lastReportDay, '', '乱值清空，宁可多发一次');
+  assert.strictEqual(store.normalizeGlobal({}).lastReportDay, '', '缺省为空串');
+  // 模拟 global:set 路径：合并旧配置后再归一，标记不能丢
+  const merged = store.normalizeGlobal({ ...store.DEFAULT_GLOBAL, lastReportDay: '2026-10-30', theme: 'dark' });
+  assert.strictEqual(merged.lastReportDay, '2026-10-30', '保存其它设置后日报标记仍在');
+});
+
+test('detector: isRetryable 408/429/5xx 可重试，其余 4xx 不可', () => {
+  const { isRetryable } = require('../src/detector');
+  assert.strictEqual(isRetryable(new Error('HTTP 408')), true);
+  assert.strictEqual(isRetryable(new Error('HTTP 429')), true);
+  assert.strictEqual(isRetryable(new Error('HTTP 502')), true);
+  assert.strictEqual(isRetryable(new Error('HTTP 404')), false);
+  assert.strictEqual(isRetryable(new Error('HTTP 400')), false);
+  assert.strictEqual(isRetryable(new Error('HTTP 401')), false);
+  assert.strictEqual(isRetryable(new Error('请求超时')), true);
+});
+
+test('transfer: parseImport 校验非法正则与非法 URL 并按行报错', () => {
+  const { parseImport } = require('../src/transfer');
+  const r = parseImport(JSON.stringify([
+    { name: 'OK', url: 'http://a', intervalSec: 60 },
+    { name: 'BadRegex', url: 'http://b', intervalSec: 60, modelIgnorePattern: '(unclosed' },
+    { name: 'BadProto', url: 'file:///etc', intervalSec: 60 }
+  ]), { format: 'json' });
+  assert.strictEqual(r.items.length, 1);
+  assert.strictEqual(r.errors.length, 2, '两条非法条目都应报错');
+  assert.ok(r.errors.some((e) => /BadRegex/.test(e.msg)));
+  assert.ok(r.errors.some((e) => /BadProto/.test(e.msg)));
+});
+
+test('transfer: applyImport 入库前二次校验，非法条目计入 invalid', () => {
+  const { applyImport } = require('../src/transfer');
+  const db = { providers: [] };
+  const r = applyImport(db, [
+    { name: 'Good', url: 'http://a', intervalSec: 60 },
+    { name: 'Bad', url: 'http://b', intervalSec: 60, modelIgnorePattern: '[' }
+  ], 'append');
+  assert.strictEqual(r.added, 1);
+  assert.strictEqual(r.invalid, 1);
+  assert.strictEqual(db.providers.length, 1);
+});
+
+test('backup: 还原跳过非法条目，global 未知键被丢弃', () => {
+  const backup = require('../src/backup');
+  const fs2 = require('fs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-bk-'));
+  const file = path.join(dir, 'bk.json');
+  fs2.writeFileSync(file, JSON.stringify({
+    global: { concurrency: 6, evilKey: 'x', alertQuietStart: '99:99' },
+    providers: [
+      { name: 'Good', url: 'http://a', intervalSec: 60 },
+      { name: 'Bad', url: 'http://b', intervalSec: 60, modelIgnorePattern: '[' }
+    ]
+  }));
+  const target = { global: { concurrency: 4 }, providers: [] };
+  const r = backup.restoreFrom(target, file, 'overwrite');
+  assert.strictEqual(r.providers, 1, '非法条目不入库');
+  assert.strictEqual(r.invalid, 1);
+  assert.strictEqual(target.global.concurrency, 6);
+  assert.strictEqual('evilKey' in target.global, false, 'global 未知键丢弃');
+  assert.strictEqual(target.global.alertQuietStart, '23:00', '非法时间回退默认');
+});
+
+test('history: 故障次数 / MTTR / 最长故障', () => {
+  const history = require('../src/history');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-sla-'));
+  const mk = (id, name) => ({ id, name });
+  const base = Date.now() - 100 * 60000;
+  const rec = (t, status) => ({ checkedAt: t, status, latency: 10, modelsTotal: 1, modelsAvailable: status === 'up' ? ['m'] : [], modelsUnavailable: [], modelsUnprobed: [], error: null });
+  // up 10m → down 20m → up 30m → degraded 10m → up（末段开放故障无）
+  const seq = [['up', 10], ['down', 20], ['up', 30], ['degraded', 10], ['up', 30]];
+  let t = base;
+  for (const [st, mins] of seq) { history.append(dir, mk(7, 'sla'), rec(t, st)); t += mins * 60000; }
+  const p = history.summarize(dir, { hours: 24 }).perProvider.find((x) => x.id === 7);
+  assert.strictEqual(p.incidents, 2, '两次故障事件');
+  assert.strictEqual(p.mttrMs, 15 * 60000, 'MTTR 为 (20+10)/2 分钟');
+  assert.strictEqual(p.maxOutageMs, 20 * 60000, '最长故障 20 分钟');
+});
+
+test('alerts: 延迟劣化连续超阈值触发、回落后清零', () => {
+  const alerts = require('../src/alerts');
+  const id = 771001;
+  alerts.resetState(id);
+  const g = { latencyAlertEnabled: true, latencyAlertMs: 1000, latencyAlertConsecutive: 3, alertCooldownMin: 0, alertFailThreshold: 2 };
+  const mk = (latency) => ({ id, name: 'lat', status: 'up', latency, notifyOnModelChange: false, modelsAvailable: ['m'], modelsTotal: 1 });
+  assert.strictEqual(alerts.evaluate(g, mk(2000), { status: 'up' }, {}).alerts.length, 0, '第 1 轮不告警');
+  assert.strictEqual(alerts.evaluate(g, mk(2000), { status: 'up' }, {}).alerts.length, 0, '第 2 轮不告警');
+  const d3 = alerts.evaluate(g, mk(2000), { status: 'up' }, {});
+  assert.strictEqual(d3.alerts.length, 1, '第 3 轮触发');
+  assert.strictEqual(d3.alerts[0].kind, 'latency');
+  // 延迟告警不像故障告警那样闩锁：劣化持续期间按冷却节奏重复提醒（冷却为 0 即每轮提醒）
+  const d4 = alerts.evaluate(g, mk(2000), { status: 'up' }, {});
+  assert.strictEqual(d4.alerts.length, 1, '冷却为 0 时按轮重复提醒');
+  const d5 = alerts.evaluate(g, mk(50), { status: 'up' }, {});
+  assert.strictEqual(d5.alerts.length, 0, '回落后不告警');
+  const d6 = alerts.evaluate(g, mk(2000), { status: 'up' }, {});
+  assert.strictEqual(d6.alerts.length, 0, '计数已清零，需重新累积');
+  alerts.resetState(id);
+});
+
+test('alerts: 延迟告警不受静默时段丢计数，静默期间只抑制推送', () => {
+  const alerts = require('../src/alerts');
+  const id = 771002;
+  alerts.resetState(id);
+  const g = { latencyAlertEnabled: true, latencyAlertMs: 1000, latencyAlertConsecutive: 2, alertCooldownMin: 0, alertQuietEnabled: true, alertQuietStart: '00:00', alertQuietEnd: '12:00' };
+  const mk = (latency) => ({ id, name: 'lat2', status: 'up', latency, notifyOnModelChange: false });
+  const quietNow = new Date(2026, 0, 2, 1, 0);
+  assert.strictEqual(alerts.evaluate(g, mk(2000), { status: 'up' }, { now: quietNow }).alerts.length, 0);
+  const d2 = alerts.evaluate(g, mk(2000), { status: 'up' }, { now: new Date(2026, 0, 2, 1, 1) });
+  assert.strictEqual(d2.alerts.length, 0, '静默期不推送');
+  assert.strictEqual(d2.suppressed.some((s) => s.kind === 'latency'), true, '但被记录为抑制');
+  // 静默结束后：计数已到 3，仍超阈值 → 立即补推一次
+  const d3 = alerts.evaluate(g, mk(2000), { status: 'up' }, { now: new Date(2026, 0, 2, 13, 0) });
+  assert.strictEqual(d3.alerts.some((a) => a.kind === 'latency'), true, '静默结束后补发');
+  alerts.resetState(id);
+});
+
+test('alerts: 故障持续超过升级分钟数重复提醒', () => {
+  const alerts = require('../src/alerts');
+  const id = 771003;
+  const g = { alertFailThreshold: 1, alertCooldownMin: 0, alertEscalateMin: 30, alertRecoverNotify: true };
+  const p = { id, name: 'esc', status: 'down', lastError: 'x', notifyOnModelChange: false };
+  const t0 = Date.now();
+  alerts.resetState(id);
+  const d1 = alerts.evaluate(g, p, { status: 'up' }, {});
+  assert.strictEqual(d1.alerts.length, 1, '首推故障告警');
+  assert.strictEqual(d1.inAlarm, true);
+  // runtime 按 id 缓存，重绑持久态前先 resetState（模拟进程重启后的恢复路径）
+  const rebind = (runtime) => { alerts.resetState(id); return alerts.evaluate(g, { ...p, alertRuntime: runtime }, { status: 'up' }, {}); };
+  const d2 = rebind({ consecutiveFail: 1, inAlarm: true, lastSent: { down: t0 - 10 * 60000 } });
+  assert.strictEqual(d2.alerts.length, 0, '10 分钟内不升级');
+  const d3 = rebind({ consecutiveFail: 2, inAlarm: true, lastSent: { down: t0 - 31 * 60000 } });
+  assert.strictEqual(d3.alerts.length, 1, '超过 30 分钟补推');
+  assert.ok(/持续未恢复/.test(d3.alerts[0].title));
+  alerts.resetState(id);
+});
+
+test('notifier: noteResult 记录连续失败与最近成功时刻', () => {
+  const notifier = require('../src/notifier');
+  notifier.noteResult('__test_ch__', false, new Error('boom'));
+  notifier.noteResult('__test_ch__', false, new Error('boom2'));
+  let h = notifier.getNotifyHealth().__test_ch__;
+  assert.strictEqual(h.fails, 2);
+  assert.ok(h.lastFailAt > 0);
+  assert.ok(/boom2/.test(h.lastError));
+  notifier.noteResult('__test_ch__', true);
+  h = notifier.getNotifyHealth().__test_ch__;
+  assert.strictEqual(h.fails, 0, '成功清零');
+  assert.ok(h.lastOkAt > 0);
+  assert.ok(h.lastOkAt >= h.lastFailAt);
+});
+
+test('notifier: 健康状态落盘后重启仍在，resetHealth 清空对应通道', () => {
+  const notifier = require('../src/notifier');
+  const healthFile = path.join(TMP, 'notify-health.json');
+  notifier.noteResult('dingtalk', false, new Error('errcode=310000'));
+  assert.ok(fs.existsSync(healthFile), '健康状态必须落盘，否则重启后面板退回「未使用」');
+  const onDisk = JSON.parse(fs.readFileSync(healthFile, 'utf8'));
+  assert.strictEqual(onDisk.dingtalk.fails, 1);
+  assert.ok(/310000/.test(onDisk.dingtalk.lastError));
+  notifier.resetHealth(['dingtalk']);
+  assert.strictEqual(notifier.getNotifyHealth().dingtalk, undefined, '清空后不再有该通道记录');
+  assert.strictEqual(JSON.parse(fs.readFileSync(healthFile, 'utf8')).dingtalk, undefined);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
