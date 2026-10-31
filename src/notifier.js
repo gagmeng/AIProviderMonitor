@@ -162,9 +162,18 @@ function noteResult(channel, ok, err) {
     h.lastFailAt = Date.now();
     h.lastError = String((err && err.message) || err || '').slice(0, 200);
     if (h.fails === 3) logger.error(`[自检] 通知通道「${CHANNEL_LABEL[channel] || channel}」连续失败 ${h.fails} 次，请检查配置与网络`);
+    // 连续失败只有日志一行，不看界面永远不知道「告警发不出去」。
+    // 首次跨过 3 次以及之后每多 5 次失败时回调主进程，转成未读告警 + 托盘气泡。
+    if (healthAlertHandler && (h.fails === 3 || (h.fails > 3 && (h.fails - 3) % 5 === 0))) {
+      try { healthAlertHandler(channel, h.fails, h.lastError); } catch (e) { /* 回调异常不阻断通知 */ }
+    }
   }
   saveHealth();
 }
+
+let healthAlertHandler = null;
+/** 注册通道连续失败回调：main.js 用它把通道故障转成未读告警与托盘气泡 */
+function onChannelUnhealthy(fn) { healthAlertHandler = typeof fn === 'function' ? fn : null; }
 function getNotifyHealth() {
   loadHealth();
   return JSON.parse(JSON.stringify(notifyHealth));
@@ -469,5 +478,5 @@ module.exports = {
   notifyModelChange, notifyAlert, sendTest, broadcast,
   buildModelChangeText, buildAlertText, channelEnabled,
   sendQQ, sendWeixin, sendDingtalk, sendTelegram, sendFeishu, sendSlack, sendServerChan, sendCustom,
-  CHANNELS, CHANNEL_LABEL, getNotifyHealth, noteResult, resetHealth, resolveNotifyProxy, oneBotId
+  CHANNELS, CHANNEL_LABEL, getNotifyHealth, noteResult, resetHealth, resolveNotifyProxy, oneBotId, onChannelUnhealthy
 };

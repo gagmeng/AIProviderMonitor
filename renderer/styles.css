@@ -286,6 +286,11 @@ html.dark .search-input:focus { background: var(--card-2); }
 .latency { font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--text-2); }
 .cycle-cell, .checked-cell { font-size: 12px; color: var(--text-2); }
 .checked-cell { line-height: 1.5; }
+/* 行内副行：下次检测时间（周期列下）与 24h 可用率（最近检测列下） */
+.cell-sub { font-size: 11px; color: var(--text-3, var(--text-2)); opacity: .8; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.cell-sub.u-up { color: var(--green); opacity: 1; }
+.cell-sub.u-degraded { color: var(--orange); opacity: 1; }
+.cell-sub.u-down { color: var(--red); opacity: 1; }
 
 /* 小开关 */
 .switch { position: relative; display: inline-block; width: 42px; height: 25px; flex: none; }
@@ -756,6 +761,13 @@ html.dark code { background: var(--card-2); }
 
 .chart-wrap { width: 100%; min-height: 200px; }
 .ch-svg { width: 100%; height: 200px; display: block; }
+/* 详情弹窗迷你走势图：容器收窄、高度跟随内容 */
+.dm-chart { background: var(--card-2); border-radius: 10px; padding: 8px 6px 4px; }
+.dm-chart .ch-svg { height: 140px; }
+/* 弹窗底栏：测试连接靠左，取消/保存靠右 */
+.foot-spacer { flex: 1; }
+/* 未读告警上限 50 条：列表内部滚动，避免弹窗撑破视口 */
+#umList { max-height: 56vh; overflow-y: auto; }
 .ch-grid { stroke: var(--sep); stroke-width: 1; }
 .ch-lbl { fill: var(--text-3); font-size: 10px; }
 .ch-up polyline { stroke: var(--green); }

@@ -176,7 +176,14 @@ function valueAtPath(payload, path) {
 function filterIgnoredModels(models, pattern) {
   const raw = String(pattern || '').trim();
   if (!raw) return models;
-  const re = new RegExp(raw, 'i');
+  let re;
+  try { re = new RegExp(raw, 'i'); }
+  catch (e) {
+    // 手改配置可能绕过入口校验：坏正则直接抛会让整轮 detect 失败、状态卡死，
+    // 这里降级为「本轮忽略该规则」，让检测继续跑并把问题留在日志里
+    logger.warn('[探测] 模型忽略规则不是有效正则，本轮跳过该规则');
+    return models;
+  }
   return models.filter((id) => !re.test(String(id)));
 }
 

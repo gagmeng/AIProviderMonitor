@@ -5,7 +5,11 @@ const fs = require('fs');
 const path = require('path');
 
 const OUT = path.join(__dirname, '..', 'build');
+// assets/ 是运行时图标目录：electron-builder 会把 buildResources（build/）从 asar 排除，
+// 打包版 createTray 曾因此找不到 icon.ico 静默不建托盘；assets/ 在 files 白名单里正常入库
+const OUT_RUNTIME = path.join(__dirname, '..', 'assets');
 fs.mkdirSync(OUT, { recursive: true });
+fs.mkdirSync(OUT_RUNTIME, { recursive: true });
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
@@ -74,7 +78,7 @@ function gradColor(t) {
   return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
 }
 
-function renderPNG(size) {
+function renderPNG(size, badge = null) {
   const cv = makeCanvas(size);
   const m = size * 0.04;                     // 外边距
   fillRoundRect(cv, size / 2, size / 2, size / 2 - m, size / 2 - m, size * 0.225);
@@ -90,6 +94,24 @@ function renderPNG(size) {
   const line = makeCanvas(size);
   strokePolyline(line, pts, size * 0.085);
 
+  // 状态角标层（托盘染色用）：右下角实心圆点 + 白色描边环
+  let badgeCv = null;
+  if (badge) {
+    badgeCv = makeCanvas(size);
+    const bcx = size * 0.8, bcy = size * 0.8, br = size * 0.17, ring = Math.max(1, size * 0.045);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const d = Math.hypot(x + 0.5 - bcx, y + 0.5 - bcy);
+        const idx = y * size + x;
+        if (d <= br) {
+          badgeCv.data[idx] = Math.min(1, Math.max(0, 0.5 - (d - br)));   // 实心
+        } else if (d <= br + ring) {
+          badgeCv.data[idx] = -Math.min(1, Math.max(0, 0.5 - (d - br - ring))) - 2;  // 负值编码描边环
+        }
+      }
+    }
+  }
+
   const rgba = Buffer.alloc(size * size * 4);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
@@ -97,8 +119,19 @@ function renderPNG(size) {
       const t = (x + y) / (2 * size);
       const la = line.data[y * size + x];   // 折线覆盖度
       const ba = bg[y * size + x];          // 背景覆盖度
+      const bva = badgeCv ? badgeCv.data[y * size + x] : 0;
       let a, r, g, b;
-      if (la > 0.02) {
+      if (bva < 0) {
+        // 白色描边环（负值编码），直接覆盖
+        a = 1; r = 255; g = 255; b = 255;
+      } else if (bva > 0.02) {
+        // 实心角标：状态色，边缘与底色混合抗锯齿
+        const mix = Math.min(1, bva);
+        a = Math.max(ba, mix);
+        r = Math.round(lerp(gradColor(t)[0], badge[0], mix));
+        g = Math.round(lerp(gradColor(t)[1], badge[1], mix));
+        b = Math.round(lerp(gradColor(t)[2], badge[2], mix));
+      } else if (la > 0.02) {
         // 折线：白色（与背景混合边缘抗锯齿）
         const mix = Math.min(1, la);
         a = Math.max(ba, mix);
@@ -185,4 +218,22 @@ fs.writeFileSync(path.join(OUT, 'icon.ico'), encodeICO([
   { size: 256, data: png256 }, { size: 64, data: png64 }, { size: 48, data: png48 },
   { size: 32, data: png32 }, { size: 16, data: png16 }
 ]));
-console.log('icons written to', OUT);
+
+// 托盘状态角标（32px 足够；Tray.setImage 会按 DPI 缩放）：
+// ok=全绿 warn=有异常 err=有离线/鉴权失败；缺失时 main.js 回退基础图标
+const BADGES = { ok: [52, 199, 89], warn: [255, 149, 0], err: [255, 59, 48] };
+// build/ 供 electron-builder 构建期使用（win.icon / 安装器图标，不进 asar）
+fs.writeFileSync(path.join(OUT, 'icon.ico'), encodeICO([
+  { size: 256, data: png256 }, { size: 64, data: png64 }, { size: 48, data: png48 },
+  { size: 32, data: png32 }, { size: 16, data: png16 }
+]));
+// assets/ 供运行时使用（打包进 asar）
+fs.writeFileSync(path.join(OUT_RUNTIME, 'icon.ico'), encodeICO([
+  { size: 256, data: png256 }, { size: 64, data: png64 }, { size: 48, data: png48 },
+  { size: 32, data: png32 }, { size: 16, data: png16 }
+]));
+for (const [name, rgb] of Object.entries(BADGES)) {
+  const buf = renderPNG(32, rgb);
+  fs.writeFileSync(path.join(OUT_RUNTIME, `icon-${name}.png`), buf);
+}
+console.log('icons written to', OUT, '+', OUT_RUNTIME);

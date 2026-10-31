@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('aipm', {
   updateProvider: (id, data) => ipcRenderer.invoke('provider:update', { id, data }),
   revealKey: (id) => ipcRenderer.invoke('provider:revealKey', id),
   copyKey: (id) => ipcRenderer.invoke('provider:copyKey', id),
+  testConnection: (payload) => ipcRenderer.invoke('provider:testConn', payload),
   deleteProvider: (id) => ipcRenderer.invoke('provider:delete', id),
   deleteMany: (ids) => ipcRenderer.invoke('provider:deleteMany', ids),
   checkNow: (ids) => ipcRenderer.invoke('provider:checkNow', ids),

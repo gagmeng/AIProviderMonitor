@@ -99,6 +99,11 @@ function fmtDate(ts) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getMonth() + 1}/${p(d.getDate())} ${fmtTime(ts)}`;
 }
+/** 同天只显示时刻，跨天带日期：健康面板/下次检测用，避免「最后成功 10:35」看不出是哪天 */
+function fmtWhen(ts) {
+  if (!ts) return '—';
+  return new Date(ts).toDateString() === new Date().toDateString() ? fmtTime(ts) : fmtDate(ts);
+}
 // 周期格式化/换算统一复用 src/durfmt.js（由 index.html 以 <script> 先行加载，挂在 window.durfmt）。
 // 此前渲染层另有一份同规则实现，两处口径易漂移，现已合并为单一事实来源。
 const fmtDuration = (sec) => window.durfmt.formatDuration(sec);
@@ -269,6 +274,20 @@ function refreshGroupOptions() {
   if (dl) dl.innerHTML = groups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join('');
 }
 
+// ---------- 24h 可用率缓存（列表列内嵌展示） ----------
+// 一次 historySummary 拉全量，5 分钟刷新一次；可用率变化缓慢，不值得每轮检测都拉
+let uptime24 = { map: new Map(), at: 0 };
+async function refreshUptime24(force = false) {
+  if (!force && Date.now() - uptime24.at < 5 * 60 * 1000) return;
+  try {
+    const r = await window.aipm.historySummary({ hours: 24 });
+    if (r && r.ok) {
+      uptime24 = { map: new Map((r.perProvider || []).map((p) => [p.id, p.uptime])), at: Date.now() };
+      if (view === 'providers') renderProviders();
+    }
+  } catch (e) { /* 静默：列表徽标缺失不影响主功能 */ }
+}
+
 function renderProviders() {
   const list = filteredProviders();
   const wrap = $('#providerList');
@@ -285,7 +304,11 @@ function renderProviders() {
       const cycleMin = fmtDuration(p.intervalSec);
       const checked = p.checkedAt ? fmtTime(p.checkedAt) : tx('未检测');
       const schedule = (state.schedule || []).find((s) => s.id === p.id);
-      const nextTitle = schedule && schedule.dueAt ? ` title="下次检测：${fmtDate(schedule.dueAt)}"` : '';
+      const nextSub = schedule && schedule.dueAt
+        ? `<div class="cell-sub">${tx('下次检测')} ${fmtWhen(schedule.dueAt)}</div>` : '';
+      const up24 = uptime24.map.get(p.id);
+      const upSub = up24 != null
+        ? `<div class="cell-sub ${up24 >= 99 ? 'u-up' : up24 >= 90 ? 'u-degraded' : 'u-down'}">24h ${up24}%</div>` : '';
       return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''}" data-id="${p.id}">
         <div class="col-sel"><label class="checkbox"><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
         <div class="col-name"><div class="provider-cell">
@@ -299,9 +322,9 @@ function renderProviders() {
         <div class="col-status"><span class="status-pill st-${si.cls}"><span class="status-dot ${si.cls} ${checking ? 'pulse' : ''}"></span>${checking ? tx('检测中') : si.text}</span></div>
         <div class="col-models"><div class="models-cell"><span class="models-bar"><i style="width:${pct}%;"></i></span><span class="models-text">${avail}/${total}</span></div></div>
         <div class="col-latency">${p.latency != null ? p.latency + ' ms' : '—'}</div>
-        <div class="col-cycle cycle-cell"${nextTitle}>${cycleMin}</div>
+        <div class="col-cycle cycle-cell">${cycleMin}${nextSub}</div>
         <div class="col-notify">${p.notifyOnModelChange ? `<span class="status-pill st-up">${tx('开启')}</span>` : `<span class="status-pill st-unknown">${tx('关闭')}</span>`}</div>
-        <div class="col-checked checked-cell">${checked}${p.lastError ? `<br/><span class="st-down" style="font-size:11px;">${escapeHtml(p.lastError).slice(0, 26)}</span>` : ''}</div>
+        <div class="col-checked checked-cell">${checked}${p.lastError ? `<br/><span class="st-down" style="font-size:11px;" title="${escapeHtml(p.lastError)}">${escapeHtml(String(p.lastError).slice(0, 26))}</span>` : ''}${upSub}</div>
         <div class="col-ops">
           <button class="op-btn run" data-run="${p.id}" title="${tx('立即检测')}">${icon('refresh')}</button>
           <button class="op-btn edit" data-edit="${p.id}" title="${tx('编辑')}">${icon('pencil')}</button>
@@ -393,7 +416,8 @@ $('#bmSave').addEventListener('click', async () => {
   const patch = {};
   const interval = Number($('#bInterval').value);
   if ($('#bInterval').value !== '' && Number.isFinite(interval) && interval > 0) {
-    patch.intervalSec = toSecondsUI(interval, $('#bIntervalUnit').value);
+    // 与主进程 validateProviderConfig 的 1 年上限一致，超限整批回滚不如入口就钳住
+    patch.intervalSec = Math.min(31536000, toSecondsUI(interval, $('#bIntervalUnit').value));
   } else if ($('#bInterval').value !== '') {
     $('#bError').textContent = tx('轮循周期无效'); return;
   }
@@ -501,6 +525,8 @@ function openProviderModal(id = null) {
   editingId = id;
   $('#pmTitle').textContent = id ? tx('编辑服务商') : tx('新增服务商');
   $('#fError').textContent = '';
+  $('#fTestHint').textContent = '';
+  $('#fTestHint').title = '';
   const p = id ? state.providers.find((x) => x.id === id) : null;
   pmClearState.apiKey = false;
   pmClearState.customHeaders = false;
@@ -572,19 +598,13 @@ $('#btnAdd').addEventListener('click', () => openProviderModal());
 $('#pmClose').addEventListener('click', () => $('#providerModal').classList.remove('show'));
 $('#pmCancel').addEventListener('click', () => $('#providerModal').classList.remove('show'));
 
-$('#pmSave').addEventListener('click', async () => {
-  const name = $('#fName').value.trim();
-  let url = $('#fUrl').value.trim();
-  const interval = toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value);
-  if (!name) { $('#fError').textContent = tx('请输入供应商名称'); return; }
-  if (!url) { $('#fError').textContent = tx('请输入 URL'); return; }
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-  if (interval < 5) { $('#fError').textContent = tx('轮循周期不能小于 5 秒'); return; }
-
-  const data = {
-    name, url,
+/** 表单 → 主进程 payload（保存与测试连接共用） */
+function collectProviderForm() {
+  return {
+    name: $('#fName').value.trim(),
+    url: $('#fUrl').value.trim(),
     apiKey: $('#fKey').value.trim() || undefined,
-    intervalSec: interval,
+    intervalSec: toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value),
     notifyOnModelChange: $('#fNotify').checked,
     note: $('#fNote').value.trim(),
     group: $('#fGroup').value.trim(),
@@ -616,6 +636,50 @@ $('#pmSave').addEventListener('click', async () => {
     maintEnd: $('#fMaintEnd').value || '04:00',
     insecureSkipVerify: $('#fTlsVerify').value === 'follow' ? null : $('#fTlsVerify').value === 'skip'
   };
+}
+
+// 测试连接：不保存直接跑一轮检测，避免「保存 → 等轮循 → 失败 → 再编辑」的循环
+$('#fTestConn').addEventListener('click', async () => {
+  if (!$('#fName').value.trim()) { $('#fError').textContent = tx('请输入供应商名称'); return; }
+  if (!$('#fUrl').value.trim()) { $('#fError').textContent = tx('请输入 URL'); return; }
+  $('#fError').textContent = '';
+  const hint = $('#fTestHint');
+  const btn = $('#fTestConn');
+  btn.disabled = true;
+  hint.textContent = tx('测试中…'); hint.className = 'hint';
+  try {
+    const r = await window.aipm.testConnection({ id: editingId, data: collectProviderForm() });
+    if (!r || !r.ok) { hint.textContent = tx('失败: ') + ((r && r.error) || ''); hint.className = 'hint bad'; return; }
+    const s = r.result;
+    const parts = [statusInfo(s.status).text];
+    if (s.latency != null) parts.push(s.latency + ' ms');
+    parts.push(`${s.available}/${s.modelsTotal} ${tx('模型可用')}`);
+    if (s.unprobed > 0) parts.push(`${s.unprobed} ${tx('未探测')}`);
+    if (s.error) parts.push(s.error);
+    hint.textContent = parts.filter(Boolean).join(' · ');
+    hint.className = 'hint ' + (s.status === 'up' ? 'ok' : 'bad');
+    hint.title = (s.sampleFailures || []).join('\n');
+  } catch (e) {
+    hint.textContent = tx('失败: ') + (e.message || e);
+    hint.className = 'hint bad';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#pmSave').addEventListener('click', async () => {
+  const name = $('#fName').value.trim();
+  let url = $('#fUrl').value.trim();
+  const interval = toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value);
+  if (!name) { $('#fError').textContent = tx('请输入供应商名称'); return; }
+  if (!url) { $('#fError').textContent = tx('请输入 URL'); return; }
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  if (interval < 5) { $('#fError').textContent = tx('轮循周期不能小于 5 秒'); return; }
+  if (interval > 31536000) { $('#fError').textContent = tx('轮循周期不能超过 1 年'); return; }
+
+  const data = collectProviderForm();
+  data.name = name;
+  data.url = url;
   if (editingId) {
     // 留空 = 不修改；点过「清除」按钮 = 显式提交空串让主进程清掉
     if (pmClearState.apiKey) data.apiKey = '';
@@ -716,6 +780,18 @@ function openDetail(id) {
         el.appendChild(s);
       });
     } catch (e) { /* 徽标失败不打扰 */ }
+  })();
+  // 24h 可用率/延迟迷你走势：区分「刚好这轮慢」和「一直慢」；数据缺失时整块隐藏
+  (async () => {
+    try {
+      const r = await window.aipm.historySeries({ providerId: id, hours: 24, buckets: 48 });
+      const wrap = $('#dmChartWrap');
+      if (!wrap || !r || !r.ok || seq !== detailSeq) return;
+      const has = (r.buckets || []).some((b) => b.samples > 0);
+      if (!has) { wrap.style.display = 'none'; return; }
+      drawChart(r, 'dmChart', 640, 140);
+      wrap.style.display = '';
+    } catch (e) { /* 走势图失败不打扰 */ }
   })();
   $('#detailModal').classList.add('show');
 }
@@ -915,11 +991,11 @@ function renderNotifyHealth() {
       if (h && h.fails > 0) {
         usedCount++;
         dot = 'bad';
-        meta = `${tx('连续失败 {n} 次', { n: h.fails })} · ${fmtTime(h.lastFailAt)}`;
+        meta = `${tx('连续失败 {n} 次', { n: h.fails })} · ${fmtWhen(h.lastFailAt)}`;
       } else if (h && h.lastOkAt) {
         usedCount++;
         dot = 'ok';
-        meta = `${tx('正常')} · ${tx('最后成功 {t}', { t: fmtTime(h.lastOkAt) })}`;
+        meta = `${tx('正常')} · ${tx('最后成功 {t}', { t: fmtWhen(h.lastOkAt) })}`;
       } else {
         meta = tx('已启用 · 待发送');
       }
@@ -1188,14 +1264,15 @@ function fmtMsShort(ms) {
   return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
 }
 
-/** 内联 SVG 双轴折线图：可用率(绿, 0-100) + 平均延迟(蓝, 自适应) */
-function drawChart(ser) {
-  const W = 900, H = 200, PAD = { l: 38, r: 44, t: 12, b: 22 };
+/** 内联 SVG 双轴折线图：可用率(绿, 0-100) + 平均延迟(蓝, 自适应)。
+ * 统计页大图与详情弹窗迷你图共用；mountId 为挂载容器 id。 */
+function drawChart(ser, mountId = 'stChart', W = 900, H = 200) {
+  const PAD = { l: 38, r: 44, t: 12, b: 22 };
   const pts = ser.buckets || [];
   const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
   const valid = pts.filter((b) => b.samples > 0);
   if (!valid.length) {
-    $('#stChart').innerHTML = `<div class="empty" style="padding:48px 0;">${tx('暂无数据')}</div>`;
+    $('#' + mountId).innerHTML = `<div class="empty" style="padding:48px 0;">${tx('暂无数据')}</div>`;
     return;
   }
   const maxLat = Math.max(1, ...valid.map((b) => b.latencyAvg || 0));
@@ -1223,7 +1300,7 @@ function drawChart(ser) {
   const t0 = new Date(ser.from), t1 = new Date(ser.to);
   const hm = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
-  $('#stChart').innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="ch-svg">
+  $('#' + mountId).innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="ch-svg">
     ${grid}
     <g class="ch-lat">${seg('latencyAvg', yL)}</g>
     <g class="ch-up">${seg('uptime', yU)}</g>
@@ -1602,10 +1679,20 @@ $('#openDataDir').addEventListener('click', () => {
 });
 $('#openLogDir').addEventListener('click', () => window.aipm.openPath(state.logDir || ''));
 
+// state-changed 高频到达（每轮检测一条），200ms 合并渲染：
+// 短时间多服务商完成检测时不再逐条重建 DOM，打字与选中不被打断
+let renderTimer = null;
+function queueRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => { renderTimer = null; render(); }, 200);
+}
+
 // ---------- 启动 ----------
-window.aipm.onStateChanged((s) => { state = s; render(); });
-window.aipm.getState().then((s) => { state = s; render(); });
+window.aipm.onStateChanged((s) => { state = s; queueRender(); });
+window.aipm.getState().then((s) => { state = s; render(); refreshUptime24(true); });
 window.aipm.getAppVersion().then((v) => { $('#appVersion').textContent = 'V' + v; }).catch(() => {});
+setInterval(() => { void refreshUptime24(); }, 5 * 60 * 1000);
 initSecretClearButtons();
 initStaticIcons();
 render();
+refreshUptime24();

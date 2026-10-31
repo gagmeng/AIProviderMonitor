@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const logger = require('./logger');
 
@@ -60,17 +61,19 @@ function flushSync() {
   }
 }
 
-/** 按块读行，避免把整天的 JSONL 一次读成一个大字符串 */
-function readLines(file, onLine) {
-  let fd;
-  try { fd = fs.openSync(file, 'r'); } catch (e) { return; }
+/** 按块读行（异步版）：每 ~2MB 让出一次事件循环，
+ * 避免大分片统计期间把主进程整个卡住（窗口/托盘/IPC 全部冻结） */
+async function readLinesAsync(file, onLine) {
+  let fh;
+  try { fh = await fsp.open(file, 'r'); } catch (e) { return; }
   try {
     const buf = Buffer.alloc(64 * 1024);
     let leftover = '';
+    let chunks = 0;
     for (;;) {
-      const n = fs.readSync(fd, buf, 0, buf.length, null);
-      if (n <= 0) break;
-      leftover += buf.toString('utf8', 0, n);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, null);
+      if (bytesRead <= 0) break;
+      leftover += buf.toString('utf8', 0, bytesRead);
       let idx;
       while ((idx = leftover.indexOf('\n')) >= 0) {
         const line = leftover.slice(0, idx).replace(/\r$/, '');
@@ -78,10 +81,11 @@ function readLines(file, onLine) {
         if (line.trim()) onLine(line);
       }
       if (leftover.length > 2 * 1024 * 1024) leftover = leftover.slice(-2048);
+      if (++chunks % 32 === 0) await new Promise((r) => setImmediate(r));
     }
     if (leftover.trim()) onLine(leftover.replace(/\r$/, ''));
   } finally {
-    try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+    try { await fh.close(); } catch (e) { /* ignore */ }
   }
 }
 
@@ -146,12 +150,12 @@ function appendModels(dataDir, providerId, checkedAt, details) {
 }
 
 /** 读取某服务商指定时间范围内的单模型记录 */
-function readModelRange(dataDir, providerId, fromTs, toTs) {
+async function readModelRange(dataDir, providerId, fromTs, toTs) {
   flushSync();
   const dir = historyDir(dataDir);
   const out = [];
   let files;
-  try { files = fs.readdirSync(dir).filter((f) => /^mhist-\d{8}\.jsonl$/.test(f)).sort(); }
+  try { files = (await fsp.readdir(dir)).filter((f) => /^mhist-\d{8}\.jsonl$/.test(f)).sort(); }
   catch (e) { return out; }
 
   const fromKey = dayKey(fromTs);
@@ -159,7 +163,7 @@ function readModelRange(dataDir, providerId, fromTs, toTs) {
   for (const f of files) {
     const key = f.slice(6, 14);
     if (key < fromKey || key > toKey) continue;
-    readLines(path.join(dir, f), (line) => {
+    await readLinesAsync(path.join(dir, f), (line) => {
       try {
         const r = JSON.parse(line);
         if (r.id === Number(providerId) && r.t >= fromTs && r.t <= toTs) out.push(r);
@@ -173,10 +177,10 @@ function readModelRange(dataDir, providerId, fromTs, toTs) {
  * 单模型可用率统计。
  * 返回 { rangeHours, from, to, models: [{ mid, samples, ok, rate }] }（按 rate 升序）。
  */
-function modelRates(dataDir, providerId, { hours = 24 } = {}) {
+async function modelRates(dataDir, providerId, { hours = 24 } = {}) {
   const to = Date.now();
   const from = to - hours * 3600 * 1000;
-  const recs = readModelRange(dataDir, providerId, from, to);
+  const recs = await readModelRange(dataDir, providerId, from, to);
   const map = new Map();
   for (const r of recs) {
     if (!map.has(r.mid)) map.set(r.mid, { samples: 0, ok: 0 });
@@ -193,12 +197,12 @@ function modelRates(dataDir, providerId, { hours = 24 } = {}) {
 }
 
 /** 读取指定时间范围内的全部记录（按天分片定位，避免全量扫描） */
-function readRange(dataDir, fromTs, toTs) {
+async function readRange(dataDir, fromTs, toTs) {
   flushSync();
   const dir = historyDir(dataDir);
   const out = [];
   let files;
-  try { files = fs.readdirSync(dir).filter((f) => /^hist-\d{8}\.jsonl$/.test(f)).sort(); }
+  try { files = (await fsp.readdir(dir)).filter((f) => /^hist-\d{8}\.jsonl$/.test(f)).sort(); }
   catch (e) { return out; }
 
   const fromKey = dayKey(fromTs);
@@ -206,12 +210,14 @@ function readRange(dataDir, fromTs, toTs) {
   for (const f of files) {
     const key = f.slice(5, 13);
     if (key < fromKey || key > toKey) continue;
-    readLines(path.join(dir, f), (line) => {
+    await readLinesAsync(path.join(dir, f), (line) => {
       try {
         const r = JSON.parse(line);
         if (r.t >= fromTs && r.t <= toTs) out.push(r);
       } catch (e) { /* 跳过损坏行 */ }
     });
+    // 分片之间也让出一次事件循环，多分片统计时界面保持可响应
+    await new Promise((r) => setImmediate(r));
   }
   out.sort((a, b) => a.t - b.t);
   return out;
@@ -228,10 +234,10 @@ function percentile(sorted, p) {
  * 返回 { rangeHours, overall, perProvider: [...] }
  * 可用率定义：status==='up' 的样本数 / 总样本数
  */
-function summarize(dataDir, { hours = 24, providerId = null } = {}) {
+async function summarize(dataDir, { hours = 24, providerId = null } = {}) {
   const to = Date.now();
   const from = to - hours * 3600 * 1000;
-  let recs = readRange(dataDir, from, to);
+  let recs = await readRange(dataDir, from, to);
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
 
   const byProvider = new Map();
@@ -336,10 +342,10 @@ function summarize(dataDir, { hours = 24, providerId = null } = {}) {
  * 生成用于折线图的分桶序列。
  * 返回 { buckets: [{ t, uptime, latencyAvg, samples }], bucketMs }
  */
-function series(dataDir, { hours = 24, providerId = null, buckets = 48 } = {}) {
+async function series(dataDir, { hours = 24, providerId = null, buckets = 48 } = {}) {
   const to = Date.now();
   const from = to - hours * 3600 * 1000;
-  let recs = readRange(dataDir, from, to);
+  let recs = await readRange(dataDir, from, to);
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
 
   const bucketMs = Math.max(60000, Math.floor((to - from) / buckets));
@@ -382,10 +388,10 @@ function prune(dataDir, keepDays = 30) {
 }
 
 /** 导出为 CSV（供报告下载） */
-function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
+async function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
   const to = Date.now();
   const from = to - hours * 3600 * 1000;
-  let recs = readRange(dataDir, from, to);
+  let recs = await readRange(dataDir, from, to);
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
   const head = ['time', 'providerId', 'name', 'status', 'latencyMs', 'modelsTotal', 'available', 'unavailable', 'unprobed', 'error'];
   const esc = (v) => {

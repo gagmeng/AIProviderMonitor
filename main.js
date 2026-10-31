@@ -1,12 +1,14 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu, Tray, shell, dialog, globalShortcut, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, shell, dialog, globalShortcut, clipboard, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const pkg = require('./package.json');
 const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL, normalizeGlobal } = require('./src/store');
 const logger = require('./src/logger');
 const { Scheduler } = require('./src/scheduler');
-const { notifyModelChange, notifyAlert, sendTest, getNotifyHealth, resetHealth } = require('./src/notifier');
+const notifier = require('./src/notifier');
+const { notifyModelChange, notifyAlert, sendTest, getNotifyHealth, resetHealth } = notifier;
+const { detect } = require('./src/detector');
 const backup = require('./src/backup');
 const transfer = require('./src/transfer');
 const { formatDuration } = require('./src/durfmt');
@@ -45,9 +47,27 @@ function persist() {
   }
 }
 
+// 检测结果的高频落盘走 2 秒防抖：providers.json 里同时装着三份模型列表
+// （available/unavailable/baseline），大服务商每轮全量 stringify+写盘代价高。
+// 配置类 IPC（增删改/还原/导入）仍走即时 persist——它们依赖写入结果做回滚。
+let persistTimer = null;
+function persistSoon(delay = 2000) {
+  if (persistTimer || persistBlocked) return;
+  persistTimer = setTimeout(() => { persistTimer = null; persist(); }, delay);
+}
+function flushPersistSoon() {
+  if (!persistTimer) return;
+  clearTimeout(persistTimer);
+  persistTimer = null;
+  persist();
+}
+
 function load() {
   try {
-    db = loadAll();
+    const loaded = loadAll();
+    db = { global: loaded.global, providers: loaded.providers };
+    // 手改配置里校验不过的条目已在 loadAll 里停用，这里把原因写进日志
+    for (const w of loaded.warnings || []) logger.warn(`[加载] ${w}`);
     persistBlocked = false;
   } catch (e) {
     persistBlocked = true;
@@ -310,7 +330,26 @@ async function buildReportXLSX(sum) {
   return wb.xlsx.writeBuffer();
 }
 
-/** 托盘图标提示：汇总整体健康度 */
+/** 托盘图标提示 + 状态染色：红=有离线/鉴权失败，橙=有异常，绿=全部在线 */
+const trayIconCache = {};
+const TRAY_BADGE_FILES = { ok: 'icon-ok.png', warn: 'icon-warn.png', err: 'icon-err.png' };
+function trayLevel() {
+  const checked = db.providers.filter((p) => p.enabled !== false && p.status && p.status !== 'unknown');
+  if (!checked.length) return 'idle';
+  if (checked.some((p) => p.status === 'down' || p.status === 'authfail')) return 'err';
+  if (checked.some((p) => p.status === 'degraded')) return 'warn';
+  return 'ok';
+}
+function trayImageFor(level) {
+  const file = TRAY_BADGE_FILES[level];
+  if (!file) return null;
+  if (!trayIconCache[level]) {
+    const p = path.join(__dirname, 'assets', file);
+    if (!fs.existsSync(p)) return null;   // gen-icons 未跑过时回退基础图标
+    trayIconCache[level] = nativeImage.createFromPath(p);
+  }
+  return trayIconCache[level];
+}
 function updateTrayStatus() {
   if (!tray) return;
   try {
@@ -320,6 +359,8 @@ function updateTrayStatus() {
     const auth = db.providers.filter((p) => p.status === 'authfail').length;
     const unread = unreadAlerts.length;
     tray.setToolTip(`AI Provider Monitor\n在线 ${up} · 异常 ${deg} · 离线 ${down}${auth ? ` · 鉴权失败 ${auth}` : ''}${unread ? `\n未读告警 ${unread} 条（点击托盘查看）` : ''}`);
+    const img = trayImageFor(trayLevel());
+    if (img) tray.setImage(img);
   } catch (e) { /* ignore */ }
 }
 
@@ -327,7 +368,7 @@ scheduler.on('result', (provider, result, reason) => {
   const out = applyResult(provider, result, reason) || {};
   selfmonObserve(provider, result);
   if (out.alerts && out.alerts.length) pushUnread(provider, out.alerts);
-  persist();
+  persistSoon();
   send('state-changed', publicState());
 });
 scheduler.on('state', () => { selfmonQueue(); send('state-changed', publicState()); });
@@ -342,11 +383,29 @@ function pushUnread(provider, alertsArr) {
   for (const a of alertsArr) {
     unreadAlerts.push({ id: ++unreadSeq, t: now, providerId: provider.id, name: provider.name, kind: a.kind, title: a.title });
   }
-  while (unreadAlerts.length > 50) unreadAlerts.shift();
+  trimUnread();
   const first = alertsArr[0];
   maybeBalloon('AI Provider Monitor', `${provider.name}：${first.title}${alertsArr.length > 1 ? ` 等 ${alertsArr.length} 条` : ''}`);
   updateTrayStatus();
 }
+
+function trimUnread() {
+  while (unreadAlerts.length > 50) unreadAlerts.shift();
+}
+
+// 通知通道连续失败（notifier.noteResult 达到里程碑时回调）：转成未读告警 + 气泡，
+// 否则「告警发不出去」只有日志一行，不看通知页永远不知道
+notifier.onChannelUnhealthy((ch, fails, err) => {
+  const label = notifier.CHANNEL_LABEL[ch] || ch;
+  unreadAlerts.push({
+    id: ++unreadSeq, t: Date.now(), providerId: null,
+    name: `通知通道：${label}`, kind: 'notifyFail', title: `连续失败 ${fails} 次`
+  });
+  trimUnread();
+  maybeBalloon('通知通道异常', `${label} 连续失败 ${fails} 次：${err || '未知错误'}`);
+  updateTrayStatus();
+  send('state-changed', publicState());
+});
 
 function maybeBalloon(title, content) {
   try {
@@ -423,7 +482,7 @@ async function maybeDailyMail() {
   g.lastReportDay = day;
   persist();
   try {
-    const sum = history.summarize(DATA_DIR, { hours: 24 });
+    const sum = await history.summarize(DATA_DIR, { hours: 24 });
     await sendMail(g, { subject: `AI Provider 日报 ${day}（可用率 ${sum.overall.uptime}%）`, html: buildReportHTML(sum) });
     logger.info(`[邮件] 日报已发送至 ${g.mailTo}`);
   } catch (e) {
@@ -482,7 +541,7 @@ function publicState() {
     dataFile: DATA_FILE,
     dataDir: DATA_DIR,
     logDir: logger.LOG_DIR,
-    unread: { count: unreadAlerts.length, items: unreadAlerts.slice(-5).reverse() },
+    unread: { count: unreadAlerts.length, items: unreadAlerts.slice().reverse() },
     selfmon: { slowChecks: selfmon.slowChecks, queueWarns: selfmon.queueWarns, notifyHealth: getNotifyHealth(), circuits: scheduler.circuitInfo() }
   };
 }
@@ -495,10 +554,9 @@ ipcMain.handle('logs:get', () => logger.recent());
 ipcMain.handle('logs:clear', () => { logger.clear(); return { ok: true }; });
 logger.subscribe((line) => send('log:line', line));
 
-ipcMain.handle('provider:add', (e, data) => {
-  const id = newNumericId(new Set(db.providers.map((p) => p.id)));
-  const p = {
-    id,
+/** 渲染层表单 → Provider 配置对象（provider:add 与连接测试共用同一套默认值） */
+function buildProviderInput(data) {
+  return {
     name: String(data.name || '').trim(),
     url: String(data.url || '').trim().replace(/\/+$/, ''),
     apiKey: String(data.apiKey || '').trim(),
@@ -546,21 +604,10 @@ ipcMain.handle('provider:add', (e, data) => {
     probeCursor: 0,
     modelBaseline: []
   };
-  try { validateProviderConfig(p); } catch (err) { return { ok: false, error: err.message }; }
-  db.providers.push(p);
-  const saved = persist();
-  if (!saved.ok) { db.providers.pop(); return saved; }
-  if (p.enabled !== false) scheduler.schedule(p);
-  logger.info(`新增 Provider [${p.name}] ${p.url}`);
-  send('state-changed', publicState());
-  return { ok: true, id };
-});
+}
 
-ipcMain.handle('provider:update', (e, { id, data }) => {
-  const p = db.providers.find((x) => x.id === Number(id));
-  if (!p) return { ok: false, error: 'Provider 不存在' };
-  const periodChanged = Number(data.intervalSec) !== Number(p.intervalSec);
-  const before = { ...p, tags: [...(p.tags || [])] };
+/** 编辑表单覆盖到已有 Provider（provider:update 与连接测试共用）：undefined=保留，空串=清除 */
+function applyProviderPatch(p, data) {
   Object.assign(p, {
     name: String(data.name || p.name).trim(),
     url: String(data.url || p.url).trim().replace(/\/+$/, ''),
@@ -598,6 +645,27 @@ ipcMain.handle('provider:update', (e, { id, data }) => {
     insecureSkipVerify: data.insecureSkipVerify === undefined ? (p.insecureSkipVerify ?? null)
       : (data.insecureSkipVerify === true ? true : data.insecureSkipVerify === false ? false : null)
   });
+}
+
+ipcMain.handle('provider:add', (e, data) => {
+  const id = newNumericId(new Set(db.providers.map((p) => p.id)));
+  const p = { id, ...buildProviderInput(data) };
+  try { validateProviderConfig(p); } catch (err) { return { ok: false, error: err.message }; }
+  db.providers.push(p);
+  const saved = persist();
+  if (!saved.ok) { db.providers.pop(); return saved; }
+  if (p.enabled !== false) scheduler.schedule(p);
+  logger.info(`新增 Provider [${p.name}] ${p.url}`);
+  send('state-changed', publicState());
+  return { ok: true, id };
+});
+
+ipcMain.handle('provider:update', (e, { id, data }) => {
+  const p = db.providers.find((x) => x.id === Number(id));
+  if (!p) return { ok: false, error: 'Provider 不存在' };
+  const periodChanged = Number(data.intervalSec) !== Number(p.intervalSec);
+  const before = { ...p, tags: [...(p.tags || [])] };
+  applyProviderPatch(p, data);
   try { validateProviderConfig(p); } catch (err) { Object.assign(p, before); return { ok: false, error: err.message }; }
   const saved = persist();
   if (!saved.ok) { Object.assign(p, before); return saved; }
@@ -616,6 +684,7 @@ ipcMain.handle('provider:delete', (e, id) => {
   const saved = persist();
   if (!saved.ok) { db.providers.splice(i, 0, p); return saved; }
   scheduler.cancel(p.id);
+  scheduler.resetCircuit(p.id);
   alerts.resetState(p.id);
   logger.info(`删除 Provider [${p.name}]`);
   send('state-changed', publicState());
@@ -632,7 +701,7 @@ ipcMain.handle('provider:deleteMany', (e, ids) => {
   });
   const saved = persist();
   if (!saved.ok) { db.providers = before; return saved; }
-  for (const p of removed) { scheduler.cancel(p.id); alerts.resetState(p.id); }
+  for (const p of removed) { scheduler.cancel(p.id); scheduler.resetCircuit(p.id); alerts.resetState(p.id); }
   logger.info(`批量删除 ${removed.length} 个 Provider`);
   send('state-changed', publicState());
   return { ok: true, removed: removed.length };
@@ -651,6 +720,41 @@ ipcMain.handle('provider:copyKey', (e, id) => {
   if (!p || !p.apiKey) return { ok: false, error: '未保存 API Key' };
   clipboard.writeText(String(p.apiKey));
   return { ok: true };
+});
+
+/**
+ * 连接测试：不保存、不入调度，直接跑一轮 detect 返回摘要。
+ * 编辑已有服务商时以已存配置为底（含明文 Key）再套表单补丁——
+ * 否则密钥留空（=不修改语义）会让测试用空 Key 误报鉴权失败。
+ */
+ipcMain.handle('provider:testConn', async (e, { id, data } = {}) => {
+  const existing = Number(id) ? db.providers.find((x) => x.id === Number(id)) : null;
+  let p;
+  if (existing) {
+    p = JSON.parse(JSON.stringify(existing));
+    applyProviderPatch(p, data || {});
+  } else {
+    p = { id: 0, ...buildProviderInput(data || {}) };
+  }
+  p.enabled = true;
+  try { validateProviderConfig(p); } catch (err) { return { ok: false, error: err.message }; }
+  try {
+    const r = await detect(p, { globalCfg: db.global });
+    return {
+      ok: true,
+      result: {
+        status: r.status, latency: r.latency, modelsTotal: r.modelsTotal,
+        available: (r.modelsAvailable || []).length,
+        unavailable: (r.modelsUnavailable || []).length,
+        unprobed: (r.modelsUnprobed || []).length,
+        error: r.error || null,
+        durationMs: r.durationMs,
+        sampleFailures: (r.modelDetails || []).filter((d) => d && d.ok === false).slice(0, 3).map((d) => `${d.id}：${d.note || ''}`)
+      }
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 ipcMain.handle('provider:checkNow', (e, ids) => {
@@ -689,6 +793,7 @@ ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
     p.modelBaseline = [];
     p.alertRuntime = null;
     alerts.resetState(p.id);
+    scheduler.resetCircuit(p.id);
   }
   const saved = persist();
   if (!saved.ok) {
@@ -767,19 +872,19 @@ ipcMain.handle('open:path', (e, p) => { if (!p) return { ok: false, error: '路�
 ipcMain.handle('app:version', () => pkg.version || app.getVersion());
 
 // ---------- 历史统计 ----------
-ipcMain.handle('history:summary', (e, { hours, providerId } = {}) => {
-  try { return { ok: true, ...history.summarize(DATA_DIR, { hours: Number(hours) || 24, providerId }) }; }
+ipcMain.handle('history:summary', async (e, { hours, providerId } = {}) => {
+  try { return { ok: true, ...(await history.summarize(DATA_DIR, { hours: Number(hours) || 24, providerId })) }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
 
-ipcMain.handle('history:series', (e, { hours, providerId, buckets } = {}) => {
-  try { return { ok: true, ...history.series(DATA_DIR, { hours: Number(hours) || 24, providerId, buckets: Number(buckets) || 48 }) }; }
+ipcMain.handle('history:series', async (e, { hours, providerId, buckets } = {}) => {
+  try { return { ok: true, ...(await history.series(DATA_DIR, { hours: Number(hours) || 24, providerId, buckets: Number(buckets) || 48 })) }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
 
 ipcMain.handle('history:exportCSV', async (e, { hours, providerId } = {}) => {
   try {
-    const content = history.exportCSV(DATA_DIR, { hours: Number(hours) || 24, providerId });
+    const content = await history.exportCSV(DATA_DIR, { hours: Number(hours) || 24, providerId });
     const r = await dialog.showSaveDialog(win, {
       title: '导出历史记录',
       defaultPath: `aipm-history-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -797,8 +902,8 @@ ipcMain.handle('history:prune', (e, days) => {
   catch (err) { return { ok: false, error: err.message }; }
 });
 
-ipcMain.handle('history:modelRates', (e, { providerId, hours } = {}) => {
-  try { return { ok: true, ...history.modelRates(DATA_DIR, providerId, { hours: Number(hours) || 24 }) }; }
+ipcMain.handle('history:modelRates', async (e, { providerId, hours } = {}) => {
+  try { return { ok: true, ...(await history.modelRates(DATA_DIR, providerId, { hours: Number(hours) || 24 })) }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
 
@@ -822,7 +927,7 @@ ipcMain.handle('provider:bulkUpdate', (e, { ids, patch } = {}) => {
   if (!targets.length) return { ok: false, error: '未选中任何服务商' };
   const tri = (v) => (v === true || v === false ? v : undefined);
   const clean = {};
-  if (patch && Number(patch.intervalSec) > 0) clean.intervalSec = Math.max(5, Math.round(Number(patch.intervalSec)));
+  if (patch && Number(patch.intervalSec) > 0) clean.intervalSec = Math.min(31536000, Math.max(5, Math.round(Number(patch.intervalSec))));
   if (patch) {
     const n = tri(patch.notifyOnModelChange);
     if (n !== undefined) clean.notifyOnModelChange = n;
@@ -856,7 +961,7 @@ ipcMain.handle('provider:bulkUpdate', (e, { ids, patch } = {}) => {
 ipcMain.handle('mail:test', async () => {
   try {
     const { sendMail } = require('./src/mailer');
-    const sum = history.summarize(DATA_DIR, { hours: 24 });
+    const sum = await history.summarize(DATA_DIR, { hours: 24 });
     await sendMail(db.global, { subject: 'AI Provider Monitor 邮件测试', html: buildReportHTML(sum) });
     logger.info('[邮件] 测试邮件发送成功');
     return { ok: true };
@@ -872,7 +977,7 @@ ipcMain.handle('logs:files', () => {
 // ---------- 状态报告导出 ----------
 ipcMain.handle('report:export', async (e, { format = 'html', hours = 24 } = {}) => {
   try {
-    const sum = history.summarize(DATA_DIR, { hours: Number(hours) || 24 });
+    const sum = await history.summarize(DATA_DIR, { hours: Number(hours) || 24 });
     const defExt = format === 'csv' ? 'csv' : 'html';
     const r = await dialog.showSaveDialog(win, {
       title: '导出状态报告',
@@ -947,11 +1052,13 @@ ipcMain.handle('backup:restore', (e, { filePath, mode }) => {
     const res = backup.restoreFrom(db, filePath, mode === 'merge' ? 'merge' : 'overwrite');
     const saved = persist();
     if (!saved.ok) { db = JSON.parse(before); return saved; }
-    // 重建全部定时器并刷新前端
+    // 重建全部定时器并刷新前端；旧熔断记录对应的 provider 可能已不在列表里，一并清空
     scheduler.removeAll();
+    scheduler.resetAllCircuits();
     for (const p of db.providers) {
       if (p.enabled !== false) scheduler.schedule(p);
     }
+    updateTrayStatus();
     send('state-changed', publicState());
     return { ok: true, ...res };
   } catch (err) {
@@ -1023,9 +1130,10 @@ ipcMain.handle('transfer:apply', (e, { items, mode }) => {
     const res = transfer.applyImport(db, items || [], mode === 'append' ? 'append' : 'merge');
     const saved = persist();
     if (!saved.ok) { db = JSON.parse(before); return saved; }
-    // 新增的服务商加入轮循
+    // 全量重排：新增的补上定时器，合并更新过周期的也按新周期重排
+    // （schedule 内部对周期未变化的已有定时器是 no-op，不会打扰既有节奏）
     for (const p of db.providers) {
-      if (p.enabled !== false && !scheduler.timers.has(p.id)) scheduler.schedule(p);
+      if (p.enabled !== false) scheduler.schedule(p);
     }
     send('state-changed', publicState());
     return { ok: true, ...res };
@@ -1045,7 +1153,7 @@ function createWindow() {
     show: false,
     backgroundColor: '#f2f2f7',
     title: 'AI Provider Monitor',
-    icon: path.join(__dirname, 'build', 'icon.ico'),
+    icon: path.join(__dirname, 'assets', 'icon.ico'),   // assets/ 随 asar 打包；build/ 是构建资源目录会被排除
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1106,7 +1214,7 @@ function createWindow() {
 
 function createTray() {
   try {
-    const iconPath = path.join(__dirname, 'build', 'icon.ico');
+    const iconPath = path.join(__dirname, 'assets', 'icon.ico');   // 同上：构建资源 build/ 不进 asar
     if (!fs.existsSync(iconPath)) return;
     tray = new Tray(iconPath);
     tray.setToolTip('AI Provider Monitor');
@@ -1164,6 +1272,7 @@ if (process.argv.includes('--smoke-test') && fs.existsSync(path.join(__dirname, 
     app.on('before-quit', () => {
       quitting = true;
       scheduler.stop();
+      flushPersistSoon();   // 防抖窗口内退出，把最后一轮检测结果落盘
       try { history.flushSync(); } catch (e) { /* ignore */ }
       try { logger.flushSync(); } catch (e) { /* ignore */ }
       try { globalShortcut.unregisterAll(); } catch (e) { /* ignore */ }

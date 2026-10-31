@@ -123,6 +123,12 @@ class Scheduler {
     if (t) { clearTimeout(t.handle); this.timers.delete(id); }
   }
 
+  /** 清除某服务商的熔断状态（删除/停用后残留的失败计数与开启窗口不再有意义） */
+  resetCircuit(id) { this.circuits.delete(id); }
+
+  /** 清空全部熔断状态（覆盖还原后旧记录对应的 provider 可能已不存在） */
+  resetAllCircuits() { this.circuits.clear(); }
+
   removeAll() { for (const id of [...this.timers.keys()]) this.cancel(id); }
 
   stop() { this.stopped = true; this.removeAll(); }

@@ -1,7 +1,9 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { ensureUniqueProviderIds } = require('./providerSchema');
+// 注意：这里不能 require logger——logger 顶层从本模块取 DATA_DIR，会形成循环依赖。
+// 加载告警通过 loadAll() 返回值里的 warnings 交给 main.js 记日志。
+const { ensureUniqueProviderIds, normalizeProvider, validateProviderConfig } = require('./providerSchema');
 
 const DATA_DIR = process.env.AIPM_DATA_DIR
   || (process.env.PORTABLE_EXECUTABLE_DIR
@@ -189,8 +191,16 @@ function normalizeGlobal(rawGlobal = {}) {
     g[k] = Number.isFinite(n) ? Math.round(Math.min(max, Math.max(min, n))) : dflt;
   }
   for (const [k, dflt] of Object.entries(TIME_FIELDS)) {
-    const v = typeof g[k] === 'string' ? g[k].trim() : '';
-    g[k] = HM_RE.test(v) ? v : dflt;
+    let v = typeof g[k] === 'string' ? g[k].trim() : '';
+    if (HM_RE.test(v)) {
+      // 补零成两位 HH:MM：maybeDailyMail 用字符串比较判断发送时刻，
+      // '9:05' >= '08:00' 恒真会让日报在任何时刻都触发补发
+      const [h, m] = v.split(':');
+      v = `${h.padStart(2, '0')}:${m}`;
+    } else {
+      v = dflt;
+    }
+    g[k] = v;
   }
   for (const [k, allowed] of Object.entries(ENUM_FIELDS)) {
     if (!allowed.includes(g[k])) g[k] = DEFAULT_GLOBAL[k];
@@ -225,7 +235,19 @@ function loadAll() {
     }
     const g = normalizeGlobal(raw.global);
     const list = ensureUniqueProviderIds(Array.isArray(raw.providers) ? raw.providers : []);
-    return { global: g, providers: list };
+    // 手改文件可能带来坏正则 / 坏 URL：逐条校验（校验用归一化副本，不改写已保存的运行态），
+    // 非法条目停用而不是丢弃——保留用户数据，同时防止 detector 每轮在 filterIgnoredModels
+    // 里抛异常导致该服务商状态永久卡在旧值。
+    const warnings = [];
+    for (const p of list) {
+      try {
+        validateProviderConfig(normalizeProvider(p));
+      } catch (e) {
+        p.enabled = false;
+        warnings.push(`「${p.name || `#${p.id}`}」配置校验失败，已停用：${e.message}`);
+      }
+    }
+    return { global: g, providers: list, warnings };
   } catch (e) {
     const bad = `${DATA_FILE}.corrupt-${Date.now()}`;
     try { fs.copyFileSync(DATA_FILE, bad); } catch (e2) { /* 副本失败也不改原文件 */ }

@@ -662,7 +662,7 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     history.append(dir, { id: 1, name: 'P1' }, mk(now - 60000, 'down', null));
     history.append(dir, { id: 2, name: 'P2' }, mk(now, 'up', 50));
 
-    const sum = history.summarize(dir, { hours: 24 });
+    const sum = await history.summarize(dir, { hours: 24 });
     assert.strictEqual(sum.overall.samples, 4);
     assert.strictEqual(sum.overall.providers, 2);
     const p1 = sum.perProvider.find((x) => x.id === 1);
@@ -671,13 +671,13 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     assert.strictEqual(p1.latencyAvg, 150);
     assert.ok(p1.downMs > 0, '应统计到故障时长');
 
-    const ser = history.series(dir, { hours: 24, buckets: 12 });
+    const ser = await history.series(dir, { hours: 24, buckets: 12 });
     assert.strictEqual(ser.buckets.length, 12);
 
-    const csv = history.exportCSV(dir, { hours: 24 });
+    const csv = await history.exportCSV(dir, { hours: 24 });
     assert.ok(csv.split('\r\n').length >= 5, 'CSV 应含表头与 4 行数据');
 
-    const filtered = history.summarize(dir, { hours: 24, providerId: 2 });
+    const filtered = await history.summarize(dir, { hours: 24, providerId: 2 });
     assert.strictEqual(filtered.overall.samples, 1, 'providerId 过滤应生效');
   });
 

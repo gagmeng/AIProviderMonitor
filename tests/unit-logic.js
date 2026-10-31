@@ -10,16 +10,9 @@ process.env.AIPM_DATA_DIR = TMP;
 
 let passed = 0;
 let failed = 0;
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  PASS  ${name}`);
-  } catch (e) {
-    failed++;
-    console.error(`  FAIL  ${name}\n        ${e.stack || e.message}`);
-  }
-}
+// 用例注册表 + 异步执行：history 读取路径异步化后，部分用例需要 await
+const testCases = [];
+function test(name, fn) { testCases.push([name, fn]); }
 
 test('scheduler: 月/年周期不会超过 setTimeout 上限', () => {
   const { clampTimerMs, MAX_TIMER_MS } = require('../src/scheduler');
@@ -160,14 +153,14 @@ test('store: 损坏配置不当成空库，也不改原文件', () => {
   assert.strictEqual(empty.global.smtpInsecureSkipVerify, false);
 });
 
-test('history: 鉴权失败单独计数，且写入后立即可读', () => {
+test('history: 鉴权失败单独计数，且写入后立即可读', async () => {
   const history = require('../src/history');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-h-'));
   history.append(dir, { id: 1, name: 'P' }, {
     checkedAt: Date.now(), status: 'authfail', latency: 3,
     modelsTotal: 1, modelsAvailable: [], modelsUnavailable: ['m'], modelsUnprobed: [], error: '401'
   });
-  const sum = history.summarize(dir, { hours: 24 });
+  const sum = await history.summarize(dir, { hours: 24 });
   assert.strictEqual(sum.overall.samples, 1);
   assert.strictEqual(sum.overall.authCount, 1);
   assert.strictEqual(sum.perProvider[0].authCount, 1);
@@ -263,7 +256,7 @@ test('backup: 还原跳过非法条目，global 未知键被丢弃', () => {
   assert.strictEqual(target.global.alertQuietStart, '23:00', '非法时间回退默认');
 });
 
-test('history: 故障次数 / MTTR / 最长故障', () => {
+test('history: 故障次数 / MTTR / 最长故障', async () => {
   const history = require('../src/history');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-sla-'));
   const mk = (id, name) => ({ id, name });
@@ -273,7 +266,7 @@ test('history: 故障次数 / MTTR / 最长故障', () => {
   const seq = [['up', 10], ['down', 20], ['up', 30], ['degraded', 10], ['up', 30]];
   let t = base;
   for (const [st, mins] of seq) { history.append(dir, mk(7, 'sla'), rec(t, st)); t += mins * 60000; }
-  const p = history.summarize(dir, { hours: 24 }).perProvider.find((x) => x.id === 7);
+  const p = (await history.summarize(dir, { hours: 24 })).perProvider.find((x) => x.id === 7);
   assert.strictEqual(p.incidents, 2, '两次故障事件');
   assert.strictEqual(p.mttrMs, 15 * 60000, 'MTTR 为 (20+10)/2 分钟');
   assert.strictEqual(p.maxOutageMs, 20 * 60000, '最长故障 20 分钟');
@@ -365,5 +358,71 @@ test('notifier: 健康状态落盘后重启仍在，resetHealth 清空对应通�
   assert.strictEqual(JSON.parse(fs.readFileSync(healthFile, 'utf8')).dingtalk, undefined);
 });
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+// ---------- v1.4.1：加载校验 / 坏正则降级 / 时间补零 / 通道故障回调 ----------
+
+test('store: loadAll 停用手改坏正则条目并给出告警（数据不丢弃）', () => {
+  const store = require('../src/store');
+  fs.mkdirSync(path.dirname(store.DATA_FILE), { recursive: true });
+  fs.writeFileSync(store.DATA_FILE, JSON.stringify({
+    global: store.DEFAULT_GLOBAL,
+    providers: [
+      { id: 1, name: 'Good', url: 'http://a', intervalSec: 60, enabled: true },
+      { id: 2, name: 'BadRegex', url: 'http://b', intervalSec: 60, enabled: true, modelIgnorePattern: '(unclosed' }
+    ]
+  }), 'utf8');
+  const loaded = store.loadAll();
+  assert.strictEqual(loaded.providers.length, 2, '条目保留不丢弃');
+  assert.strictEqual(loaded.providers[0].enabled, true);
+  assert.strictEqual(loaded.providers[1].enabled, false, '非法条目已停用，detector 不会再每轮抛异常');
+  assert.ok(Array.isArray(loaded.warnings) && loaded.warnings.some((w) => /BadRegex/.test(w)), '告警交给 main 记日志');
+  fs.unlinkSync(store.DATA_FILE);
+});
+
+test('detector: 坏正则忽略规则降级为跳过本轮规则，不抛异常', () => {
+  const { filterIgnoredModels } = require('../src/detector');
+  const models = ['gpt-4', 'o3'];
+  assert.deepStrictEqual(filterIgnoredModels(models, '(unclosed'), models, '坏正则不抛、不过滤');
+  assert.deepStrictEqual(filterIgnoredModels(models, '^gpt'), ['o3'], '好正则照常过滤');
+});
+
+test('store: 时间字段补零成两位（日报字符串比较依赖）', () => {
+  const store = require('../src/store');
+  const g = store.normalizeGlobal({ dailyReportTime: '9:05', alertQuietStart: '7:30', alertQuietEnd: '23:0' });
+  assert.strictEqual(g.dailyReportTime, '09:05', "9:05 补成 09:05，'9:05' >= '08:00' 的字符串陷阱消除");
+  assert.strictEqual(g.alertQuietStart, '07:30');
+  assert.strictEqual(g.alertQuietEnd, '07:00', '分钟位不合法回退默认');
+});
+
+test('notifier: 通道连续失败跨过里程碑触发回调（3 次起、之后每 5 次）', () => {
+  const notifier = require('../src/notifier');
+  const calls = [];
+  notifier.onChannelUnhealthy((ch, fails, err) => calls.push([ch, fails, err]));
+  for (let i = 0; i < 3; i++) notifier.noteResult('slack', false, new Error('boom'));
+  assert.strictEqual(calls.length, 1, '第 3 次失败首次告警');
+  assert.strictEqual(calls[0][0], 'slack');
+  assert.strictEqual(calls[0][1], 3);
+  assert.ok(/boom/.test(calls[0][2]));
+  for (let i = 0; i < 4; i++) notifier.noteResult('slack', false, new Error('boom'));
+  assert.strictEqual(calls.length, 1, '4-7 次之间不重复告警');
+  notifier.noteResult('slack', false, new Error('boom'));   // 第 8 次：(8-3) % 5 === 0
+  assert.strictEqual(calls.length, 2, '第 8 次再次告警');
+  notifier.noteResult('slack', true);
+  assert.strictEqual(notifier.getNotifyHealth().slack.fails, 0, '成功清零');
+  notifier.onChannelUnhealthy(null);
+  notifier.resetHealth(['slack']);
+});
+
+(async () => {
+  for (const [name, fn] of testCases) {
+    try {
+      await fn();
+      passed++;
+      console.log(`  PASS  ${name}`);
+    } catch (e) {
+      failed++;
+      console.error(`  FAIL  ${name}\n        ${e.stack || e.message}`);
+    }
+  }
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+})();

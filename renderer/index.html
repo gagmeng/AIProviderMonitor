@@ -1081,8 +1081,11 @@
           <input type="text" id="fNote" placeholder="可选" />
         </div>
         <div class="form-error" id="fError"></div>
+        <div class="hint" id="fTestHint" data-i18n-skip></div>
       </div>
       <div class="modal-foot">
+        <button class="btn ghost" id="fTestConn">测试连接</button>
+        <span class="foot-spacer"></span>
         <button class="btn ghost" id="pmCancel">取消</button>
         <button class="btn primary" id="pmSave">保存</button>
       </div>
@@ -1099,6 +1102,10 @@
       <div class="modal-body">
         <div class="dm-banner" id="dmBanner" data-i18n-skip></div>
         <div class="detail-meta" id="dmMeta" data-i18n-skip></div>
+        <div class="dm-section" id="dmChartWrap" style="display:none;">
+          <div class="dm-sec-title">近 24 小时</div>
+          <div class="dm-chart" id="dmChart"></div>
+        </div>
         <div class="dm-section">
           <div class="dm-sec-title">可用模型 <span id="dmAvailCount" class="count-pill"></span></div>
           <div class="model-tags" id="dmAvail" data-i18n-skip></div>
