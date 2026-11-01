@@ -412,6 +412,43 @@ test('notifier: 通道连续失败跨过里程碑触发回调（3 次起、之�
   notifier.resetHealth(['slack']);
 });
 
+test('scheduler: 全局暂停/恢复，恢复后立即到期补检', () => {
+  const { Scheduler } = require('../src/scheduler');
+  const s = new Scheduler({ concurrency: 1 });
+  const prov = { id: 555001, name: 'pz', intervalSec: 60, checkedAt: Date.now() - 600000, enabled: true, url: 'http://unit.test' };
+  s.getProvider = () => prov;
+  s.schedule(prov);
+  s.pause();
+  assert.strictEqual(s.paused, true);
+  s.resume();
+  assert.strictEqual(s.paused, false);
+  const t = s.timers.get(555001);
+  assert.ok(t && t.dueAt - Date.now() < 200, '恢复后应立即到期，错过周期的补检');
+  s.stop();
+  assert.strictEqual(s.timers.size, 0);
+});
+
+test('history: perDay 按天聚合可用率（跨天各自独立）', async () => {
+  const history = require('../src/history');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-pd-'));
+  const mk = (t, status) => ({ checkedAt: t, status, latency: 10, modelsTotal: 1, modelsAvailable: status === 'up' ? ['m'] : [], modelsUnavailable: [], modelsUnprobed: [] });
+  // 键为当日本地零点（perDay 的分桶口径），样本取当天午前午後
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  const today = today0.getTime();
+  const yesterday = today - 86400000;
+  // 今天 1 up + 1 down → 50%；昨天 1 up → 100%；前天无数据
+  history.append(dir, { id: 1, name: 'P' }, mk(today + 3600000, 'up'));
+  history.append(dir, { id: 1, name: 'P' }, mk(today + 7200000, 'down'));
+  history.append(dir, { id: 1, name: 'P' }, mk(yesterday + 3600000, 'up'));
+  const r = await history.perDay(dir, { days: 7, providerId: 1 });
+  const byTs = new Map(r.days.map((d) => [d.t, d.providers[0]]));
+  assert.strictEqual(byTs.get(today).uptime, 50);
+  assert.strictEqual(byTs.get(today).samples, 2);
+  assert.strictEqual(byTs.get(yesterday).uptime, 100);
+  assert.strictEqual(r.days.length, 2, '无数据的天不出现');
+  assert.strictEqual(r.dayMs, 86400000);
+});
+
 (async () => {
   for (const [name, fn] of testCases) {
     try {

@@ -227,7 +227,7 @@ html.dark .search-input:focus { background: var(--card-2); }
 
 /* ---------- 表格 ---------- */
 .table-card { background: var(--card); border-radius: var(--r-lg); box-shadow: var(--shadow-1); overflow: hidden; }
-.row { display: grid; grid-template-columns: 44px minmax(160px,1.5fr) 100px 120px 84px 72px 84px 130px 96px; align-items: center; }
+.row { display: grid; grid-template-columns: 66px minmax(150px,1.5fr) 100px 120px 84px 72px 84px 130px 96px; align-items: center; }
 .table-head {
   padding: 11px 18px; background: var(--card-2); border-bottom: 1px solid var(--sep);
   font-size: 11.5px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .4px;
@@ -768,6 +768,62 @@ html.dark code { background: var(--card-2); }
 .foot-spacer { flex: 1; }
 /* 未读告警上限 50 条：列表内部滚动，避免弹窗撑破视口 */
 #umList { max-height: 56vh; overflow-y: auto; }
+
+/* ===== 分组视图 / 拖拽排序 ===== */
+.group-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 18px; background: var(--card-2); border-bottom: 1px solid var(--sep);
+  font-size: 12.5px; font-weight: 600; cursor: pointer; user-select: none;
+}
+.group-chev { display: flex; color: var(--text-2); }
+.group-meta { color: var(--text-2); font-weight: 400; font-size: 11.5px; margin-left: auto; font-variant-numeric: tabular-nums; }
+/* 选择列：拖拽手柄 + 勾选框。手柄常驻占位（不可拖拽时隐藏），
+   保证两种状态下勾选框位置不跳动；列宽 66px 与名称列拉开距离 */
+.col-sel { display: flex; align-items: center; gap: 8px; padding-right: 5px; }
+.drag-handle { display: flex; color: var(--text-2); opacity: .5; cursor: grab; padding: 2px; flex: none; }
+.drag-handle svg { width: 13px; height: 13px; }
+.drag-handle.spacer { visibility: hidden; cursor: default; }
+.p-row[draggable="true"] { cursor: grab; }
+.p-row.dragging { opacity: .45; }
+.p-row.drag-over { box-shadow: inset 0 2px 0 var(--accent); }
+.btn.on { background: rgba(10,132,255,.12); color: var(--accent); }
+
+/* ===== 90 天可用率色条（status-page 风格） ===== */
+.up-bars { display: grid; grid-template-columns: repeat(auto-fill, minmax(9px, 1fr)); gap: 3px; }
+.up-bar { display: block; height: 14px; border-radius: 3px; }
+.up-bar.l-ok { background: var(--green); }
+.up-bar.l-mid { background: var(--orange); }
+.up-bar.l-bad { background: var(--red); }
+.up-bar.l-none { background: rgba(120,120,128,.15); }
+.dm-bars-hint { font-weight: 400; color: var(--text-2); font-size: 11.5px; margin-left: 8px; }
+
+/* ===== 空状态三步引导 ===== */
+.wizard { display: flex; flex-direction: column; gap: 10px; padding: 16px 6px 20px; }
+.wz-lead { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .4px; padding-left: 4px; }
+.wz-step {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px; background: var(--card-2); border-radius: 12px;
+}
+.wz-step.done { opacity: .6; }
+.wz-num {
+  width: 26px; height: 26px; border-radius: 50%; flex: none;
+  background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 13px;
+}
+.wz-num svg { width: 14px; height: 14px; }
+.wz-step.done .wz-num { background: var(--green); }
+.wz-main { flex: 1; min-width: 0; }
+.wz-title { font-weight: 600; font-size: 13.5px; }
+.wz-done { color: var(--green); font-size: 11.5px; margin-left: 6px; }
+.wz-desc { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+
+/* ===== 日志文件管理 ===== */
+.log-files-panel { margin-top: 14px; }
+.log-files-list { padding: 4px 18px 12px; }
+
+/* ===== 全局暂停按钮激活态 ===== */
+.btn.warn-on { background: rgba(255,149,0,.15); color: var(--orange); }
 .ch-grid { stroke: var(--sep); stroke-width: 1; }
 .ch-lbl { fill: var(--text-3); font-size: 10px; }
 .ch-up polyline { stroke: var(--green); }

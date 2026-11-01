@@ -53,6 +53,7 @@
         <header class="view-head">
           <h1>仪表盘</h1>
           <div class="head-actions">
+            <button class="btn ghost" id="btnPauseAll"></button>
             <button class="btn ghost" id="dashCheckAll"></button>
           </div>
         </header>
@@ -105,6 +106,7 @@
           <button class="btn small" id="btnEditSel" disabled>编辑</button>
           <button class="btn small danger" id="btnDelSel" disabled>删除</button>
           <span class="toolbar-sep"></span>
+          <button class="btn small ghost" id="btnGroupView" title="按分组折叠显示"></button>
           <button class="btn small ghost" id="btnImport"></button>
           <button class="btn small ghost" id="btnExport"></button>
           <div class="toolbar-spacer"></div>
@@ -913,6 +915,16 @@
               <span class="search-ic" data-icon="search"></span>
               <input id="logFilter" class="search-input" type="text" placeholder="过滤：服务商名 / 关键字" />
             </div>
+            <select id="logLevelFilter" class="select-input filter-select">
+              <option value="">全部级别</option>
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+            </select>
+            <select id="logProviderFilter" class="select-input filter-select">
+              <option value="">全部服务商</option>
+            </select>
             <label class="switch small-switch"><input type="checkbox" id="autoScroll" checked /><span class="knob"></span></label>
             <span class="switch-label">自动滚动</span>
             <button class="btn small" id="logClear"></button>
@@ -920,6 +932,10 @@
           </div>
         </header>
         <div class="log-card" id="logCard" data-i18n-skip></div>
+        <div class="panel log-files-panel">
+          <div class="panel-head"><h2>日志文件</h2><span class="panel-hint" id="logFilesHint"></span></div>
+          <div class="log-files-list" id="logFilesList"></div>
+        </div>
       </section>
     </main>
   </div>
@@ -1102,6 +1118,10 @@
       <div class="modal-body">
         <div class="dm-banner" id="dmBanner" data-i18n-skip></div>
         <div class="detail-meta" id="dmMeta" data-i18n-skip></div>
+        <div class="dm-section" id="dmUptimeBarsWrap" style="display:none;">
+          <div class="dm-sec-title">近 90 天<span class="dm-bars-hint" id="dmBarsHint"></span></div>
+          <div class="up-bars" id="dmUptimeBars"></div>
+        </div>
         <div class="dm-section" id="dmChartWrap" style="display:none;">
           <div class="dm-sec-title">近 24 小时</div>
           <div class="dm-chart" id="dmChart"></div>

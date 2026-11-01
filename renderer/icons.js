@@ -35,6 +35,7 @@
     info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>',
     list: '<path d="M8.5 6.5H20M8.5 12H20M8.5 17.5H20"/><circle cx="4.6" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="4.6" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="4.6" cy="17.5" r="1" fill="currentColor" stroke="none"/>',
     stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
+    grip: '<circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>',
     alertDot: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8V13M12 16h.01"/>',
     lock: '<rect x="5.5" y="10.5" width="13" height="9.5" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
     dingtalk: '<path d="M11.6 3.2c-.4 3.2-1.5 6-3.4 8.2-.3.3-.1.8.3.8l3.2-.3-2.4 6.9c-.1.4.4.7.7.4 4-3.9 6.4-7.6 7.2-11 .1-.4-.2-.8-.6-.8l-3.3.3 1.9-3.6c.2-.4-.1-.8-.5-.8h-2.6c-.3 0-.5.2-.5.4Z"/>',

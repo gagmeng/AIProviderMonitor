@@ -36,11 +36,16 @@ contextBridge.exposeInMainWorld('aipm', {
   historyExportCSV: (opts) => ipcRenderer.invoke('history:exportCSV', opts),
   historyPrune: (days) => ipcRenderer.invoke('history:prune', days),
   historyModelRates: (opts) => ipcRenderer.invoke('history:modelRates', opts),
+  historyPerDay: (opts) => ipcRenderer.invoke('history:perDay', opts),
+  reorderProviders: (ids) => ipcRenderer.invoke('provider:reorder', { ids }),
+  deleteLogFile: (name) => ipcRenderer.invoke('logs:deleteFile', name),
+  setPaused: (paused) => ipcRenderer.invoke('app:setPaused', paused),
   clearUnread: () => ipcRenderer.invoke('app:clearUnread'),
   ackUnread: (id) => ipcRenderer.invoke('app:ackUnread', id),
   testMail: () => ipcRenderer.invoke('mail:test'),
   logFiles: () => ipcRenderer.invoke('logs:files'),
   reportExport: (opts) => ipcRenderer.invoke('report:export', opts),
   onStateChanged: (fn) => { const h = (_e, s) => fn(s); ipcRenderer.on('state-changed', h); return () => ipcRenderer.removeListener('state-changed', h); },
-  onLogLine: (fn) => { const h = (_e, l) => fn(l); ipcRenderer.on('log:line', h); return () => ipcRenderer.removeListener('log:line', h); }
+  onLogLine: (fn) => { const h = (_e, l) => fn(l); ipcRenderer.on('log:line', h); return () => ipcRenderer.removeListener('log:line', h); },
+  onOpenProvider: (fn) => { const h = (_e, id) => fn(id); ipcRenderer.on('open-provider', h); return () => ipcRenderer.removeListener('open-provider', h); }
 });

@@ -22,6 +22,7 @@ function initStaticIcons() {
   $('#btnAdd').innerHTML = icon('plus') + '<span>新增服务商</span>';
   $('#btnCheckSel').textContent = '检测';
   $('#btnDelSel').innerHTML = icon('trash') + '<span>删除</span>';
+  $('#btnGroupView').innerHTML = icon('list') + '<span>分组</span>';
   $('.search-ic').innerHTML = icon('search');
   $('#pmClose').innerHTML = icon('close');
   $('#dmClose').innerHTML = icon('close');
@@ -155,6 +156,12 @@ function renderDashboard() {
   $('#statDown').textContent = down;
   $('#statAuthfail').textContent = auth;
   $('#statModels').textContent = models;
+  // 全局暂停按钮（暂停只停自动轮循，手动检测仍可用）
+  const pb = $('#btnPauseAll');
+  if (pb) {
+    pb.innerHTML = state.paused ? icon('play') + `<span>${tx('恢复检测')}</span>` : icon('pause') + `<span>${tx('暂停检测')}</span>`;
+    pb.classList.toggle('warn-on', Boolean(state.paused));
+  }
   // 未读告警徽标（点击打开未读列表，可逐条或全部确认）
   const unreadN = (state.unread && state.unread.count) || 0;
   const chip = $('#unreadChip');
@@ -166,7 +173,9 @@ function renderDashboard() {
 
   const recent = [...state.providers].filter((p) => p.checkedAt).sort((a, b) => b.checkedAt - a.checkedAt).slice(0, 8);
   const wrap = $('#recentList');
-  if (recent.length === 0) {
+  if (state.providers.length === 0) {
+    wrap.innerHTML = renderEmptyWizard();
+  } else if (recent.length === 0) {
     wrap.innerHTML = `<div class="empty">${tx('暂无检测记录，点击右上角"检测全部"开始')}</div>`;
   } else {
     wrap.innerHTML = recent.map((p) => {
@@ -187,6 +196,53 @@ function renderDashboard() {
   const latest = recent[0];
   $('#dashUpdated').textContent = latest ? `${tx('最近活动')} ${fmtTime(latest.checkedAt)}` : '';
 }
+
+// 仪表盘侧边导航跳转（程序化触发，与手点同路径）
+function navTo(v) {
+  const btn = document.querySelector(`.nav-item[data-view="${v}"]`);
+  if (btn) btn.click();
+}
+
+/** 空状态三步引导：无服务商时替代空文案，压低上手门槛 */
+function renderEmptyWizard() {
+  const g = state.global || {};
+  const anyChannel = Object.keys(g).some((k) => /^notify\w+Enabled$/.test(k) && g[k]);
+  const anyCheck = state.providers.some((p) => p.checkedAt);
+  const steps = [
+    { n: 1, done: state.providers.length > 0, title: tx('新增第一个服务商'), desc: tx('填入 API 根地址与密钥，自动拉取模型清单'), btn: tx('新增服务商'), act: () => openProviderModal() },
+    { n: 2, done: anyChannel, title: tx('配置通知渠道'), desc: tx('钉钉 / 飞书 / Telegram 等 8 个渠道，先发一条测试消息'), btn: tx('去配置'), act: () => navTo('notify') },
+    { n: 3, done: anyCheck, title: tx('完成首轮检测'), desc: tx('点击「检测全部」，仪表盘开始实时反映各服务商状态'), btn: tx('立即检测'), act: () => { window.aipm.checkAll(); toast(tx('已触发全部检测')); } }
+  ];
+  return `<div class="wizard">
+    <div class="wz-lead">${tx('快速开始')}</div>
+    ${steps.map((s) => `
+      <div class="wz-step ${s.done ? 'done' : ''}">
+        <span class="wz-num">${s.done ? icon('check') : s.n}</span>
+        <div class="wz-main">
+          <div class="wz-title">${escapeHtml(s.title)}${s.done ? ` <span class="wz-done">${tx('已完成')}</span>` : ''}</div>
+          <div class="wz-desc">${escapeHtml(s.desc)}</div>
+        </div>
+        ${s.done ? '' : `<button class="btn small ghost" data-wz="${s.n}">${escapeHtml(s.btn)}</button>`}
+      </div>`).join('')}
+  </div>`;
+}
+
+$('#recentList').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-wz]');
+  if (!btn) return;
+  const steps = { 1: () => openProviderModal(), 2: () => navTo('notify'), 3: () => { window.aipm.checkAll(); toast(tx('已触发全部检测')); } };
+  const fn = steps[btn.dataset.wz];
+  if (fn) fn();
+});
+
+// 全局暂停/恢复自动检测
+$('#btnPauseAll').addEventListener('click', async () => {
+  const next = !state.paused;
+  try { await window.aipm.setPaused(next); } catch (err) { return; }
+  state.paused = next;
+  renderDashboard();
+  toast(next ? tx('已暂停自动检测，手动检测不受影响') : tx('已恢复自动检测'));
+});
 
 // 仪表盘最近检测条目：双击打开详情
 $('#recentList').addEventListener('dblclick', (e) => {
@@ -288,29 +344,27 @@ async function refreshUptime24(force = false) {
   } catch (e) { /* 静默：列表徽标缺失不影响主功能 */ }
 }
 
-function renderProviders() {
-  const list = filteredProviders();
-  const wrap = $('#providerList');
+// ---------- 服务商列表：分组折叠 + 拖拽排序（扁平视图） ----------
+let groupViewOn = false;
+const collapsedGroups = new Set();
+let dragId = null;
 
-  if (list.length === 0) {
-    wrap.innerHTML = `<div class="empty">${state.providers.length === 0 ? tx('暂无服务商，点击"新增服务商"开始添加') : tx('没有匹配的结果')}</div>`;
-  } else {
-    wrap.innerHTML = list.map((p) => {
-      const si = statusInfo(p.status);
-      const checking = state.running.includes(p.id);
-      const total = p.modelsTotal || 0;
-      const avail = (p.modelsAvailable || []).length;
-      const pct = total > 0 ? Math.round((avail / total) * 100) : 0;
-      const cycleMin = fmtDuration(p.intervalSec);
-      const checked = p.checkedAt ? fmtTime(p.checkedAt) : tx('未检测');
-      const schedule = (state.schedule || []).find((s) => s.id === p.id);
-      const nextSub = schedule && schedule.dueAt
-        ? `<div class="cell-sub">${tx('下次检测')} ${fmtWhen(schedule.dueAt)}</div>` : '';
-      const up24 = uptime24.map.get(p.id);
-      const upSub = up24 != null
-        ? `<div class="cell-sub ${up24 >= 99 ? 'u-up' : up24 >= 90 ? 'u-degraded' : 'u-down'}">24h ${up24}%</div>` : '';
-      return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''}" data-id="${p.id}">
-        <div class="col-sel"><label class="checkbox"><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
+function providerRowHtml(p, canDrag) {
+  const si = statusInfo(p.status);
+  const checking = state.running.includes(p.id);
+  const total = p.modelsTotal || 0;
+  const avail = (p.modelsAvailable || []).length;
+  const pct = total > 0 ? Math.round((avail / total) * 100) : 0;
+  const cycleMin = fmtDuration(p.intervalSec);
+  const checked = p.checkedAt ? fmtTime(p.checkedAt) : tx('未检测');
+  const schedule = (state.schedule || []).find((s) => s.id === p.id);
+  const nextSub = schedule && schedule.dueAt
+    ? `<div class="cell-sub">${tx('下次检测')} ${fmtWhen(schedule.dueAt)}</div>` : '';
+  const up24 = uptime24.map.get(p.id);
+  const upSub = up24 != null
+    ? `<div class="cell-sub ${up24 >= 99 ? 'u-up' : up24 >= 90 ? 'u-degraded' : 'u-down'}">24h ${up24}%</div>` : '';
+  return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''}" data-id="${p.id}"${canDrag ? ' draggable="true"' : ''}>
+        <div class="col-sel"><span class="drag-handle${canDrag ? '' : ' spacer'}" title="${canDrag ? tx('拖拽排序') : ''}">${icon('grip')}</span><label class="checkbox"><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
         <div class="col-name"><div class="provider-cell">
           <div class="provider-name">
             <span class="name-text" data-detail="${p.id}">${escapeHtml(p.name)}</span>
@@ -331,7 +385,42 @@ function renderProviders() {
           <button class="op-btn del" data-del="${p.id}" title="${tx('删除')}">${icon('trash')}</button>
         </div>
       </div>`;
-    }).join('');
+}
+
+function renderProviders() {
+  const list = filteredProviders();
+  const wrap = $('#providerList');
+
+  // 拖拽排序只在「扁平视图 + 无筛选」下启用：筛选结果的局部顺序无法代表全量顺序
+  const noFilter = !($('#searchInput').value || '').trim()
+    && !($('#groupFilter') ? $('#groupFilter').value : '')
+    && !($('#statusFilter') ? $('#statusFilter').value : '');
+  const canDrag = !groupViewOn && noFilter && list.length > 1 && list.length === state.providers.length;
+
+  if (list.length === 0) {
+    wrap.innerHTML = `<div class="empty">${state.providers.length === 0 ? tx('暂无服务商，点击"新增服务商"开始添加') : tx('没有匹配的结果')}</div>`;
+  } else if (groupViewOn) {
+    // 分组视图：按 group 分节（未分组垫底），节内保持现有顺序；节头可折叠
+    const sections = new Map();
+    for (const p of list) {
+      const key = (p.group || '').trim() || tx('未分组');
+      if (!sections.has(key)) sections.set(key, []);
+      sections.get(key).push(p);
+    }
+    let html = '';
+    for (const [g, rows] of sections) {
+      const collapsed = collapsedGroups.has(g);
+      const online = rows.filter((p) => p.status === 'up').length;
+      html += `<div class="group-head ${collapsed ? 'collapsed' : ''}" data-group="${escapeHtml(g)}">
+        <span class="group-chev">${icon(collapsed ? 'chevronRight' : 'chevronDown')}</span>
+        <span class="group-name">${escapeHtml(g)}</span>
+        <span class="group-meta">${online}/${rows.length} ${tx('在线')}</span>
+      </div>`;
+      if (!collapsed) html += rows.map((p) => providerRowHtml(p, false)).join('');
+    }
+    wrap.innerHTML = html;
+  } else {
+    wrap.innerHTML = list.map((p) => providerRowHtml(p, canDrag)).join('');
   }
 
   // 工具栏状态
@@ -350,6 +439,13 @@ function renderProviders() {
 
 // 列表事件委托
 $('#providerList').addEventListener('click', (e) => {
+  const gh = e.target.closest('.group-head');
+  if (gh) {
+    const g = gh.dataset.group;
+    if (collapsedGroups.has(g)) collapsedGroups.delete(g); else collapsedGroups.add(g);
+    renderProviders();
+    return;
+  }
   const sel = e.target.closest('[data-sel]');
   if (sel) {
     const id = Number(sel.dataset.sel);
@@ -378,6 +474,57 @@ $('#providerList').addEventListener('click', (e) => {
 $('#searchInput').addEventListener('input', renderProviders);
 if ($('#groupFilter')) $('#groupFilter').addEventListener('change', renderProviders);
 if ($('#statusFilter')) $('#statusFilter').addEventListener('change', renderProviders);
+
+// 分组视图开关
+$('#btnGroupView').addEventListener('click', () => {
+  groupViewOn = !groupViewOn;
+  $('#btnGroupView').classList.toggle('on', groupViewOn);
+  renderProviders();
+});
+
+// 拖拽排序（扁平视图）：拖到目标行上方松手，整体重排后乐观更新 + 落库
+$('#providerList').addEventListener('dragstart', (e) => {
+  const row = e.target.closest('.p-row[draggable="true"]');
+  if (!row) { e.preventDefault(); return; }
+  dragId = Number(row.dataset.id);
+  row.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', String(dragId)); } catch (err) { /* IE 兼容占位 */ }
+});
+$('#providerList').addEventListener('dragover', (e) => {
+  if (dragId == null) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const row = e.target.closest('.p-row[data-id]');
+  $$('#providerList .p-row').forEach((r) => r.classList.toggle('drag-over', Boolean(row) && r === row && Number(r.dataset.id) !== dragId));
+});
+$('#providerList').addEventListener('drop', async (e) => {
+  if (dragId == null) return;
+  e.preventDefault();
+  const row = e.target.closest('.p-row[data-id]');
+  const targetId = row ? Number(row.dataset.id) : null;
+  $$('#providerList .p-row').forEach((r) => r.classList.remove('drag-over', 'dragging'));
+  const moved = dragId;
+  dragId = null;
+  if (!targetId || targetId === moved) return;
+  const ids = state.providers.map((p) => p.id);
+  const from = ids.indexOf(moved);
+  const to = ids.indexOf(targetId);
+  if (from < 0 || to < 0) return;
+  ids.splice(to, 0, ids.splice(from, 1)[0]);
+  const byId = new Map(state.providers.map((p) => [p.id, p]));
+  state.providers = ids.map((id) => byId.get(id));   // 乐观更新，落库失败由状态快照纠正
+  renderProviders();
+  const r = await window.aipm.reorderProviders(ids);
+  if (!r || !r.ok) {
+    toast((r && r.error) || tx('排序失败'), 'err');
+    window.aipm.getState().then((s) => { state = s; renderProviders(); });
+  }
+});
+$('#providerList').addEventListener('dragend', () => {
+  dragId = null;
+  $$('#providerList .p-row').forEach((r) => r.classList.remove('drag-over', 'dragging'));
+});
 
 // 双击行任意位置打开详情（排除操作按钮与复选框）
 $('#providerList').addEventListener('dblclick', (e) => {
@@ -780,6 +927,35 @@ function openDetail(id) {
         el.appendChild(s);
       });
     } catch (e) { /* 徽标失败不打扰 */ }
+  })();
+  // 90 天可用率色条（status-page 风格）：每天一格，无数据补灰格
+  (async () => {
+    try {
+      const r = await window.aipm.historyPerDay({ providerId: id, days: 90 });
+      const wrap = $('#dmUptimeBarsWrap');
+      if (!wrap || !r || !r.ok || seq !== detailSeq) return;
+      const byTs = new Map((r.days || []).map((d) => [d.t, (d.providers || []).find((x) => x.id === id)]));
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      let cells = '';
+      let hit = 0;
+      for (let i = 89; i >= 0; i--) {
+        const ts = today.getTime() - i * 86400000;
+        const e = byTs.get(ts);
+        let cls = 'l-none';
+        let tip = `${fmtDate(ts)} · ${tx('无数据')}`;
+        if (e) {
+          hit++;
+          cls = e.uptime >= 99 ? 'l-ok' : e.uptime >= 90 ? 'l-mid' : 'l-bad';
+          tip = `${fmtDate(ts)} · ${tx('可用率')} ${e.uptime}%（${e.samples} ${tx('个样本')}）`;
+        }
+        cells += `<i class="up-bar ${cls}" title="${escapeHtml(tip)}"></i>`;
+      }
+      if (!hit) { wrap.style.display = 'none'; return; }
+      $('#dmUptimeBars').innerHTML = cells;
+      $('#dmBarsHint').textContent = ` · ${hit} ${tx('天有数据')}`;
+      wrap.style.display = '';
+    } catch (err) { /* 色条失败不打扰 */ }
   })();
   // 24h 可用率/延迟迷你走势：区分「刚好这轮慢」和「一直慢」；数据缺失时整块隐藏
   (async () => {
@@ -1333,12 +1509,65 @@ function renderLogs() {
     logsLoaded = true;
     window.aipm.getLogs().then((lines) => { logLines = (lines || []).slice(-2000); appendLogLines(logLines, true); });
   }
+  refreshLogProviderFilter();
+  renderLogFiles();
 }
+
+/** 服务商过滤下拉：日志行内含 [名称] 标记，按名称匹配 */
+function refreshLogProviderFilter() {
+  const sel = $('#logProviderFilter');
+  if (!sel) return;
+  const cur = sel.value;
+  const names = state.providers.map((p) => p.name).filter(Boolean).sort();
+  sel.innerHTML = `<option value="">${tx('全部服务商')}</option>` +
+    names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  if (names.includes(cur)) sel.value = cur;
+}
+
 function logMatchesFilter(l) {
   const q = ($('#logFilter').value || '').trim().toLowerCase();
+  const lv = $('#logLevelFilter') ? $('#logLevelFilter').value : '';
+  const pv = $('#logProviderFilter') ? $('#logProviderFilter').value : '';
+  if (lv && l.level !== lv) return false;
+  if (pv && !(l.msg || '').includes(`[${pv}]`)) return false;
   if (!q) return true;
   return (l.msg || '').toLowerCase().includes(q);
 }
+
+// ---------- 日志文件管理（logs:files / logs:deleteFile） ----------
+async function renderLogFiles() {
+  const wrap = $('#logFilesList');
+  if (!wrap) return;
+  try {
+    const r = await window.aipm.logFiles();
+    if (!r || !r.ok) return;
+    const list = r.list || [];
+    const hint = $('#logFilesHint');
+    if (hint) hint.textContent = list.length ? `${list.length} ${tx('个文件')} · ${tx('保留天数可在设置中调整')}` : '';
+    wrap.innerHTML = list.length ? list.map((f) => {
+      const d = new Date(f.mtime);
+      return `<div class="bk-item">
+        <span class="nav-ic bk-item-ic">${icon('terminal')}</span>
+        <div class="bk-item-main">
+          <div class="bk-item-name">${escapeHtml(f.file)}</div>
+          <div class="bk-item-sub">${(f.size / 1024).toFixed(1)} KB · ${d.toLocaleString('zh-CN')}</div>
+        </div>
+        <button class="btn small ghost" data-logdel="${escapeHtml(f.file)}">${tx('删除')}</button>
+      </div>`;
+    }).join('') : `<div class="empty" style="padding:14px 0;">${tx('暂无日志文件')}</div>`;
+  } catch (e) { /* 静默 */ }
+}
+
+$('#logFilesList').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-logdel]');
+  if (!btn) return;
+  const name = btn.dataset.logdel;
+  confirmDialog(tx('删除日志文件'), tx('确定删除 {name} 吗？该操作不可撤销。', { name }), async () => {
+    const r = await window.aipm.deleteLogFile(name);
+    if (r && r.ok) { toast(tx('已删除')); renderLogFiles(); }
+    else toast((r && r.error) || tx('删除失败'), 'err');
+  });
+});
 
 function appendLogLines(lines, replace = false) {
   const card = $('#logCard');
@@ -1359,8 +1588,18 @@ window.aipm.onLogLine((l) => {
   if (view === 'logs') appendLogLines([l]);
 });
 
-// 日志过滤：输入时按当前过滤条件重放全部缓冲日志
+// 日志过滤：输入/切换时按当前过滤条件重放全部缓冲日志
 $('#logFilter').addEventListener('input', () => {
+  const card = $('#logCard');
+  card.innerHTML = '';
+  appendLogLines(logLines, true);
+});
+$('#logLevelFilter').addEventListener('change', () => {
+  const card = $('#logCard');
+  card.innerHTML = '';
+  appendLogLines(logLines, true);
+});
+$('#logProviderFilter').addEventListener('change', () => {
   const card = $('#logCard');
   card.innerHTML = '';
   appendLogLines(logLines, true);
@@ -1688,6 +1927,11 @@ function queueRender() {
 }
 
 // ---------- 启动 ----------
+// 托盘菜单点具体服务商：切到服务商视图并直接打开详情
+window.aipm.onOpenProvider((id) => {
+  if (view !== 'providers') navTo('providers');
+  setTimeout(() => openDetail(Number(id)), 120);
+});
 window.aipm.onStateChanged((s) => { state = s; queueRender(); });
 window.aipm.getState().then((s) => { state = s; render(); refreshUptime24(true); });
 window.aipm.getAppVersion().then((v) => { $('#appVersion').textContent = 'V' + v; }).catch(() => {});

@@ -4,6 +4,8 @@ const { detect } = require('./detector');
 
 /** Node setTimeout 超过 2^31-1 ms 会被钳成 1ms。月/年周期必须分段等待。 */
 const MAX_TIMER_MS = 2147483647;
+// 全局暂停期间 tick 的低频轮询间隔：不检测也不丢 provider，恢复时由 resume() 强制重挂
+const PAUSE_POLL_MS = 30000;
 
 function clampTimerMs(ms) {
   const n = Math.max(0, Math.floor(Number(ms) || 0));
@@ -30,6 +32,7 @@ class Scheduler {
     this.concurrency = Math.max(1, concurrency);
     this.handlers = {};           // onResult / onState
     this.stopped = false;
+    this.paused = false;          // 全局暂停：自动轮循挂起，手动检测不受影响
     this.getProvider = null;      // (id) => provider
     this.getGlobal = null;        // () => globalCfg，用于把超时/重试/代理等配置透传给 detector
   }
@@ -87,6 +90,11 @@ class Scheduler {
     const tick = async () => {
       this.timers.delete(id);   // 触发后先摘除，检测完成后由 _afterCheck 续链
       if (this.stopped) return;
+      // 暂停期间不检测也不丢 provider：低频轮询暂停状态，恢复时 resume() 会强制重挂
+      if (this.paused) {
+        this._arm(id, PAUSE_POLL_MS, period);
+        return;
+      }
       const remain = dueAt - Date.now();
       // 本次只是 24.8 天分段，还没到周期点，继续等，不要检测
       if (remain > 1500) {
@@ -132,6 +140,20 @@ class Scheduler {
   removeAll() { for (const id of [...this.timers.keys()]) this.cancel(id); }
 
   stop() { this.stopped = true; this.removeAll(); }
+
+  /** 全局暂停自动轮循：已排定的 tick 到期后转入 30s 轮询，不检测、不丢 provider */
+  pause() { this.paused = true; }
+
+  /** 恢复自动轮循：全部已挂定时器立即到期，错过周期的按补检一次性追上 */
+  resume() {
+    this.paused = false;
+    for (const [id, t] of [...this.timers.entries()]) {
+      this.cancel(id);
+      const latest = this.getProvider ? this.getProvider(id) : null;
+      if (!latest || latest.enabled === false) continue;
+      this._arm(id, 0, t.period);
+    }
+  }
 
   /** 入队一次检测（自动去重：同一 provider 进行中不重复入队） */
   runCheck(id, { reason = 'manual' } = {}) {

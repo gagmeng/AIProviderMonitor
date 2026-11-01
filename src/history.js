@@ -369,6 +369,40 @@ async function series(dataDir, { hours = 24, providerId = null, buckets = 48 } =
   return { from, to, bucketMs, buckets: out };
 }
 
+/**
+ * 按天聚合可用率（详情弹窗 90 天色条用）。
+ * 返回 { from, to, dayMs, days: [{ t(当日零点), providers: [{ id, samples, uptime }] }] }；
+ * 无数据的天不出现在 days 里，由渲染层按 dayMs 补空格子。
+ */
+async function perDay(dataDir, { days = 90, providerId = null } = {}) {
+  const to = Date.now();
+  const from = to - days * 86400000;
+  let recs = await readRange(dataDir, from, to);
+  if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
+
+  const byDay = new Map();   // 当日零点 -> Map(id -> {up, total})
+  for (const r of recs) {
+    const d = new Date(r.t);
+    d.setHours(0, 0, 0, 0);
+    const key = d.getTime();
+    if (!byDay.has(key)) byDay.set(key, new Map());
+    const m = byDay.get(key);
+    if (!m.has(r.id)) m.set(r.id, { up: 0, total: 0 });
+    const e = m.get(r.id);
+    e.total++;
+    if (r.status === 'up') e.up++;
+  }
+  const out = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([t, m]) => ({
+    t,
+    providers: [...m.entries()].map(([id, e]) => ({
+      id,
+      samples: e.total,
+      uptime: e.total ? Number(((e.up / e.total) * 100).toFixed(1)) : 0
+    }))
+  }));
+  return { from, to, dayMs: 86400000, days: out };
+}
+
 /** 清理超过保留天数的历史分片 */
 function prune(dataDir, keepDays = 30) {
   flushSync();
@@ -406,4 +440,4 @@ async function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
   return [head.join(','), ...rows].join('\r\n');
 }
 
-module.exports = { append, appendModels, readRange, readModelRange, summarize, modelRates, series, prune, exportCSV, historyDir, modelFileFor, DIR_NAME, flushSync };
+module.exports = { append, appendModels, readRange, readModelRange, summarize, modelRates, series, perDay, prune, exportCSV, historyDir, modelFileFor, DIR_NAME, flushSync };

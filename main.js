@@ -1,21 +1,18 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu, Tray, shell, dialog, globalShortcut, clipboard, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const pkg = require('./package.json');
-const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL, normalizeGlobal } = require('./src/store');
+const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL } = require('./src/store');
 const logger = require('./src/logger');
 const { Scheduler } = require('./src/scheduler');
 const notifier = require('./src/notifier');
-const { notifyModelChange, notifyAlert, sendTest, getNotifyHealth, resetHealth } = notifier;
-const { detect } = require('./src/detector');
+const { notifyModelChange, notifyAlert, getNotifyHealth } = notifier;
 const backup = require('./src/backup');
-const transfer = require('./src/transfer');
-const { formatDuration } = require('./src/durfmt');
 const history = require('./src/history');
 const alerts = require('./src/alerts');
 const { diffBaseline } = require('./src/baseline');
-const { validateProviderConfig, newNumericId } = require('./src/providerSchema');
+const { statusText, buildReportHTML } = require('./src/report');
 
 let db = { global: { ...DEFAULT_GLOBAL }, providers: [] };
 let persistBlocked = false;
@@ -184,155 +181,11 @@ function applyResult(provider, result, reason) {
   return { modelChanged, alerts: decision.alerts, firstCheck: firstRealCheck };
 }
 
-/** 状态中英文映射（日志与通知文案用） */
-function statusText(s) {
-  return { up: '在线', degraded: '异常', down: '离线', authfail: '鉴权失败', unknown: '待检测' }[s] || s;
-}
-
-function escHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-function fmtMs(ms) {
-  const s = Math.floor((Number(ms) || 0) / 1000);
-  if (s < 60) return `${s} 秒`;
-  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
-  return `${Math.floor(s / 3600)} 时 ${Math.floor((s % 3600) / 60)} 分`;
-}
-
-/** 状态报告：CSV */
-function buildReportCSV(sum) {
-  const head = ['服务商', '样本数', '可用率(%)', '在线次数', '异常次数', '离线次数', '鉴权失败次数', '累计故障时长', '故障次数', 'MTTR', '最长故障', '平均延迟(ms)', 'P50(ms)', 'P95(ms)', '最大延迟(ms)', '最后状态'];
-  const esc = (v) => {
-    let s = String(v ?? '');
-    if (/^[=+\-@]/.test(s)) s = '\t' + s;   // 公式注入防护
-    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const rows = sum.perProvider.map((p) => [
-    p.name, p.samples, p.uptime, p.upCount, p.degCount, p.downCount,
-    p.authCount || 0,
-    fmtMs(p.downMs), p.incidents || 0, fmtMs(p.mttrMs), fmtMs(p.maxOutageMs),
-    p.latencyAvg ?? '', p.latencyP50 ?? '', p.latencyP95 ?? '', p.latencyMax ?? '', statusText(p.lastStatus)
-  ].map(esc).join(','));
-  return [head.join(','), ...rows].join('\r\n');
-}
-
-/** 状态报告：自包含 HTML（内联样式，可直接发邮件/存档） */
-function buildReportHTML(sum) {
-  const o = sum.overall;
-  const rows = sum.perProvider.map((p) => {
-    const color = p.uptime >= 99 ? '#34c759' : p.uptime >= 90 ? '#ff9500' : '#ff3b30';
-    return `<tr>
-      <td>${escHtml(p.name)}</td>
-      <td style="text-align:right">${p.samples}</td>
-      <td style="text-align:right;color:${color};font-weight:600">${p.uptime}%</td>
-      <td style="text-align:right">${p.upCount}/${p.degCount}/${p.downCount}</td>
-      <td style="text-align:right">${p.authCount || 0}</td>
-      <td style="text-align:right">${fmtMs(p.downMs)}</td>
-      <td style="text-align:right">${p.incidents || 0}</td>
-      <td style="text-align:right">${fmtMs(p.mttrMs)}</td>
-      <td style="text-align:right">${fmtMs(p.maxOutageMs)}</td>
-      <td style="text-align:right">${p.latencyAvg ?? '—'}</td>
-      <td style="text-align:right">${p.latencyP95 ?? '—'}</td>
-      <td>${statusText(p.lastStatus)}</td>
-    </tr>`;
-  }).join('');
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/>
-<title>AI Provider Monitor 状态报告</title></head>
-<body style="font-family:-apple-system,'Segoe UI',sans-serif;background:#f2f2f7;margin:0;padding:32px;color:#1c1c1e">
-<div style="max-width:1000px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 2px 12px rgba(0,0,0,.06)">
-  <h1 style="margin:0 0 6px;font-size:24px">AI Provider 状态报告</h1>
-  <p style="margin:0 0 24px;color:#8e8e93;font-size:13px">统计区间：最近 ${sum.rangeHours} 小时 · 生成于 ${new Date().toLocaleString('zh-CN')}</p>
-  <div style="display:flex;gap:16px;margin-bottom:28px;flex-wrap:wrap">
-    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
-      <div style="font-size:12px;color:#8e8e93">整体可用率</div>
-      <div style="font-size:28px;font-weight:700">${o.uptime}%</div></div>
-    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
-      <div style="font-size:12px;color:#8e8e93">服务商数</div>
-      <div style="font-size:28px;font-weight:700">${o.providers}</div></div>
-    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
-      <div style="font-size:12px;color:#8e8e93">检测样本</div>
-      <div style="font-size:28px;font-weight:700">${o.samples}</div></div>
-    <div style="flex:1;min-width:150px;background:#f2f2f7;border-radius:12px;padding:16px">
-      <div style="font-size:12px;color:#8e8e93">延迟 P95</div>
-      <div style="font-size:28px;font-weight:700">${o.latencyP95 ?? '—'}<span style="font-size:14px"> ms</span></div></div>
-  </div>
-  <table style="width:100%;border-collapse:collapse;font-size:13px">
-    <thead><tr style="background:#f2f2f7">
-      <th style="text-align:left;padding:10px">服务商</th>
-      <th style="text-align:right;padding:10px">样本</th>
-      <th style="text-align:right;padding:10px">可用率</th>
-      <th style="text-align:right;padding:10px">在线/异常/离线</th>
-      <th style="text-align:right;padding:10px">鉴权失败</th>
-      <th style="text-align:right;padding:10px">故障时长</th>
-      <th style="text-align:right;padding:10px">故障次数</th>
-      <th style="text-align:right;padding:10px">MTTR</th>
-      <th style="text-align:right;padding:10px">最长故障</th>
-      <th style="text-align:right;padding:10px">平均延迟</th>
-      <th style="text-align:right;padding:10px">P95</th>
-      <th style="text-align:left;padding:10px">最后状态</th>
-    </tr></thead>
-    <tbody>${rows || '<tr><td colspan="12" style="padding:24px;text-align:center;color:#8e8e93">暂无数据</td></tr>'}</tbody>
-  </table>
-</div></body></html>`;
-}
-
-/** 状态报告：Excel（总览 + 服务商明细双表；exceljs 懒加载） */
-async function buildReportXLSX(sum) {
-  let ExcelJS;
-  try { ExcelJS = require('exceljs'); }
-  catch (e) { throw new Error('未安装 exceljs 依赖，无法导出 Excel（请运行 npm install）'); }
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'AI Provider Monitor';
-  const o = sum.overall;
-  const s1 = wb.addWorksheet('总览');
-  s1.columns = [{ header: '指标', key: 'k', width: 18 }, { header: '数值', key: 'v', width: 26 }];
-  s1.addRows([
-    { k: '统计区间', v: `最近 ${sum.rangeHours} 小时` },
-    { k: '生成时间', v: new Date().toLocaleString('zh-CN') },
-    { k: '整体可用率', v: `${o.uptime}%` },
-    { k: '服务商数', v: o.providers },
-    { k: '检测样本', v: o.samples },
-    { k: '延迟 P95(ms)', v: o.latencyP95 ?? '—' }
-  ]);
-  const s2 = wb.addWorksheet('服务商明细');
-  s2.columns = [
-    { header: '服务商', key: 'name', width: 24 },
-    { header: '样本数', key: 'samples', width: 10 },
-    { header: '可用率(%)', key: 'uptime', width: 12 },
-    { header: '在线次数', key: 'upCount', width: 10 },
-    { header: '异常次数', key: 'degCount', width: 10 },
-    { header: '离线次数', key: 'downCount', width: 10 },
-    { header: '鉴权失败', key: 'authCount', width: 10 },
-    { header: '累计故障时长', key: 'downFor', width: 16 },
-    { header: '故障次数', key: 'incidents', width: 10 },
-    { header: 'MTTR', key: 'mttr', width: 14 },
-    { header: '最长故障', key: 'maxOutage', width: 14 },
-    { header: '平均延迟(ms)', key: 'latencyAvg', width: 14 },
-    { header: 'P50(ms)', key: 'latencyP50', width: 10 },
-    { header: 'P95(ms)', key: 'latencyP95', width: 10 },
-    { header: '最大延迟(ms)', key: 'latencyMax', width: 14 },
-    { header: '最后状态', key: 'lastStatus', width: 10 }
-  ];
-  for (const p of sum.perProvider) {
-    s2.addRow({
-      name: p.name, samples: p.samples, uptime: p.uptime,
-      upCount: p.upCount, degCount: p.degCount, downCount: p.downCount,
-      authCount: p.authCount || 0,
-      downFor: fmtMs(p.downMs), incidents: p.incidents || 0,
-      mttr: fmtMs(p.mttrMs), maxOutage: fmtMs(p.maxOutageMs),
-      latencyAvg: p.latencyAvg ?? '', latencyP50: p.latencyP50 ?? '',
-      latencyP95: p.latencyP95 ?? '', latencyMax: p.latencyMax ?? '', lastStatus: statusText(p.lastStatus)
-    });
-  }
-  s1.getRow(1).font = { bold: true };
-  s2.getRow(1).font = { bold: true };
-  return wb.xlsx.writeBuffer();
-}
-
-/** 托盘图标提示 + 状态染色：红=有离线/鉴权失败，橙=有异常，绿=全部在线 */
+// ---------- 托盘（状态染色 + 每服务商状态菜单） ----------
 const trayIconCache = {};
 const TRAY_BADGE_FILES = { ok: 'icon-ok.png', warn: 'icon-warn.png', err: 'icon-err.png' };
+const TRAY_PROVIDER_LIMIT = 15;   // 菜单里最多列出的服务商数，超出折叠为一条汇总
+
 function trayLevel() {
   const checked = db.providers.filter((p) => p.enabled !== false && p.status && p.status !== 'unknown');
   if (!checked.length) return 'idle';
@@ -350,6 +203,38 @@ function trayImageFor(level) {
   }
   return trayIconCache[level];
 }
+
+function showMainWindow() {
+  if (win) { win.show(); win.focus(); } else createWindow();
+}
+
+/** 托盘右键菜单：常用动作 + 逐服务商状态行（点击直达详情） */
+function rebuildTrayMenu() {
+  const items = [
+    { label: '显示主界面', click: showMainWindow },
+    {
+      label: '立即检测全部',
+      click: () => { for (const p of db.providers) { if (p.enabled !== false) scheduler.runCheck(p.id, { reason: 'manual' }); } }
+    },
+    { label: '暂停检测', type: 'checkbox', checked: scheduler.paused, click: (item) => setPausedMain(item.checked) },
+    { type: 'separator' }
+  ];
+  for (const p of db.providers.slice(0, TRAY_PROVIDER_LIMIT)) {
+    const st = statusText(p.status);
+    const detail = p.modelsTotal ? `（${(p.modelsAvailable || []).length}/${p.modelsTotal}）` : '';
+    items.push({
+      label: `${st} · ${p.name}${detail}`,
+      click: () => { showMainWindow(); send('open-provider', p.id); }
+    });
+  }
+  if (db.providers.length > TRAY_PROVIDER_LIMIT) {
+    items.push({ label: `… 共 ${db.providers.length} 个服务商`, enabled: false });
+  }
+  items.push({ type: 'separator' });
+  items.push({ label: '退出', click: () => { quitting = true; app.quit(); } });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
 function updateTrayStatus() {
   if (!tray) return;
   try {
@@ -358,9 +243,10 @@ function updateTrayStatus() {
     const down = db.providers.filter((p) => p.status === 'down').length;
     const auth = db.providers.filter((p) => p.status === 'authfail').length;
     const unread = unreadAlerts.length;
-    tray.setToolTip(`AI Provider Monitor\n在线 ${up} · 异常 ${deg} · 离线 ${down}${auth ? ` · 鉴权失败 ${auth}` : ''}${unread ? `\n未读告警 ${unread} 条（点击托盘查看）` : ''}`);
+    tray.setToolTip(`AI Provider Monitor\n在线 ${up} · 异常 ${deg} · 离线 ${down}${auth ? ` · 鉴权失败 ${auth}` : ''}${scheduler.paused ? '\n（自动检测已暂停）' : ''}${unread ? `\n未读告警 ${unread} 条（点击托盘查看）` : ''}`);
     const img = trayImageFor(trayLevel());
     if (img) tray.setImage(img);
+    rebuildTrayMenu();
   } catch (e) { /* ignore */ }
 }
 
@@ -421,6 +307,31 @@ function clearUnread() {
   if (!unreadAlerts.length) return;
   logger.info(`[告警] 已确认 ${unreadAlerts.length} 条未读告警`);
   unreadAlerts.length = 0;
+  updateTrayStatus();
+  send('state-changed', publicState());
+}
+
+/** 逐条确认未读告警（misc IPC 调用） */
+function ackUnreadById(id) {
+  const i = unreadAlerts.findIndex((a) => a.id === Number(id));
+  if (i < 0) return { ok: false, error: '告警不存在或已确认' };
+  const [a] = unreadAlerts.splice(i, 1);
+  logger.info(`[告警] 已确认 1 条未读告警（${a.name}：${a.title}）`);
+  updateTrayStatus();
+  send('state-changed', publicState());
+  return { ok: true };
+}
+
+/** 全局暂停/恢复自动检测（手动检测不受影响；恢复时错过周期的立即补检） */
+function setPausedMain(paused) {
+  if (Boolean(paused) === scheduler.paused) return;
+  if (paused) {
+    scheduler.pause();
+    logger.info('[调度] 已全局暂停自动检测（手动检测不受影响）');
+  } else {
+    scheduler.resume();
+    logger.info('[调度] 已恢复自动检测，错过周期的立即补检');
+  }
   updateTrayStatus();
   send('state-changed', publicState());
 }
@@ -504,7 +415,7 @@ function startAutoChecks() {
   if (!db.global.autoStartCheckOnLaunch) logger.info('未启用"启动即检测"，已保留周期轮循调度');
 }
 
-// ---------- IPC ----------
+// ---------- 状态快照 ----------
 function publicProvider(p) {
   const { apiKey, customHeaders, proxyUrl, ...rest } = p;
   return {
@@ -538,6 +449,7 @@ function publicState() {
     global: publicGlobal(db.global),
     running: scheduler.runningList(),
     schedule: scheduler.scheduleInfo(),
+    paused: Boolean(scheduler.paused),
     dataFile: DATA_FILE,
     dataDir: DATA_DIR,
     logDir: logger.LOG_DIR,
@@ -549,599 +461,28 @@ function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
-ipcMain.handle('state:get', () => publicState());
-ipcMain.handle('logs:get', () => logger.recent());
-ipcMain.handle('logs:clear', () => { logger.clear(); return { ok: true }; });
+// ---------- IPC 装配：handler 按域拆在 src/ipc/*，这里只注入共享上下文 ----------
+const ctx = {
+  getDb: () => db,
+  replaceDb: (v) => { db = v; },
+  persist, persistSoon,
+  send, publicState,
+  win: () => win,
+  scheduler, logger, notifier, alerts, history,
+  DATA_DIR, DATA_FILE,
+  pkg,
+  SECRET_GLOBAL_KEYS,
+  applyLoginItem, registerHotkey,
+  updateTrayStatus,
+  clearAllUnread: clearUnread,
+  ackUnreadById,
+  setPausedMain,
+  isPaused: () => scheduler.paused
+};
+for (const m of ['providers', 'global', 'history', 'backup', 'transfer', 'misc']) {
+  require(`./src/ipc/${m}`).register(ctx);
+}
 logger.subscribe((line) => send('log:line', line));
-
-/** 渲染层表单 → Provider 配置对象（provider:add 与连接测试共用同一套默认值） */
-function buildProviderInput(data) {
-  return {
-    name: String(data.name || '').trim(),
-    url: String(data.url || '').trim().replace(/\/+$/, ''),
-    apiKey: String(data.apiKey || '').trim(),
-    intervalSec: Math.max(5, Number(data.intervalSec) || 60),
-    notifyOnModelChange: Boolean(data.notifyOnModelChange),
-    note: String(data.note || '').trim(),
-    group: String(data.group || '').trim(),
-    tags: Array.isArray(data.tags) ? data.tags.map((t) => String(t).trim()).filter(Boolean) : [],
-    probeMode: String(data.probeMode || 'chat'),
-    probePath: String(data.probePath || '').trim(),
-    probeBody: String(data.probeBody || '').trim(),
-    modelsPath: String(data.modelsPath || '/v1/models').trim(),
-    authType: ['bearer', 'header', 'none'].includes(data.authType) ? data.authType : 'bearer',
-    authHeader: String(data.authHeader || 'X-API-Key').trim(),
-    authPrefix: String(data.authPrefix || ''),
-    customHeaders: String(data.customHeaders || '').trim(),
-    capabilityModes: Array.isArray(data.capabilityModes) ? data.capabilityModes : [],
-    assertType: String(data.assertType || 'none'),
-    assertValue: String(data.assertValue || '').trim(),
-    modelIgnorePattern: String(data.modelIgnorePattern || '').trim(),
-    quotaPath: String(data.quotaPath || '').trim(),
-    quotaValuePath: String(data.quotaValuePath || 'remaining').trim(),
-    quotaWarnBelow: data.quotaWarnBelow === '' || data.quotaWarnBelow == null ? null : Number(data.quotaWarnBelow),
-    measureStreaming: Boolean(data.measureStreaming),
-    notifyChannels: Array.isArray(data.notifyChannels) ? data.notifyChannels : [],
-    maintWeekdays: Array.isArray(data.maintWeekdays) ? data.maintWeekdays : [],
-    maintDates: String(data.maintDates || '').trim(),
-    probeLimit: Number(data.probeLimit) > 0 ? Number(data.probeLimit) : null,
-    proxyUrl: String(data.proxyUrl || '').trim(),
-    useProxy: data.useProxy !== false,
-    maintEnabled: Boolean(data.maintEnabled),
-    maintStart: String(data.maintStart || '02:00'),
-    maintEnd: String(data.maintEnd || '04:00'),
-    insecureSkipVerify: data.insecureSkipVerify === true ? true : data.insecureSkipVerify === false ? false : null,
-    enabled: true,
-    status: 'unknown',
-    modelsAvailable: [],
-    modelsUnavailable: [],
-    modelsUnprobed: [],
-    modelDetails: [],
-    modelsTotal: 0,
-    checkedAt: null,
-    lastError: null,
-    consecutiveFail: 0,
-    probeCursor: 0,
-    modelBaseline: []
-  };
-}
-
-/** 编辑表单覆盖到已有 Provider（provider:update 与连接测试共用）：undefined=保留，空串=清除 */
-function applyProviderPatch(p, data) {
-  Object.assign(p, {
-    name: String(data.name || p.name).trim(),
-    url: String(data.url || p.url).trim().replace(/\/+$/, ''),
-    apiKey: String(data.apiKey ?? p.apiKey).trim(),
-    intervalSec: Math.max(5, Number(data.intervalSec) || p.intervalSec),
-    notifyOnModelChange: Boolean(data.notifyOnModelChange),
-    note: String(data.note ?? p.note).trim(),
-    group: String(data.group ?? p.group ?? '').trim(),
-    tags: Array.isArray(data.tags) ? data.tags.map((t) => String(t).trim()).filter(Boolean) : (p.tags || []),
-    probeMode: String(data.probeMode || p.probeMode || 'chat'),
-    probePath: String(data.probePath ?? p.probePath ?? '').trim(),
-    probeBody: String(data.probeBody ?? p.probeBody ?? '').trim(),
-    modelsPath: String(data.modelsPath ?? p.modelsPath ?? '/v1/models').trim(),
-    authType: ['bearer', 'header', 'none'].includes(data.authType) ? data.authType : (p.authType || 'bearer'),
-    authHeader: String(data.authHeader ?? p.authHeader ?? 'X-API-Key').trim(),
-    authPrefix: String(data.authPrefix ?? p.authPrefix ?? ''),
-    customHeaders: String(data.customHeaders ?? p.customHeaders ?? '').trim(),
-    capabilityModes: Array.isArray(data.capabilityModes) ? data.capabilityModes : (p.capabilityModes || []),
-    assertType: String(data.assertType ?? p.assertType ?? 'none'),
-    assertValue: String(data.assertValue ?? p.assertValue ?? '').trim(),
-    modelIgnorePattern: String(data.modelIgnorePattern ?? p.modelIgnorePattern ?? '').trim(),
-    quotaPath: String(data.quotaPath ?? p.quotaPath ?? '').trim(),
-    quotaValuePath: String(data.quotaValuePath ?? p.quotaValuePath ?? 'remaining').trim(),
-    quotaWarnBelow: data.quotaWarnBelow === '' || data.quotaWarnBelow === null ? null : (Number.isFinite(Number(data.quotaWarnBelow)) ? Number(data.quotaWarnBelow) : (p.quotaWarnBelow ?? null)),
-    measureStreaming: data.measureStreaming !== undefined ? Boolean(data.measureStreaming) : Boolean(p.measureStreaming),
-    notifyChannels: Array.isArray(data.notifyChannels) ? data.notifyChannels : (p.notifyChannels || []),
-    maintWeekdays: Array.isArray(data.maintWeekdays) ? data.maintWeekdays : (p.maintWeekdays || []),
-    maintDates: String(data.maintDates ?? p.maintDates ?? '').trim(),
-    probeLimit: data.probeLimit === null ? null : (Number(data.probeLimit) > 0 ? Number(data.probeLimit) : (p.probeLimit || null)),
-    proxyUrl: String(data.proxyUrl ?? p.proxyUrl ?? '').trim(),
-    useProxy: data.useProxy !== undefined ? data.useProxy !== false : (p.useProxy !== false),
-    maintEnabled: data.maintEnabled !== undefined ? Boolean(data.maintEnabled) : Boolean(p.maintEnabled),
-    maintStart: String(data.maintStart ?? p.maintStart ?? '02:00'),
-    maintEnd: String(data.maintEnd ?? p.maintEnd ?? '04:00'),
-    insecureSkipVerify: data.insecureSkipVerify === undefined ? (p.insecureSkipVerify ?? null)
-      : (data.insecureSkipVerify === true ? true : data.insecureSkipVerify === false ? false : null)
-  });
-}
-
-ipcMain.handle('provider:add', (e, data) => {
-  const id = newNumericId(new Set(db.providers.map((p) => p.id)));
-  const p = { id, ...buildProviderInput(data) };
-  try { validateProviderConfig(p); } catch (err) { return { ok: false, error: err.message }; }
-  db.providers.push(p);
-  const saved = persist();
-  if (!saved.ok) { db.providers.pop(); return saved; }
-  if (p.enabled !== false) scheduler.schedule(p);
-  logger.info(`新增 Provider [${p.name}] ${p.url}`);
-  send('state-changed', publicState());
-  return { ok: true, id };
-});
-
-ipcMain.handle('provider:update', (e, { id, data }) => {
-  const p = db.providers.find((x) => x.id === Number(id));
-  if (!p) return { ok: false, error: 'Provider 不存在' };
-  const periodChanged = Number(data.intervalSec) !== Number(p.intervalSec);
-  const before = { ...p, tags: [...(p.tags || [])] };
-  applyProviderPatch(p, data);
-  try { validateProviderConfig(p); } catch (err) { Object.assign(p, before); return { ok: false, error: err.message }; }
-  const saved = persist();
-  if (!saved.ok) { Object.assign(p, before); return saved; }
-  // 仅在周期变化时重排定时器（schedule 内部也会保护未变化的定时器），
-  // 避免编辑名称/备注等操作把轮循从头计时
-  if (p.enabled !== false && periodChanged) scheduler.schedule(p);
-  logger.info(`更新 Provider [${p.name}]${periodChanged ? `（周期调整为 ${formatDuration(p.intervalSec)}，已重新调度）` : ''}`);
-  send('state-changed', publicState());
-  return { ok: true };
-});
-
-ipcMain.handle('provider:delete', (e, id) => {
-  const i = db.providers.findIndex((x) => x.id === Number(id));
-  if (i < 0) return { ok: false };
-  const [p] = db.providers.splice(i, 1);
-  const saved = persist();
-  if (!saved.ok) { db.providers.splice(i, 0, p); return saved; }
-  scheduler.cancel(p.id);
-  scheduler.resetCircuit(p.id);
-  alerts.resetState(p.id);
-  logger.info(`删除 Provider [${p.name}]`);
-  send('state-changed', publicState());
-  return { ok: true };
-});
-
-ipcMain.handle('provider:deleteMany', (e, ids) => {
-  const set = new Set((ids || []).map(Number));
-  const removed = [];
-  const before = db.providers;
-  db.providers = db.providers.filter((p) => {
-    if (set.has(p.id)) { removed.push(p); return false; }
-    return true;
-  });
-  const saved = persist();
-  if (!saved.ok) { db.providers = before; return saved; }
-  for (const p of removed) { scheduler.cancel(p.id); scheduler.resetCircuit(p.id); alerts.resetState(p.id); }
-  logger.info(`批量删除 ${removed.length} 个 Provider`);
-  send('state-changed', publicState());
-  return { ok: true, removed: removed.length };
-});
-
-/** 按需取回明文 Key（编辑弹窗眼睛图标用）：状态快照始终掩码，仅显式请求时返回 */
-ipcMain.handle('provider:revealKey', (e, id) => {
-  const p = db.providers.find((x) => x.id === Number(id));
-  if (!p) return { ok: false, error: 'Provider 不存在' };
-  return { ok: true, apiKey: String(p.apiKey || '') };
-});
-
-/** 复制 Key 到剪贴板：在主进程完成，明文不进渲染层 */
-ipcMain.handle('provider:copyKey', (e, id) => {
-  const p = db.providers.find((x) => x.id === Number(id));
-  if (!p || !p.apiKey) return { ok: false, error: '未保存 API Key' };
-  clipboard.writeText(String(p.apiKey));
-  return { ok: true };
-});
-
-/**
- * 连接测试：不保存、不入调度，直接跑一轮 detect 返回摘要。
- * 编辑已有服务商时以已存配置为底（含明文 Key）再套表单补丁——
- * 否则密钥留空（=不修改语义）会让测试用空 Key 误报鉴权失败。
- */
-ipcMain.handle('provider:testConn', async (e, { id, data } = {}) => {
-  const existing = Number(id) ? db.providers.find((x) => x.id === Number(id)) : null;
-  let p;
-  if (existing) {
-    p = JSON.parse(JSON.stringify(existing));
-    applyProviderPatch(p, data || {});
-  } else {
-    p = { id: 0, ...buildProviderInput(data || {}) };
-  }
-  p.enabled = true;
-  try { validateProviderConfig(p); } catch (err) { return { ok: false, error: err.message }; }
-  try {
-    const r = await detect(p, { globalCfg: db.global });
-    return {
-      ok: true,
-      result: {
-        status: r.status, latency: r.latency, modelsTotal: r.modelsTotal,
-        available: (r.modelsAvailable || []).length,
-        unavailable: (r.modelsUnavailable || []).length,
-        unprobed: (r.modelsUnprobed || []).length,
-        error: r.error || null,
-        durationMs: r.durationMs,
-        sampleFailures: (r.modelDetails || []).filter((d) => d && d.ok === false).slice(0, 3).map((d) => `${d.id}：${d.note || ''}`)
-      }
-    };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('provider:checkNow', (e, ids) => {
-  const list = (ids || []).map(Number);
-  for (const id of list) scheduler.runCheck(id, { reason: 'manual' });
-  return { ok: true, count: list.length };
-});
-
-ipcMain.handle('provider:checkAll', () => {
-  for (const p of db.providers) { if (p.enabled !== false) scheduler.runCheck(p.id, { reason: 'manual' }); }
-  return { ok: true };
-});
-
-ipcMain.handle('provider:toggleEnabled', (e, { id, enabled }) => {
-  const p = db.providers.find((x) => x.id === Number(id));
-  if (!p) return { ok: false };
-  const before = JSON.parse(JSON.stringify(p));
-  p.enabled = Boolean(enabled);
-  if (p.enabled) {
-    // 重新启用：以当前时间基线立即调度（schedule 内部会按 checkedAt 判断是否补检）
-    scheduler.schedule(p);
-  } else {
-    scheduler.cancel(p.id);
-    p.modelChanged = false;   // 停用时清除"变动"徽标，避免永久残留
-    // 停用后旧状态不再代表现实：回到待检测，避免列表里显示成"在线"
-    p.status = 'unknown';
-    p.latency = null;
-    p.modelsTotal = 0;
-    p.modelsAvailable = [];
-    p.modelsUnavailable = [];
-    p.modelsUnprobed = [];
-    p.modelDetails = [];
-    p.checkedAt = null;
-    p.lastError = null;
-    p.consecutiveFail = 0;
-    p.modelBaseline = [];
-    p.alertRuntime = null;
-    alerts.resetState(p.id);
-    scheduler.resetCircuit(p.id);
-  }
-  const saved = persist();
-  if (!saved.ok) {
-    Object.assign(p, before);
-    if (p.enabled) scheduler.schedule(p); else scheduler.cancel(p.id);
-    return saved;
-  }
-  send('state-changed', publicState());
-  updateTrayStatus();
-  return { ok: true };
-});
-
-ipcMain.handle('global:set', (e, patch) => {
-  const before = db.global;
-  // configVersion 与 lastReportDay 只由主进程维护：前者是迁移标记，后者是日报去重状态，
-  // 允许渲染层写入会让日报被误跳过或迁移逻辑失效
-  const READONLY_GLOBAL = new Set(['configVersion', 'lastReportDay']);
-  const allowed = new Set(Object.keys(db.global || {}).filter((k) => !READONLY_GLOBAL.has(k)));
-  const safePatch = {};
-  for (const [key, value] of Object.entries((patch && typeof patch === 'object') ? patch : {})) {
-    if (allowed.has(key)) safePatch[key] = value;
-    else logger.warn(`[配置] 忽略未授权全局字段: ${key}`);
-  }
-  // 归一化兜底：钳位数值、校验时间与枚举格式（前端约束之外的最后一道防线）
-  db.global = normalizeGlobal({ ...db.global, ...safePatch });
-  const saved = persist();
-  if (!saved.ok) { db.global = before; return saved; }
-  scheduler.setConcurrency(db.global.concurrency || 4);
-  logger.configure(db.global);
-  applyLoginItem(db.global);
-  registerHotkey();
-  logger.info('全局配置已更新');
-  send('state-changed', publicState());
-  return { ok: true };
-});
-
-/** 清除已保存的全局敏感配置（只允许 SECRET_GLOBAL_KEYS 内的键） */
-ipcMain.handle('global:clearSecrets', (e, keys) => {
-  const list = (Array.isArray(keys) ? keys : []).map(String).filter((k) => SECRET_GLOBAL_KEYS.includes(k));
-  if (!list.length) return { ok: false, error: '未指定要清除的密钥' };
-  const before = db.global;
-  db.global = { ...db.global };
-  for (const k of list) db.global[k] = '';
-  const saved = persist();
-  if (!saved.ok) { db.global = before; return saved; }
-  // 通道凭据被清空后，旧的成功/失败记录不再代表当前配置，一并清掉健康状态
-  const AFFECTED = {
-    weixinWebhook: ['weixin'], qqWebhook: ['qq'], dingtalkWebhook: ['dingtalk'],
-    telegramToken: ['telegram'], feishuWebhook: ['feishu'], slackWebhook: ['slack'],
-    serverchanKey: ['serverchan'], customWebhook: ['custom']
-  };
-  const stale = new Set();
-  for (const k of list) for (const ch of AFFECTED[k] || []) stale.add(ch);
-  if (stale.size) resetHealth([...stale]);
-  logger.info(`[配置] 已清除 ${list.length} 项敏感配置（${list.join(', ')}）`);
-  send('state-changed', publicState());
-  return { ok: true };
-});
-
-ipcMain.handle('notify:test', async (e, channel) => {
-  try {
-    await sendTest(db.global, channel);
-    logger.info(`[通知] 测试消息发送成功 (${channel})`);
-    // 测试结果已计入通道健康，立即推状态让面板刷新（否则要等下一次轮询才变绿）
-    send('state-changed', publicState());
-    return { ok: true };
-  } catch (err) {
-    logger.error(`[通知] 测试失败 (${channel}): ${err.message}`);
-    send('state-changed', publicState());
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('open:path', (e, p) => { if (!p) return { ok: false, error: '路径为空' }; shell.openPath(p); return { ok: true }; });
-
-ipcMain.handle('app:version', () => pkg.version || app.getVersion());
-
-// ---------- 历史统计 ----------
-ipcMain.handle('history:summary', async (e, { hours, providerId } = {}) => {
-  try { return { ok: true, ...(await history.summarize(DATA_DIR, { hours: Number(hours) || 24, providerId })) }; }
-  catch (err) { return { ok: false, error: err.message }; }
-});
-
-ipcMain.handle('history:series', async (e, { hours, providerId, buckets } = {}) => {
-  try { return { ok: true, ...(await history.series(DATA_DIR, { hours: Number(hours) || 24, providerId, buckets: Number(buckets) || 48 })) }; }
-  catch (err) { return { ok: false, error: err.message }; }
-});
-
-ipcMain.handle('history:exportCSV', async (e, { hours, providerId } = {}) => {
-  try {
-    const content = await history.exportCSV(DATA_DIR, { hours: Number(hours) || 24, providerId });
-    const r = await dialog.showSaveDialog(win, {
-      title: '导出历史记录',
-      defaultPath: `aipm-history-${new Date().toISOString().slice(0, 10)}.csv`,
-      filters: [{ name: 'CSV 文件', extensions: ['csv'] }]
-    });
-    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
-    fs.writeFileSync(r.filePath, '\ufeff' + content, 'utf8');
-    logger.info(`[历史] 已导出 ${r.filePath}`);
-    return { ok: true, path: r.filePath };
-  } catch (err) { return { ok: false, error: err.message }; }
-});
-
-ipcMain.handle('history:prune', (e, days) => {
-  try { return { ok: true, removed: history.prune(DATA_DIR, Number(days) || 30) }; }
-  catch (err) { return { ok: false, error: err.message }; }
-});
-
-ipcMain.handle('history:modelRates', async (e, { providerId, hours } = {}) => {
-  try { return { ok: true, ...(await history.modelRates(DATA_DIR, providerId, { hours: Number(hours) || 24 })) }; }
-  catch (err) { return { ok: false, error: err.message }; }
-});
-
-ipcMain.handle('app:clearUnread', () => { clearUnread(); return { ok: true }; });
-
-/** 逐条确认未读告警 */
-ipcMain.handle('app:ackUnread', (e, id) => {
-  const i = unreadAlerts.findIndex((a) => a.id === Number(id));
-  if (i < 0) return { ok: false, error: '告警不存在或已确认' };
-  const [a] = unreadAlerts.splice(i, 1);
-  logger.info(`[告警] 已确认 1 条未读告警（${a.name}：${a.title}）`);
-  updateTrayStatus();
-  send('state-changed', publicState());
-  return { ok: true };
-});
-
-/** 批量编辑选中的服务商：仅应用提交的字段，整体一次落盘 */
-ipcMain.handle('provider:bulkUpdate', (e, { ids, patch } = {}) => {
-  const set = new Set((ids || []).map(Number));
-  const targets = db.providers.filter((p) => set.has(p.id));
-  if (!targets.length) return { ok: false, error: '未选中任何服务商' };
-  const tri = (v) => (v === true || v === false ? v : undefined);
-  const clean = {};
-  if (patch && Number(patch.intervalSec) > 0) clean.intervalSec = Math.min(31536000, Math.max(5, Math.round(Number(patch.intervalSec))));
-  if (patch) {
-    const n = tri(patch.notifyOnModelChange);
-    if (n !== undefined) clean.notifyOnModelChange = n;
-    const u = tri(patch.useProxy);
-    if (u !== undefined) clean.useProxy = u;
-  }
-  if (patch && typeof patch.group === 'string') clean.group = patch.group.trim();
-  if (!Object.keys(clean).length) return { ok: false, error: '没有要修改的字段' };
-  const before = new Map(targets.map((p) => [p, { intervalSec: p.intervalSec, notifyOnModelChange: p.notifyOnModelChange, group: p.group, useProxy: p.useProxy }]));
-  let invalid = null;
-  for (const p of targets) {
-    Object.assign(p, clean);
-    try { validateProviderConfig(p); }
-    catch (err) { invalid = `[${p.name}] ${err.message}`; break; }
-  }
-  if (invalid) {
-    for (const p of targets) Object.assign(p, before.get(p));
-    return { ok: false, error: invalid };
-  }
-  const saved = persist();
-  if (!saved.ok) { for (const p of targets) Object.assign(p, before.get(p)); return saved; }
-  // 周期变了才重排定时器，其余字段改动不打扰既有节奏
-  if (clean.intervalSec !== undefined) {
-    for (const p of targets) { if (p.enabled !== false) scheduler.schedule(p); }
-  }
-  logger.info(`批量更新 ${targets.length} 个 Provider（${Object.keys(clean).join(', ')}）`);
-  send('state-changed', publicState());
-  return { ok: true, updated: targets.length };
-});
-
-ipcMain.handle('mail:test', async () => {
-  try {
-    const { sendMail } = require('./src/mailer');
-    const sum = await history.summarize(DATA_DIR, { hours: 24 });
-    await sendMail(db.global, { subject: 'AI Provider Monitor 邮件测试', html: buildReportHTML(sum) });
-    logger.info('[邮件] 测试邮件发送成功');
-    return { ok: true };
-  } catch (err) { logger.error(`[邮件] 测试失败: ${err.message}`); return { ok: false, error: err.message }; }
-});
-
-// ---------- 日志文件管理 ----------
-ipcMain.handle('logs:files', () => {
-  try { return { ok: true, list: logger.listFiles(), dir: logger.LOG_DIR }; }
-  catch (err) { return { ok: false, error: err.message }; }
-});
-
-// ---------- 状态报告导出 ----------
-ipcMain.handle('report:export', async (e, { format = 'html', hours = 24 } = {}) => {
-  try {
-    const sum = await history.summarize(DATA_DIR, { hours: Number(hours) || 24 });
-    const defExt = format === 'csv' ? 'csv' : 'html';
-    const r = await dialog.showSaveDialog(win, {
-      title: '导出状态报告',
-      defaultPath: `aipm-report-${new Date().toISOString().slice(0, 10)}.${defExt}`,
-      // HTML 与 Excel 同框选择：按用户实际保存的后缀决定格式（统计页不新增按钮）
-      filters: defExt === 'csv'
-        ? [{ name: 'CSV 文件', extensions: ['csv'] }]
-        : [{ name: 'HTML 文件', extensions: ['html'] }, { name: 'Excel 文件', extensions: ['xlsx'] }]
-    });
-    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
-    const ext = String(r.filePath.split('.').pop() || '').toLowerCase();
-    if (ext === 'xlsx') {
-      const buf = await buildReportXLSX(sum);
-      fs.writeFileSync(r.filePath, buf);
-    } else if (ext === 'csv' || defExt === 'csv') {
-      fs.writeFileSync(r.filePath, '\ufeff' + buildReportCSV(sum), 'utf8');
-    } else {
-      fs.writeFileSync(r.filePath, buildReportHTML(sum), 'utf8');
-    }
-    logger.info(`[报告] 已导出 ${r.filePath}`);
-    return { ok: true, path: r.filePath };
-  } catch (err) { return { ok: false, error: err.message }; }
-});
-
-// ---------- 备份 / 还原 ----------
-ipcMain.handle('backup:export', async (e, filePath) => {
-  try {
-    const target = filePath || path.join(DATA_DIR, `backup-manual-${backup.stampSafe()}.json`);
-    const saved = backup.exportTo({ global: db.global, providers: db.providers }, target);
-    return { ok: true, path: saved };
-  } catch (err) {
-    logger.error(`[备份] 导出失败: ${err.message}`);
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('backup:saveAs', async () => {
-  const r = await dialog.showSaveDialog(win, {
-    title: '备份保存到…',
-    defaultPath: `aipm-backup-${backup.stampSafe()}.json`,
-    filters: [{ name: '备份文件', extensions: ['json'] }]
-  });
-  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
-  try {
-    const saved = backup.exportTo({ global: db.global, providers: db.providers }, r.filePath);
-    return { ok: true, path: saved };
-  } catch (err) {
-    logger.error(`[备份] 另存失败: ${err.message}`);
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('backup:pickFile', async () => {
-  const r = await dialog.showOpenDialog(win, {
-    title: '选择备份文件',
-    properties: ['openFile'],
-    filters: [{ name: '备份文件', extensions: ['json'] }]
-  });
-  if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
-  // 读取摘要供确认弹窗展示
-  try {
-    const meta = backup.parseBackupFile(r.filePaths[0]);
-    return { ok: true, path: r.filePaths[0], count: meta.providers.length, hasGlobal: Boolean(meta.global) };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('backup:restore', (e, { filePath, mode }) => {
-  try {
-    const before = JSON.stringify(db);
-    const res = backup.restoreFrom(db, filePath, mode === 'merge' ? 'merge' : 'overwrite');
-    const saved = persist();
-    if (!saved.ok) { db = JSON.parse(before); return saved; }
-    // 重建全部定时器并刷新前端；旧熔断记录对应的 provider 可能已不在列表里，一并清空
-    scheduler.removeAll();
-    scheduler.resetAllCircuits();
-    for (const p of db.providers) {
-      if (p.enabled !== false) scheduler.schedule(p);
-    }
-    updateTrayStatus();
-    send('state-changed', publicState());
-    return { ok: true, ...res };
-  } catch (err) {
-    logger.error(`[还原] 失败: ${err.message}`);
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('backup:listAuto', () => {
-  try { return { ok: true, list: backup.listAuto(DATA_DIR), dir: backup.backupDir(DATA_DIR) }; }
-  catch (err) { return { ok: false, error: err.message }; }
-});
-
-ipcMain.handle('backup:runAuto', () => {
-  try {
-    const file = backup.autoBackup({ global: db.global, providers: db.providers }, DATA_DIR, { keep: 10 });
-    return { ok: true, path: file };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-// ---------- 服务商批量导入 / 导出 ----------
-ipcMain.handle('transfer:export', (e, { format, delimiter, withKey, filePath }) => {
-  try {
-    const content = transfer.exportProviders(db.providers, { format, delimiter, withKey });
-    if (!filePath) {
-      // 无路径：纯预览，只返回内容不落盘（避免在数据目录堆积 providers-*.json 快照）
-      return { ok: true, path: null, content };
-    }
-    fs.writeFileSync(filePath, content, 'utf8');
-    logger.info(`[导入导出] 已导出到 ${filePath}`);
-    return { ok: true, path: filePath, content };
-  } catch (err) {
-    logger.error(`[导入导出] 导出失败: ${err.message}`);
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('transfer:exportSaveAs', async (e, { format, delimiter, withKey }) => {
-  const r = await dialog.showSaveDialog(win, {
-    title: '导出服务商到…',
-    defaultPath: `providers-${new Date().toISOString().slice(0, 10)}.${format === 'csv' ? 'csv' : format === 'text' ? 'txt' : 'json'}`,
-    filters: [{ name: format === 'csv' ? 'CSV 文件' : format === 'text' ? '文本文件' : 'JSON 文件', extensions: [format === 'csv' ? 'csv' : format === 'text' ? 'txt' : 'json'] }]
-  });
-  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
-  try {
-    const content = transfer.exportProviders(db.providers, { format, delimiter, withKey });
-    fs.writeFileSync(r.filePath, content, 'utf8');
-    logger.info(`[导入导出] 已导出到 ${r.filePath}`);
-    return { ok: true, path: r.filePath, content };
-  } catch (err) {
-    logger.error(`[导入导出] 导出失败: ${err.message}`);
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('transfer:parse', (e, { text, format, delimiter }) => {
-  try {
-    return { ok: true, ...transfer.parseImport(text, { format, delimiter }) };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('transfer:apply', (e, { items, mode }) => {
-  try {
-    const before = JSON.stringify(db);
-    const res = transfer.applyImport(db, items || [], mode === 'append' ? 'append' : 'merge');
-    const saved = persist();
-    if (!saved.ok) { db = JSON.parse(before); return saved; }
-    // 全量重排：新增的补上定时器，合并更新过周期的也按新周期重排
-    // （schedule 内部对周期未变化的已有定时器是 no-op，不会打扰既有节奏）
-    for (const p of db.providers) {
-      if (p.enabled !== false) scheduler.schedule(p);
-    }
-    send('state-changed', publicState());
-    return { ok: true, ...res };
-  } catch (err) {
-    logger.error(`[导入导出] 导入失败: ${err.message}`);
-    return { ok: false, error: err.message };
-  }
-});
 
 // ---------- 窗口 / 托盘 ----------
 function createWindow() {
@@ -1218,13 +559,8 @@ function createTray() {
     if (!fs.existsSync(iconPath)) return;
     tray = new Tray(iconPath);
     tray.setToolTip('AI Provider Monitor');
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: '显示主界面', click: () => { if (win) { win.show(); win.focus(); } else createWindow(); } },
-      { label: '立即检测全部', click: () => { for (const p of db.providers) { if (p.enabled !== false) scheduler.runCheck(p.id, { reason: 'manual' }); } } },
-      { type: 'separator' },
-      { label: '退出', click: () => { quitting = true; app.quit(); } }
-    ]));
-    tray.on('double-click', () => { if (win) { win.show(); win.focus(); } });
+    rebuildTrayMenu();
+    tray.on('double-click', showMainWindow);
   } catch (e) { logger.warn(`托盘创建失败: ${e.message}`); }
 }
 
