@@ -50,20 +50,24 @@ function register(ctx) {
   });
 
   ipcMain.handle('transfer:apply', (e, { items, mode }) => {
+    const db = ctx.getDb();
+    const before = JSON.stringify(db);
+    let committed = false;
     try {
-      const db = ctx.getDb();
-      const before = JSON.stringify(db);
       const res = transfer.applyImport(db, items || [], mode === 'append' ? 'append' : 'merge');
       const saved = ctx.persist();
       if (!saved.ok) { ctx.replaceDb(JSON.parse(before)); return saved; }
+      committed = true;
       // 全量重排：新增的补上定时器，合并更新过周期的也按新周期重排
       // （schedule 内部对周期未变化的已有定时器是 no-op，不会打扰既有节奏）
       for (const p of db.providers) {
         if (p.enabled !== false) ctx.scheduler.schedule(p);
+        else { ctx.scheduler.cancel(p.id); ctx.scheduler.resetCircuit(p.id); }
       }
       ctx.send('state-changed', ctx.publicState());
       return { ok: true, ...res };
     } catch (err) {
+      if (!committed) ctx.replaceDb(JSON.parse(before));
       ctx.logger.error(`[导入导出] 导入失败: ${err.message}`);
       return { ok: false, error: err.message };
     }

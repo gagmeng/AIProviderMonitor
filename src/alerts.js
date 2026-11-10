@@ -30,7 +30,7 @@ const DEFAULTS = {
 const runtime = new Map();
 
 function freshState() {
-  return { consecutiveFail: 0, inAlarm: false, latencyHigh: 0, lastSent: {} };
+  return { consecutiveFail: 0, inAlarm: false, latencyHigh: 0, lastSent: {}, pending: {} };
 }
 
 function stateOf(id) {
@@ -49,6 +49,7 @@ function bindState(provider) {
     const lh = Number(saved.latencyHigh);
     st.latencyHigh = Number.isFinite(lh) && lh > 0 ? lh : 0;
     st.inAlarm = Boolean(saved.inAlarm);
+    if (saved.pending && typeof saved.pending === 'object') st.pending = JSON.parse(JSON.stringify(saved.pending));
     if (saved.lastSent && typeof saved.lastSent === 'object') st.lastSent = { ...saved.lastSent };
   }
   runtime.set(id, st);
@@ -61,11 +62,12 @@ function writeState(provider, st) {
     consecutiveFail: st.consecutiveFail,
     inAlarm: Boolean(st.inAlarm),
     latencyHigh: st.latencyHigh || 0,
+    pending: JSON.parse(JSON.stringify(st.pending || {})),
     lastSent: { ...st.lastSent }
   };
 }
 
-function resetState(id) { runtime.delete(id); }
+function resetState(id) { if (id == null) runtime.clear(); else runtime.delete(id); }
 
 function cfg(globalCfg, key) {
   const v = globalCfg ? globalCfg[key] : undefined;
@@ -104,147 +106,107 @@ function inMaintWindow(provider, now = new Date()) {
   return start < end ? (cur >= start && cur < end) : (cur >= start || cur < end);
 }
 
-function inCooldown(st, kind, cooldownMin) {
-  const last = st.lastSent[kind] || 0;
-  return Date.now() - last < Math.max(0, Number(cooldownMin) || 0) * 60000;
+let eventSequence = 0;
+function queueAlert(st, kind, title, reason, extra = {}) {
+  if (!st.pending[kind]) {
+    st.pending[kind] = { kind, title, reason, eventId: `${Date.now()}-${++eventSequence}`, delivered: [], attempts: 0, nextRetryAt: 0, ...extra };
+  } else if (kind === 'modelChange') {
+    const pending = st.pending[kind];
+    // Coalesce opposite transitions while muted into the final net change.
+    const added = new Set(pending.added || []), lost = new Set(pending.lost || []);
+    for (const id of extra.added || []) { if (!lost.delete(id)) added.add(id); }
+    for (const id of extra.lost || []) { if (!added.delete(id)) lost.add(id); }
+    pending.added = [...added]; pending.lost = [...lost];
+    pending.reason = reason;
+    if (pending.presented) {
+      pending.eventId = `${Date.now()}-${++eventSequence}`; pending.delivered = [];
+      pending.presented = false; pending.attempts = 0; pending.nextRetryAt = 0;
+    }
+    if (!added.size && !lost.size && ((extra.added || []).length || (extra.lost || []).length)) delete st.pending[kind];
+  }
 }
 
-function markSent(st, kind) { st.lastSent[kind] = Date.now(); }
-
-/**
- * @param opts.now 测试或补发判定用的当前时间，缺省为现在
- * @returns { alerts, suppressed, consecutiveFail, inAlarm }
- */
-function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck = false, now = null } = {}) {
-  const st = bindState(provider);
-  const alerts = [];
-  const suppressed = [];
-  const at = now || new Date();
-  const quiet = inQuietHours(globalCfg, at);
-  const maint = inMaintWindow(provider, at);
-  const cooldownMin = Number(cfg(globalCfg, 'alertCooldownMin'));
-  const threshold = Math.max(1, Number(cfg(globalCfg, 'alertFailThreshold')) || 1);
+/** Evaluation creates durable pending events; delivery is committed separately. */
+function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck = false, now = null, added = [], lost = [], deliveryOnly = false } = {}) {
+  const st = bindState(provider), at = now || new Date(), timestamp = at.getTime();
+  const suppressed = [], output = [];
   const isUp = provider.status === 'up';
-
-  if (isUp) st.consecutiveFail = 0;
-  else st.consecutiveFail++;
-
-  if (firstCheck) {
-    st.inAlarm = false;
-    writeState(provider, st);
-    return { alerts, suppressed, consecutiveFail: st.consecutiveFail, inAlarm: st.inAlarm };
-  }
-
+  if (!deliveryOnly) st.consecutiveFail = isUp ? 0 : st.consecutiveFail + 1;
+  if (firstCheck) { writeState(provider, st); return { alerts: output, suppressed, consecutiveFail: st.consecutiveFail, inAlarm: st.inAlarm }; }
   const failKind = provider.status === 'authfail' ? 'authfail' : 'down';
-  const failTitle = provider.status === 'authfail' ? '密钥失效' : '服务异常';
-  if (!isUp && st.consecutiveFail >= threshold && !st.inAlarm) {
-    if (maint) {
-      suppressed.push({ kind: failKind, why: '维护窗口' });
-    } else if (quiet) {
-      suppressed.push({ kind: failKind, why: '静默时段' });
-    } else if (inCooldown(st, failKind, cooldownMin)) {
-      suppressed.push({ kind: failKind, why: '冷却中' });
-    } else {
-      alerts.push({
-        kind: failKind,
-        title: failTitle,
-        reason: failKind === 'authfail'
-          ? `鉴权失败（API Key 无效或无权限）${provider.lastError ? '：' + provider.lastError : ''}`
-          : `连续 ${st.consecutiveFail} 轮检测未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`
-      });
-      markSent(st, failKind);
-      st.inAlarm = true;
+  const threshold = Math.max(1, Number(cfg(globalCfg, 'alertFailThreshold')) || 1);
+  if (!deliveryOnly && !isUp) {
+    delete st.pending.recover;
+    delete st.pending[failKind === 'down' ? 'authfail' : 'down'];
+    if (st.consecutiveFail >= threshold && !st.inAlarm) {
+      queueAlert(st, failKind, failKind === 'authfail' ? '密钥失效' : '服务异常',
+        `连续 ${st.consecutiveFail} 轮检测未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`);
+    }
+    const escalation = Number(cfg(globalCfg, 'alertEscalateMin')) || 0;
+    if (st.inAlarm && escalation > 0 && timestamp - Math.max(st.lastSent.down || 0, st.lastSent.authfail || 0) >= escalation * 60000) {
+      queueAlert(st, failKind, '服务异常（持续未恢复）', `故障持续未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`);
+    }
+  } else if (!deliveryOnly) {
+    delete st.pending.down; delete st.pending.authfail;
+    if (st.inAlarm) {
+      if (cfg(globalCfg, 'alertRecoverNotify')) queueAlert(st, 'recover', '服务恢复', `已恢复在线，可用模型 ${(provider.modelsAvailable || []).length}/${provider.modelsTotal || 0}`);
+      else { st.inAlarm = false; delete st.pending.recover; }
     }
   }
-
-  // 故障升级：故障持续 N 分钟仍未恢复时重复提醒（0 = 关闭），受维护窗口与静默时段约束
-  const escalateMin = Math.max(0, Number(cfg(globalCfg, 'alertEscalateMin')) || 0);
-  if (!isUp && st.inAlarm && escalateMin > 0 && !alerts.some((a) => a.kind === failKind)) {
-    if (maint) {
-      suppressed.push({ kind: 'escalate', why: '维护窗口' });
-    } else if (quiet) {
-      suppressed.push({ kind: 'escalate', why: '静默时段' });
-    } else if (Date.now() - (st.lastSent[failKind] || 0) >= escalateMin * 60000) {
-      alerts.push({
-        kind: failKind,
-        title: `${failTitle}（持续未恢复）`,
-        reason: `故障已持续超过 ${escalateMin} 分钟仍未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`
-      });
-      markSent(st, failKind);
-    }
-  }
-
-  // 延迟劣化：仅统计在线状态下的连接延迟，连续 N 轮超过阈值才告警；
-  // 计数不受静默/维护影响（持续累积），推送仍受冷却约束，劣化持续期间按冷却节奏重复提醒。
-  const latMs = Number(provider.latency);
-  const latThreshold = Number(cfg(globalCfg, 'latencyAlertMs'));
-  const latConsec = Math.max(1, Number(cfg(globalCfg, 'latencyAlertConsecutive')) || 1);
-  const latBad = Boolean(cfg(globalCfg, 'latencyAlertEnabled'))
-    && isUp && Number.isFinite(latMs) && latMs > 0 && latMs >= latThreshold;
-  st.latencyHigh = latBad ? (st.latencyHigh || 0) + 1 : 0;
-  if (st.latencyHigh >= latConsec) {
-    if (maint) {
-      suppressed.push({ kind: 'latency', why: '维护窗口' });
-    } else if (quiet) {
-      suppressed.push({ kind: 'latency', why: '静默时段' });
-    } else if (inCooldown(st, 'latency', cooldownMin)) {
-      suppressed.push({ kind: 'latency', why: '冷却中' });
-    } else {
-      alerts.push({
-        kind: 'latency',
-        title: '延迟劣化',
-        reason: `连续 ${st.latencyHigh} 轮连接延迟 ≥ ${latThreshold} ms（当前 ${latMs} ms）`
-      });
-      markSent(st, 'latency');
-    }
-  }
-
-  if (isUp && st.inAlarm) {
-    st.inAlarm = false;
-    if (!cfg(globalCfg, 'alertRecoverNotify')) {
-      suppressed.push({ kind: 'recover', why: '恢复通知已关闭' });
-    } else if (maint) {
-      suppressed.push({ kind: 'recover', why: '维护窗口' });
-    } else if (quiet) {
-      suppressed.push({ kind: 'recover', why: '静默时段' });
-    } else {
-      alerts.push({
-        kind: 'recover',
-        title: '服务恢复',
-        reason: `已恢复在线，可用模型 ${(provider.modelsAvailable || []).length}/${provider.modelsTotal || 0}`
-      });
-      markSent(st, 'recover');
-    }
-  }
-
+  const latBad = cfg(globalCfg, 'latencyAlertEnabled') && isUp && Number(provider.latency) >= Number(cfg(globalCfg, 'latencyAlertMs'));
+  if (!deliveryOnly) st.latencyHigh = latBad ? st.latencyHigh + 1 : 0;
+  if (!deliveryOnly && latBad && st.latencyHigh >= Math.max(1, Number(cfg(globalCfg, 'latencyAlertConsecutive')) || 1)) {
+    queueAlert(st, 'latency', '延迟劣化', `连续 ${st.latencyHigh} 轮连接延迟超阈值（当前 ${provider.latency} ms）`);
+  } else if (!latBad) delete st.pending.latency;
   if (modelChanged && cfg(globalCfg, 'alertOnModelChange') && provider.notifyOnModelChange) {
-    if (maint) {
-      suppressed.push({ kind: 'modelChange', why: '维护窗口' });
-    } else if (quiet) {
-      suppressed.push({ kind: 'modelChange', why: '静默时段' });
-    } else if (inCooldown(st, 'modelChange', cooldownMin)) {
-      suppressed.push({ kind: 'modelChange', why: '冷却中' });
-    } else {
-      alerts.push({ kind: 'modelChange', title: '模型变动', reason: '可用模型集合发生变化' });
-      markSent(st, 'modelChange');
-    }
+    queueAlert(st, 'modelChange', '模型变动', '可用模型集合发生变化', { added, lost });
   }
-
-  if (provider.quotaWarning) {
-    if (maint) suppressed.push({ kind: 'quota', why: '维护窗口' });
-    else if (quiet) suppressed.push({ kind: 'quota', why: '静默时段' });
-    else if (inCooldown(st, 'quota', cooldownMin)) suppressed.push({ kind: 'quota', why: '冷却中' });
-    else {
-      alerts.push({ kind: 'quota', title: '配额不足', reason: `当前剩余 ${provider.quotaRemaining}，告警阈值 ${provider.quotaWarnBelow}` });
-      markSent(st, 'quota');
-    }
-  }
-
-  for (const s of suppressed) {
-    logger.debug(`[告警] [${provider.name}] ${s.kind} 被抑制（${s.why}）`);
+  if (!cfg(globalCfg, 'alertOnModelChange') || !provider.notifyOnModelChange) delete st.pending.modelChange;
+  if (!deliveryOnly && provider.quotaWarning) queueAlert(st, 'quota', '配额不足', `当前剩余 ${provider.quotaRemaining}，告警阈值 ${provider.quotaWarnBelow}`);
+  else if (!provider.quotaWarning) delete st.pending.quota;
+  const muted = inMaintWindow(provider, at) ? '维护窗口' : inQuietHours(globalCfg, at) ? '静默时段' : '';
+  for (const pending of Object.values(st.pending)) {
+    const cooldown = pending.attempts > 0 || ['down', 'authfail', 'recover'].includes(pending.kind) ? 0 : Math.max(0, Number(cfg(globalCfg, 'alertCooldownMin')) || 0) * 60000;
+    const why = muted || (timestamp - (st.lastSent[pending.kind] || 0) < cooldown ? '冷却中' : '')
+      || (pending.nextRetryAt > timestamp ? '等待重试' : '');
+    if (why) suppressed.push({ kind: pending.kind, why });
+    else { output.push({ ...pending, isNew: !pending.presented }); pending.presented = true; }
   }
   writeState(provider, st);
-  return { alerts, suppressed, consecutiveFail: st.consecutiveFail, inAlarm: st.inAlarm };
+  return { alerts: output, suppressed, consecutiveFail: st.consecutiveFail, inAlarm: st.inAlarm };
 }
 
-module.exports = { evaluate, inQuietHours, inMaintWindow, resetState, stateOf, DEFAULTS, parseHM };
+function noteDelivery(provider, alert, result, timestamp = Date.now()) {
+  const st = bindState(provider), pending = st.pending[alert.kind];
+  const delivered = result && Array.isArray(result.delivered) ? result.delivered : [];
+  if (!pending || pending.eventId !== alert.eventId) {
+    // A slow fault delivery may complete after the next sample already recovered.
+    // Retain that acknowledgement so recipients also receive a recovery.
+    if (delivered.length && ['down', 'authfail'].includes(alert.kind)) {
+      st.inAlarm = true; st.lastSent[alert.kind] = timestamp;
+      if (provider.status === 'up') queueAlert(st, 'recover', '服务恢复', '故障通知送达时服务已恢复在线');
+      writeState(provider, st);
+    }
+    return;
+  }
+  pending.delivered = [...new Set([...(pending.delivered || []), ...delivered])];
+  if (delivered.length) {
+    st.lastSent[alert.kind] = timestamp;
+    if (['down', 'authfail'].includes(alert.kind)) st.inAlarm = true;
+  }
+  if (result && (result.complete === true || result.attempted > 0 && !(result.failed || []).length)) {
+    if (alert.kind === 'recover' && provider.status === 'up') st.inAlarm = false;
+    delete st.pending[alert.kind];
+  } else {
+    pending.attempts++;
+    pending.nextRetryAt = timestamp + Math.min(300000, 30000 * Math.pow(2, Math.min(4, pending.attempts - 1)));
+    logger.warn(`[告警] [${provider.name}] ${alert.title} 尚未全部送达，保留待发送事件`);
+  }
+  writeState(provider, st);
+}
+function retryPending(provider) {
+  const st = bindState(provider);
+  for (const pending of Object.values(st.pending)) pending.nextRetryAt = 0;
+  writeState(provider, st);
+}
+module.exports = { evaluate, noteDelivery, retryPending, inQuietHours, inMaintWindow, resetState, stateOf, DEFAULTS, parseHM };

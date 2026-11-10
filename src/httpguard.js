@@ -15,7 +15,7 @@ function headersForRedirect(fromUrl, toUrl, headers) {
   const next = Object.assign({}, headers || {});
   if (!sameOrigin(fromUrl, toUrl)) {
     for (const k of Object.keys(next)) {
-      if (/^(authorization|cookie|proxy-authorization)$/i.test(k)) delete next[k];
+      if (!/^(accept|accept-encoding|content-type|content-length|user-agent)$/i.test(k)) delete next[k];
     }
   }
   return next;

@@ -1,5 +1,5 @@
 'use strict';
-// 高精度线性 SVG 图标（SF Symbols 风格，24x24 viewBox，stroke 1.8）
+// Shared line icons: 24x24 viewBox, stroke 1.5, 16px control / 18px navigation.
 (function () {
   const icons = {
     gauge: '<path d="M12 4a9 9 0 0 1 9 9c0 1.8-.5 3.4-1.4 4.8H4.4A8.9 8.9 0 0 1 3 13a9 9 0 0 1 9-9Z"/><path d="M12 13.5 15.8 8.6"/><circle cx="12" cy="13.5" r="1.3" fill="currentColor" stroke="none"/>',
@@ -44,7 +44,7 @@
 
   window.icon = function (name, cls) {
     const body = icons[name] || icons.dot;
-    return `<svg class="icon${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+    return `<svg class="icon${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
   };
   window.ICONS = icons;
 })();

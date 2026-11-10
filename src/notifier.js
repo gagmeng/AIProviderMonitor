@@ -1,11 +1,10 @@
 'use strict';
-const https = require('https');
-const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
 const { headersForRedirect } = require('./httpguard');
+const { requestRaw } = require('./httpRequest');
 const { DATA_DIR } = require('./store');
 
 /** 懒加载 https-proxy-agent（可选依赖，缺失时退化为直连） */
@@ -44,53 +43,34 @@ const CHANNEL_LABEL = {
   feishu: '飞书', slack: 'Slack', serverchan: 'Server酱', custom: '自定义Webhook'
 };
 
-function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders = {}, raw = false, proxy = '', insecureSkipVerify = false, _redirects = 0 } = {}) {
-  return new Promise((resolve, reject) => {
-    let u;
-    try { u = new URL(url); } catch (e) { return reject(new Error('Webhook URL 无效')); }
-    if (!['http:', 'https:'].includes(u.protocol)) return reject(new Error('Webhook 仅支持 HTTP/HTTPS'));
-    const mod = u.protocol === 'http:' ? http : https;
-    const body = raw ? String(payload) : JSON.stringify(payload);
-    const headers = Object.assign(
-      { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      extraHeaders
-    );
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const reqOpts = { method: 'POST', headers, timeout };
-    if (mod === https && insecureSkipVerify) reqOpts.rejectUnauthorized = false;
-    const agent = getProxyAgent(proxy, insecureSkipVerify);
-    if (agent) reqOpts.agent = agent;
-    const req = mod.request(u, reqOpts, (res) => {
-      // 重定向跟随（≤3 跳；303 转 GET 对 webhook 无意义，直接报错提示检查地址）
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && _redirects < 3) {
-        res.resume();
-        if (res.statusCode === 303) { reject(new Error('通道重定向到 GET（HTTP 303），请检查 Webhook 地址')); return; }
-        let next;
-        try { next = new URL(res.headers.location, u).toString(); }
-        catch (e) { reject(new Error(`重定向地址无效: ${res.headers.location}`)); return; }
-        const nextHeaders = headersForRedirect(u.toString(), next, extraHeaders);
-        const keepToken = Boolean(headersForRedirect(u.toString(), next, token ? { Authorization: 'keep' } : {}).Authorization);
-        resolve(post(next, payload, {
-          timeout, token: keepToken ? token : '', headers: nextHeaders, raw, proxy, insecureSkipVerify, _redirects: _redirects + 1
-        }));
-        return;
-      }
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => {
-        data += c;
-        if (data.length > 1024 * 1024) req.destroy(new Error('通知响应过大'));
-      });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
-        else reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 120)}`));
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('通知请求超时')));
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
+async function post(url, payload, { timeout = 10000, token = '', headers: extraHeaders = {}, raw = false,
+  proxy = '', insecureSkipVerify = false, deadlineAt = Date.now() + timeout, _redirects = 0 } = {}) {
+  const body = raw ? String(payload) : JSON.stringify(payload);
+  const headers = { 'Content-Type': 'application/json', ...extraHeaders, 'Content-Length': Buffer.byteLength(body) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await requestRaw(url, { method: 'POST', headers, body, timeout, deadlineAt,
+    agent: getProxyAgent(proxy, insecureSkipVerify), insecureSkipVerify, maxBytes: 1024 * 1024 });
+  if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && _redirects < 3) {
+    if (res.statusCode === 303) throw new Error('通道重定向到 GET（HTTP 303），请检查 Webhook 地址');
+    const next = new URL(res.headers.location, url).toString();
+    return post(next, payload, { timeout, deadlineAt, headers: headersForRedirect(url, next, headers), raw,
+      proxy, insecureSkipVerify, _redirects: _redirects + 1 });
+  }
+  if (res.statusCode >= 200 && res.statusCode < 300) return res.body;
+  throw new Error(`HTTP ${res.statusCode}: ${res.body.slice(0, 120)}`);
+}
+
+function checkBusinessResponse(text, channel) {
+  let j;
+  try { j = JSON.parse(text); } catch (e) { throw new Error(`${channel} 返回无效 JSON`); }
+  const checks = { weixin: ['errcode', 0], dingtalk: ['errcode', 0], qq: ['retcode', 0],
+    telegram: ['ok', true], feishu: ['code', 0], serverchan: ['code', 0] };
+  const [key, expected] = checks[channel];
+  const value = j && j[key];
+  if (value === undefined || (expected === true ? value !== true : Number(value) !== expected)) {
+    throw new Error(`${CHANNEL_LABEL[channel]}返回错误 ${key}=${value ?? '缺失'} ${String(j?.errmsg || j?.msg || j?.message || j?.description || j?.wording || '').slice(0, 160)}`);
+  }
+  return text;
 }
 
 /** 可重试判定：网络层错误/超时，或 HTTP 429/5xx */
@@ -156,6 +136,7 @@ function noteResult(channel, ok, err) {
   const h = notifyHealth[channel] || (notifyHealth[channel] = { fails: 0, lastOkAt: 0, lastFailAt: 0, lastError: '' });
   if (ok) {
     h.fails = 0;
+    h.lastError = '';
     h.lastOkAt = Date.now();
   } else {
     h.fails++;
@@ -239,7 +220,7 @@ function buildAlertText(provider, alert) {
 
 async function sendWeixin(globalCfg, text, ctx = {}) {
   if (!globalCfg.weixinWebhook) throw new Error('未配置微信 Webhook');
-  return postRetry(globalCfg.weixinWebhook, { msgtype: 'text', text: { content: text } }, sendOpts(globalCfg, ctx));
+  return checkBusinessResponse(await postRetry(globalCfg.weixinWebhook, { msgtype: 'text', text: { content: text } }, sendOpts(globalCfg, ctx)), 'weixin');
 }
 
 /** 钉钉群机器人：webhook + 可选加签（secret 时在 URL 上附 timestamp & sign） */
@@ -254,16 +235,7 @@ async function sendDingtalk(globalCfg, text, ctx = {}) {
     url = `${url}${sep}timestamp=${ts}&sign=${encodeURIComponent(sign)}`;
   }
   const res = await postRetry(url, { msgtype: 'text', text: { content: text } }, sendOpts(globalCfg, ctx));
-  try {
-    const j = JSON.parse(res);
-    if (j.errcode !== undefined && Number(j.errcode) !== 0) {
-      throw new Error(`钉钉返回错误 errcode=${j.errcode}${j.errmsg ? ' (' + j.errmsg + ')' : ''}`);
-    }
-  } catch (e) {
-    if (e instanceof SyntaxError) { /* 非 JSON 响应，视为 HTTP 层已成功 */ }
-    else throw e;
-  }
-  return res;
+  return checkBusinessResponse(res, 'dingtalk');
 }
 
 /** QQ 上报：调用 OneBot v11 HTTP API（/send_private_msg 或 /send_group_msg） */
@@ -287,16 +259,7 @@ async function sendQQ(globalCfg, text, ctx = {}) {
   const id = oneBotId(target);
   const payload = isGroup ? { group_id: id, message: text } : { user_id: id, message: text };
   const res = await postRetry(base + path, payload, { token, ...sendOpts(globalCfg, ctx) });
-  try {
-    const j = JSON.parse(res);
-    if (typeof j.retcode === 'number' && j.retcode !== 0) {
-      throw new Error(`机器人返回错误 retcode=${j.retcode}${j.wording ? ' (' + j.wording + ')' : ''}`);
-    }
-  } catch (e) {
-    if (e instanceof SyntaxError) { /* 非 JSON 响应 */ }
-    else throw e;
-  }
-  return res;
+  return checkBusinessResponse(res, 'qq');
 }
 
 /** Telegram Bot：sendMessage API */
@@ -311,14 +274,7 @@ async function sendTelegram(globalCfg, text, ctx = {}) {
     text,
     disable_web_page_preview: true
   }, sendOpts(globalCfg, ctx));
-  try {
-    const j = JSON.parse(res);
-    if (j.ok === false) throw new Error(`Telegram 返回错误: ${j.description || 'unknown'}`);
-  } catch (e) {
-    if (e instanceof SyntaxError) { /* ignore */ }
-    else throw e;
-  }
-  return res;
+  return checkBusinessResponse(res, 'telegram');
 }
 
 /** 飞书自定义机器人：支持加签（sign = HMAC-SHA256(timestamp\nsecret) 的 base64，密钥为空串） */
@@ -334,16 +290,7 @@ async function sendFeishu(globalCfg, text, ctx = {}) {
     payload.sign = sign;
   }
   const res = await postRetry(url, payload, sendOpts(globalCfg, ctx));
-  try {
-    const j = JSON.parse(res);
-    if (j.code !== undefined && Number(j.code) !== 0) {
-      throw new Error(`飞书返回错误 code=${j.code}${j.msg ? ' (' + j.msg + ')' : ''}`);
-    }
-  } catch (e) {
-    if (e instanceof SyntaxError) { /* ignore */ }
-    else throw e;
-  }
-  return res;
+  return checkBusinessResponse(res, 'feishu');
 }
 
 /** Slack Incoming Webhook */
@@ -364,7 +311,7 @@ async function sendServerChan(globalCfg, text, ctx = {}) {
     ? `https://sctapi.ftqq.com/${key}.send`
     : `https://sc.ftqq.com/${key}.send`;
   const form = `title=${encodeURIComponent(title)}&desp=${encodeURIComponent(desp)}`;
-  return postRetry(url, form, { raw: true, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, ...sendOpts(globalCfg, ctx) });
+  return checkBusinessResponse(await postRetry(url, form, { raw: true, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, ...sendOpts(globalCfg, ctx) }), 'serverchan');
 }
 
 /**
@@ -430,33 +377,35 @@ function channelEnabled(globalCfg, ch) {
 
 /** 向所有已启用通道广播一段文本；任一通道失败只记日志不影响其它 */
 async function broadcast(globalCfg, text, ctx = {}) {
-  const jobs = [];
+  const jobs = [], eligible = [];
   const routes = ctx.provider && Array.isArray(ctx.provider.notifyChannels) ? ctx.provider.notifyChannels : [];
   for (const ch of CHANNELS) {
     if (routes.length && !routes.includes(ch)) continue;
     if (!channelEnabled(globalCfg, ch)) continue;
+    eligible.push(ch);
+    if ((ctx.delivered || []).includes(ch)) continue;
     const label = CHANNEL_LABEL[ch] || ch;
     jobs.push(
       SENDERS[ch](globalCfg, text, ctx)
-        .then(() => { noteResult(ch, true); logger.info(`[通知] ${label}推送成功${ctx.name ? ': ' + ctx.name : ''}`); })
-        .catch((e) => { noteResult(ch, false, e); logger.error(`[通知] ${label}推送失败: ${e.message}`); })
+        .then(() => { noteResult(ch, true); logger.info(`[通知] ${label}推送成功${ctx.name ? ': ' + ctx.name : ''}`); return { channel: ch, ok: true }; })
+        .catch((e) => { noteResult(ch, false, e); logger.error(`[通知] ${label}推送失败: ${e.message}`); return { channel: ch, ok: false, error: e.message }; })
     );
   }
   if (!jobs.length) logger.debug('[通知] 无已启用的通知通道，跳过推送');
-  await Promise.all(jobs);
-  return jobs.length;
+  const results = await Promise.all(jobs);
+  return { complete: eligible.length > 0 && eligible.every((ch) => (ctx.delivered || []).includes(ch) || results.some((r) => r.channel === ch && r.ok)), attempted: results.length, delivered: results.filter((r) => r.ok).map((r) => r.channel), failed: results.filter((r) => !r.ok), results };
 }
 
 /** 模型变化时推送（兼容旧签名） */
 async function notifyModelChange(globalCfg, provider, prev, next, extra = {}) {
   const text = buildModelChangeText(provider, prev, next, extra);
-  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider });
+  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider, delivered: extra.delivered || [] });
 }
 
 /** 故障/恢复告警推送 */
-async function notifyAlert(globalCfg, provider, alert) {
+async function notifyAlert(globalCfg, provider, alert, extra = {}) {
   const text = buildAlertText(provider, alert);
-  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider });
+  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider, delivered: extra.delivered || [] });
 }
 
 async function sendTest(globalCfg, channel) {
@@ -478,5 +427,5 @@ module.exports = {
   notifyModelChange, notifyAlert, sendTest, broadcast,
   buildModelChangeText, buildAlertText, channelEnabled,
   sendQQ, sendWeixin, sendDingtalk, sendTelegram, sendFeishu, sendSlack, sendServerChan, sendCustom,
-  CHANNELS, CHANNEL_LABEL, getNotifyHealth, noteResult, resetHealth, resolveNotifyProxy, oneBotId, onChannelUnhealthy
+  post, checkBusinessResponse, CHANNELS, CHANNEL_LABEL, getNotifyHealth, noteResult, resetHealth, resolveNotifyProxy, oneBotId, onChannelUnhealthy
 };

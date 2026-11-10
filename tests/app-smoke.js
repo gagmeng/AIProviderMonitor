@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-process.env.AIPM_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-app-'));
+process.env.AIPM_DATA_DIR ||= fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-app-'));
 
 const { app } = require('electron');
 

@@ -1,7 +1,7 @@
 {
   "name": "ai-provider-monitor",
   "productName": "AI Provider Monitor",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "AI Provider 状态与可用模型监控",
   "main": "main.js",
   "author": "AIProviderMonitor",
@@ -21,17 +21,20 @@
     "lint:fix": "eslint --fix main.js preload.js src renderer scripts tests",
     "format": "prettier --write \"**/*.{js,json,css,html}\"",
     "dist": "electron-builder --win nsis portable",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "test:regression": "node tests/regressions.js",
+    "test:integration": "electron tests/integration.js",
+    "test:package": "node tests/package-smoke.js"
   },
   "dependencies": {
     "electron-updater": "^6.6.2",
     "exceljs": "^4.4.0",
     "https-proxy-agent": "^7.0.6",
-    "nodemailer": "^6.10.0"
+    "nodemailer": "^10.4.0"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
     "eslint": "^8.57.0",
     "prettier": "^3.3.3"
   },
@@ -80,5 +83,19 @@
     "portable": {
       "artifactName": "AIProviderMonitor-Portable-${version}.${ext}"
     }
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    },
+    "app-builder-lib": {
+      "minimatch": "^11.0.1"
+    },
+    "@electron/universal": {
+      "minimatch": "^11.0.1"
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

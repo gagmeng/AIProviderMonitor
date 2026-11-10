@@ -16,7 +16,7 @@
           <div class="brand-sub">AI 服务状态监控</div>
         </div>
       </div>
-      <nav id="nav">
+      <nav id="nav" aria-label="主导航">
         <button class="nav-item active" data-view="dashboard" id="nav-dashboard">
           <span class="nav-ic" data-icon="gauge"></span><span>仪表盘</span>
         </button>
@@ -51,31 +51,31 @@
       <!-- 仪表盘 -->
       <section class="view active" id="view-dashboard">
         <header class="view-head">
-          <h1>仪表盘</h1>
+          <div><h1>仪表盘</h1><p class="view-subtitle">掌握服务健康状态，及时发现异常</p></div>
           <div class="head-actions">
             <button class="btn ghost" id="btnPauseAll"></button>
-            <button class="btn ghost" id="dashCheckAll"></button>
+            <button class="btn primary" id="dashCheckAll"></button>
           </div>
         </header>
         <div class="stat-grid">
           <div class="stat-card">
-            <div class="stat-top"><span class="stat-ic ok" data-icon="signal"></span><span class="stat-label">在线</span></div>
+            <div class="stat-top"><span class="stat-label">在线</span></div>
             <div class="stat-num" id="statUp">0</div>
           </div>
           <div class="stat-card">
-            <div class="stat-top"><span class="stat-ic warn" data-icon="warning"></span><span class="stat-label">异常</span></div>
+            <div class="stat-top"><span class="stat-label">异常</span></div>
             <div class="stat-num" id="statDegraded">0</div>
           </div>
           <div class="stat-card">
-            <div class="stat-top"><span class="stat-ic bad" data-icon="close"></span><span class="stat-label">离线</span></div>
+            <div class="stat-top"><span class="stat-label">离线</span></div>
             <div class="stat-num" id="statDown">0</div>
           </div>
           <div class="stat-card">
-            <div class="stat-top"><span class="stat-ic lock" data-icon="lock"></span><span class="stat-label">鉴权失败</span></div>
+            <div class="stat-top"><span class="stat-label">鉴权失败</span></div>
             <div class="stat-num" id="statAuthfail">0</div>
           </div>
           <div class="stat-card">
-            <div class="stat-top"><span class="stat-ic accent" data-icon="bolt"></span><span class="stat-label">可用模型</span></div>
+            <div class="stat-top"><span class="stat-label">可用模型</span></div>
             <div class="stat-num" id="statModels">0</div>
           </div>
         </div>
@@ -89,13 +89,14 @@
       <!-- 服务商 -->
       <section class="view" id="view-providers">
         <header class="view-head">
-          <h1>服务商</h1>
+          <div><h1>服务商</h1><p class="view-subtitle">集中管理 API 端点、检测周期与模型状态</p></div>
           <div class="head-actions">
             <button class="btn primary" id="btnAdd"></button>
           </div>
         </header>
 
-        <div class="toolbar">
+        <div class="toolbar provider-toolbar">
+          <div class="toolbar-batch">
           <label class="checkbox" id="selAllLabel" title="全选 / 取消全选">
             <input type="checkbox" id="selAll" />
             <span class="box" data-icon=""></span>
@@ -105,29 +106,34 @@
           <button class="btn small" id="btnCheckSel" disabled></button>
           <button class="btn small" id="btnEditSel" disabled>编辑</button>
           <button class="btn small danger" id="btnDelSel" disabled>删除</button>
-          <span class="toolbar-sep"></span>
+          </div>
+          <div class="toolbar-transfer">
           <button class="btn small ghost" id="btnGroupView" title="按分组折叠显示"></button>
           <button class="btn small ghost" id="btnImport"></button>
           <button class="btn small ghost" id="btnExport"></button>
-          <div class="toolbar-spacer"></div>
-          <select id="groupFilter" class="select-input filter-select">
+          </div>
+          <div class="provider-filters">
+          <select id="groupFilter" class="select-input filter-select" aria-label="按分组筛选">
             <option value="">全部分组</option>
           </select>
-          <select id="statusFilter" class="select-input filter-select">
+          <select id="statusFilter" class="select-input filter-select" aria-label="按状态筛选">
             <option value="">全部状态</option>
             <option value="up">在线</option>
             <option value="degraded">异常</option>
             <option value="down">离线</option>
             <option value="authfail">鉴权失败</option>
-            <option value="unknown">待检测</option>
+            <option value="unknown">待检测</option><option value="disabled">已停用</option>
           </select>
           <div class="search-wrap">
             <span class="search-ic" data-icon="search"></span>
-            <input id="searchInput" class="search-input" type="text" placeholder="搜索名称 / URL / 备注 / 标签" />
+            <input id="searchInput" class="search-input" type="search" aria-label="搜索服务商" title="搜索名称 / URL / 备注 / 标签" placeholder="搜索服务商" />
+          </div>
           </div>
         </div>
 
         <div class="table-card">
+          <div class="provider-results"><div><span id="providerResultCount" data-i18n-skip aria-live="polite"></span><span id="providerSelectionCount" class="selection-count" data-i18n-skip></span></div><button class="btn small ghost" id="providerClearFilters" hidden>清空筛选</button></div>
+          <div class="provider-table-scroll" role="region" aria-label="服务商列表" tabindex="0"><div class="provider-table">
           <div class="table-head row">
             <div class="col-sel"></div>
             <div class="col-name">服务商</div>
@@ -140,12 +146,13 @@
             <div class="col-ops"></div>
           </div>
           <div id="providerList" data-i18n-skip></div>
+          </div></div>
         </div>
       </section>
 
       <!-- 通知 -->
       <section class="view" id="view-notify">
-        <header class="view-head"><h1>通知</h1></header>
+        <header class="view-head"><div><h1>通知</h1><p class="view-subtitle">配置告警通道，点击健康状态可快速定位配置</p></div><span class="hint settings-save-status" aria-live="polite" data-i18n-skip></span></header>
         <div class="notify-grid">
           <div class="panel" style="grid-column:1/-1;">
             <div class="panel-head">
@@ -156,7 +163,7 @@
               <div class="health-list" id="notifyHealthList"></div>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-weixin">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="wechat"></span>微信（企业微信群机器人）</h2>
               <label class="switch"><input type="checkbox" id="wxEnable" /><span class="knob"></span></label>
@@ -184,7 +191,7 @@
               </div>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-qq">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="qq"></span>QQ（机器人 HTTP 上报）</h2>
               <label class="switch"><input type="checkbox" id="qqEnable" /><span class="knob"></span></label>
@@ -235,7 +242,7 @@
               </div>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-dingtalk">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="dingtalk"></span>钉钉（群机器人 Webhook）</h2>
               <label class="switch"><input type="checkbox" id="dtEnable" /><span class="knob"></span></label>
@@ -274,7 +281,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-telegram">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="bell"></span>Telegram（Bot）</h2>
               <label class="switch"><input type="checkbox" id="tgEnable" /><span class="knob"></span></label>
@@ -311,7 +318,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-feishu">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="bell"></span>飞书（自定义机器人）</h2>
               <label class="switch"><input type="checkbox" id="fsEnable" /><span class="knob"></span></label>
@@ -343,7 +350,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-slack">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="bell"></span>Slack（Incoming Webhook）</h2>
               <label class="switch"><input type="checkbox" id="skEnable" /><span class="knob"></span></label>
@@ -371,7 +378,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-serverchan">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="bell"></span>Server 酱</h2>
               <label class="switch"><input type="checkbox" id="scEnable" /><span class="knob"></span></label>
@@ -399,7 +406,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel notify-channel" id="channel-custom">
             <div class="panel-head">
               <h2><span class="panel-ic" data-icon="bell"></span>通用 Webhook</h2>
               <label class="switch"><input type="checkbox" id="cwEnable" /><span class="knob"></span></label>
@@ -430,57 +437,80 @@
       <!-- 设置 -->
       <!-- 统计 -->
       <section class="view" id="view-stats">
-        <header class="view-head">
-          <h1>统计分析</h1>
+        <header class="view-head stats-head">
+          <div><h1>统计分析</h1><p class="view-subtitle">从健康趋势到可用性目标，了解服务的实际表现</p></div>
           <div class="head-actions">
-            <select id="stRange" class="select-input">
+            <select id="stRange" class="select-input" aria-label="统计时间范围">
               <option value="1">最近 1 小时</option>
               <option value="6">最近 6 小时</option>
               <option value="24" selected>最近 24 小时</option>
               <option value="168">最近 7 天</option>
               <option value="720">最近 30 天</option>
             </select>
-            <button class="btn ghost" id="stExportCsv">导出明细</button>
-            <button class="btn ghost" id="stExportReport">导出报告</button>
-            <button class="btn primary" id="stRefresh">刷新</button>
+            <button class="btn" id="stExportCsv">导出明细</button>
+            <button class="btn" id="stExportReport">导出报告</button>
+            <button class="btn primary" id="stRefresh"><span data-icon="refresh"></span>刷新</button>
           </div>
         </header>
-
-        <div class="stats-cards">
-          <div class="stat-card"><span class="stat-ic" data-icon="check"></span>
-            <div><div class="stat-label">整体可用率</div><div class="stat-value" id="stUptime">—</div></div></div>
-          <div class="stat-card"><span class="stat-ic" data-icon="server"></span>
-            <div><div class="stat-label">服务商</div><div class="stat-value" id="stProviders">0</div></div></div>
-          <div class="stat-card"><span class="stat-ic" data-icon="activity"></span>
-            <div><div class="stat-label">检测样本</div><div class="stat-value" id="stSamples">0</div></div></div>
-          <div class="stat-card"><span class="stat-ic" data-icon="gauge"></span>
-            <div><div class="stat-label">延迟 P95</div><div class="stat-value" id="stP95">—</div></div></div>
+        <div class="stats-scope-bar">
+          <div class="stats-scope-controls"><label for="stScope">统计范围</label><select id="stScope" class="select-input">
+            <option value="current">当前服务商</option><option value="history">包含历史服务商</option>
+          </select><span class="scope-caption" id="stScopeHint" data-i18n-skip></span></div>
+          <span class="stats-updated" id="stUpdated" data-i18n-skip aria-live="polite"></span>
         </div>
-
-        <div class="panel" style="margin-top:16px;">
-          <div class="panel-head"><h2><span class="panel-ic" data-icon="chart"></span>可用率与延迟趋势</h2>
-            <span class="hint" id="stChartHint"></span></div>
+        <div class="stats-cards analytics-metrics">
+          <div class="stat-card analytics-metric"><div class="metric-top"><span class="stat-label">时间加权可用率</span></div>
+            <div class="stat-value" id="stUptime" data-i18n-skip>—</div><div class="metric-note" id="stUptimeHint" data-i18n-skip>—</div></div>
+          <div class="stat-card analytics-metric"><div class="metric-top"><span class="stat-label">数据覆盖率</span></div>
+            <div class="stat-value" id="stCoverageValue" data-i18n-skip>—</div><div class="metric-note" id="stCoverage" data-i18n-skip>—</div></div>
+          <div class="stat-card analytics-metric"><div class="metric-top"><span class="stat-label">检测样本</span></div>
+            <div class="stat-value" id="stSamples" data-i18n-skip>0</div><div class="metric-note" id="stSamplesHint" data-i18n-skip>—</div></div>
+          <div class="stat-card analytics-metric"><div class="metric-top"><span class="stat-label">延迟 P95</span></div>
+            <div class="stat-value" id="stP95" data-i18n-skip>—</div><div class="metric-note" id="stLatencyHint" data-i18n-skip>—</div></div>
+        </div>
+        <div class="stats-visual-grid">
+          <div class="panel analytics-panel trend-panel">
+            <div class="panel-head"><div><h2><span class="panel-ic" data-icon="chart"></span>可用率与延迟趋势</h2><p class="panel-subtitle" id="stChartHint" data-i18n-skip></p></div></div>
+            <div class="panel-body"><div class="chart-legend"><span><i class="lg-dot online"></i>样本可用率 %</span><span><i class="lg-dot latency"></i>平均延迟 ms</span></div><div id="stChart" class="chart-wrap"></div></div>
+          </div>
+          <div class="panel analytics-panel observation-panel"><div class="panel-head"><h2>观测时长分布</h2></div><div class="panel-body" id="stObservation" data-i18n-skip></div></div>
+        </div>
+        <div class="panel analytics-panel slo-panel">
+          <div class="panel-head"><div><h2><span class="panel-ic" data-icon="gauge"></span>SLO 与错误预算 <span class="window-tag" id="sloWindow" data-i18n-skip></span></h2><p class="panel-subtitle">独立滚动窗口 · 服务商可设置不同目标</p></div><button class="btn small" id="sloExport">导出 SLO 报告</button></div>
           <div class="panel-body">
-            <div id="stChart" class="chart-wrap"></div>
-            <div class="chart-legend">
-              <span><i class="lg-dot" style="background:var(--green)"></i>可用率 %</span>
-              <span><i class="lg-dot" style="background:var(--blue)"></i>平均延迟 ms</span>
-            </div>
+            <div id="sloOverview" class="slo-overview" data-i18n-skip></div>
+            <div id="sloTable" class="slo-table" data-i18n-skip></div>
+            <details class="stats-method"><summary>统计口径与数据说明</summary><p>样本状态最多延续两个计划周期，超时和缺失时段记为未知。错误预算按完整滚动窗口计算；维护窗口只抑制通知，仍计入健康统计。</p><p>预算与时长按服务商合计；数据不足时不确认达标。历史服务商仅在主动选择后计入。</p></details>
           </div>
         </div>
-
-        <div class="panel" style="margin-top:16px;">
-          <div class="panel-head"><h2><span class="panel-ic" data-icon="server"></span>服务商明细</h2></div>
-          <div class="panel-body">
-            <div class="stats-table" id="stTable" data-i18n-skip></div>
-          </div>
+        <div class="panel analytics-panel provider-stats-panel">
+          <div class="panel-head"><div><h2><span class="panel-ic" data-icon="server"></span>服务商明细 <span class="count-tag" id="stProviders" data-i18n-skip>0</span></h2><p class="panel-subtitle">与页面所选时间范围一致</p></div></div>
+          <div class="panel-body"><div class="stats-table" id="stTable" data-i18n-skip></div></div>
         </div>
       </section>
 
       <section class="view" id="view-settings">
-        <header class="view-head"><h1>设置</h1></header>
+        <header class="view-head"><div><h1>设置</h1><p class="view-subtitle">按分类调整配置，修改后自动保存</p></div><span class="hint settings-save-status" aria-live="polite" data-i18n-skip></span></header>
+        <div class="settings-categories" role="tablist" aria-label="设置分类">
+          <button type="button" role="tab" id="settings-tab-appearance" data-settings-category="appearance" aria-controls="settings-appearance" aria-selected="true">外观与启动</button>
+          <button type="button" role="tab" id="settings-tab-checks" data-settings-category="checks" aria-controls="settings-checks" aria-selected="false" tabindex="-1">检测选项</button>
+          <button type="button" role="tab" id="settings-tab-alerts" data-settings-category="alerts" aria-controls="settings-alerts" aria-selected="false" tabindex="-1">告警策略</button>
+          <button type="button" role="tab" id="settings-tab-slo" data-settings-category="slo" aria-controls="settings-slo" aria-selected="false" tabindex="-1">SLO 目标</button>
+          <button type="button" role="tab" id="settings-tab-network" data-settings-category="network" aria-controls="settings-network" aria-selected="false" tabindex="-1">网络代理</button>
+          <button type="button" role="tab" id="settings-tab-storage" data-settings-category="storage" aria-controls="settings-storage" aria-selected="false" tabindex="-1">历史与日志</button>
+          <button type="button" role="tab" id="settings-tab-mail" data-settings-category="mail" aria-controls="settings-mail" aria-selected="false" tabindex="-1">邮件日报</button>
+          <button type="button" role="tab" id="settings-tab-all" data-settings-category="all" aria-controls="settings-slo settings-checks settings-alerts settings-network settings-storage settings-appearance settings-mail" aria-selected="false" tabindex="-1">全部设置</button>
+        </div>
         <div class="settings-grid">
-          <div class="panel">
+          <div class="panel" id="settings-slo" data-settings-section="slo" hidden>
+            <div class="panel-head"><h2><span class="panel-ic" data-icon="gauge"></span>SLO 目标</h2></div>
+            <div class="panel-body">
+              <div class="opt-row"><div><div class="opt-title">全局可用率目标（%）</div><div class="opt-sub">服务商可在高级配置中单独覆盖</div></div><input id="sloTarget" type="number" class="num-input" min="90" max="100" step="0.001" /></div>
+              <div class="opt-row"><div><div class="opt-title">滚动窗口（天）</div><div class="opt-sub">建议 7 / 30 / 90 天；保留天数应覆盖窗口</div></div><input id="sloWindowDays" type="number" class="num-input" min="1" max="90" /></div>
+              <p class="hint" id="sloRetentionHint" data-i18n-skip></p>
+            </div>
+          </div>
+          <div class="panel" id="settings-checks" data-settings-section="checks" hidden>
             <div class="panel-head"><h2><span class="panel-ic" data-icon="settings"></span>检测选项</h2></div>
             <div class="panel-body">
               <div class="opt-row">
@@ -566,7 +596,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel" id="settings-alerts" data-settings-section="alerts" hidden>
             <div class="panel-head"><h2><span class="panel-ic" data-icon="bell"></span>告警策略</h2></div>
             <div class="panel-body">
               <div class="opt-row">
@@ -642,7 +672,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel" id="settings-network" data-settings-section="network" hidden>
             <div class="panel-head"><h2><span class="panel-ic" data-icon="server"></span>网络代理</h2></div>
             <div class="panel-body">
               <div class="opt-row">
@@ -655,12 +685,12 @@
               <div class="field">
                 <label>代理地址</label>
                 <input type="text" id="proxyUrl" placeholder="http://127.0.0.1:7890" />
-                <div class="field-hint">需安装依赖 https-proxy-agent；未安装时代理配置会被忽略并在日志提示</div>
+                <div class="field-hint">填写 HTTP 或 HTTPS 代理地址，例如 http://127.0.0.1:7890</div>
               </div>
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel" id="settings-storage" data-settings-section="storage" hidden>
             <div class="panel-head"><h2><span class="panel-ic" data-icon="archive"></span>历史与日志</h2></div>
             <div class="panel-body">
               <div class="opt-row">
@@ -680,7 +710,7 @@
               <div class="opt-row">
                 <div>
                   <div class="opt-title">历史保留天数</div>
-                  <div class="opt-sub">超期的历史分片会在启动时自动清理</div>
+                  <div class="opt-sub">超期的历史分片会在启动时及每天自动清理</div>
                 </div>
                 <input type="number" id="historyKeepDays" min="1" max="365" class="num-input" />
               </div>
@@ -713,7 +743,7 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel" id="settings-appearance" data-settings-section="appearance">
             <div class="panel-head"><h2><span class="panel-ic" data-icon="settings"></span>外观与启动</h2></div>
             <div class="panel-body">
               <div class="opt-row">
@@ -758,12 +788,12 @@
                 </div>
                 <label class="switch"><input type="checkbox" id="hotkeyEnabled" /><span class="knob"></span></label>
               </div>
-              <div class="opt-row">
+              <div class="opt-row hotkey-row">
                 <div>
                   <div class="opt-title">快捷键组合</div>
-                  <div class="opt-sub">修改后自动重新注册；注册失败通常是被其它程序占用</div>
+                  <div class="opt-sub" id="hotkeyHint" data-i18n-skip></div>
                 </div>
-                <input type="text" id="hotkey" class="text-input" placeholder="CommandOrCtrl+Alt+M" />
+                <div class="hotkey-control"><input type="hidden" id="hotkey" /><button type="button" id="hotkeyRecorder" class="hotkey-recorder" aria-label="录制快捷键" data-i18n-skip></button><button type="button" id="hotkeyReset" class="hotkey-reset" title="恢复默认快捷键" aria-label="恢复默认快捷键"><span data-icon="refresh"></span></button></div>
               </div>
               <div class="opt-row">
                 <div>
@@ -781,7 +811,7 @@
               </div>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel" id="settings-mail" data-settings-section="mail" hidden>
             <div class="panel-head"><h2><span class="panel-ic" data-icon="inbox"></span>邮件日报</h2></div>
             <div class="panel-body">
               <div class="opt-row">
@@ -859,38 +889,42 @@
       <!-- 备份 -->
       <section class="view" id="view-backup">
         <header class="view-head">
-          <h1>备份与还原</h1>
+          <div><h1>备份与还原</h1><p class="view-subtitle">保存配置快照，按需恢复或合并服务商</p></div>
           <div class="head-actions">
             <button class="btn ghost" id="bkOpenDir">打开备份目录</button>
           </div>
         </header>
 
         <div class="notify-grid">
-          <div class="panel">
+          <div class="panel backup-task">
             <div class="panel-head"><h2><span class="panel-ic" data-icon="archive"></span>创建备份</h2></div>
             <div class="panel-body">
               <p class="bk-desc">将当前全部服务商配置与通知设置导出为一个 JSON 备份文件。自动备份每日生成一次，保留最近 10 份；也可随时手动创建。</p>
-              <div class="field-row" style="margin-top:12px;">
-                <button class="btn small" id="bkSaveAs">备份保存到…</button>
-                <button class="btn small ghost" id="bkQuick">立即备份到备份目录</button>
-                <span class="hint" id="bkHint"></span>
+              <div class="backup-footer">
+                <span class="hint" id="bkHint" aria-live="polite"></span>
+                <div class="field-row backup-actions">
+                  <button class="btn small primary" id="bkSaveAs">备份保存到…</button>
+                  <button class="btn small ghost" id="bkQuick">立即备份到备份目录</button>
+                </div>
               </div>
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel backup-task">
             <div class="panel-head"><h2><span class="panel-ic" data-icon="refresh"></span>从备份还原</h2></div>
             <div class="panel-body">
               <p class="bk-desc">选择一个备份文件后按所选方式还原。「覆盖」将整体替换当前全部数据；「合并」仅把备份中的服务商并入当前列表（按 URL 去重），通知设置保持不变。</p>
-              <div class="field-row" style="margin:12px 0 6px;">
+              <div class="field-row backup-modes">
                 <label class="radio"><input type="radio" name="bkMode" value="overwrite" checked /><span class="radio-dot"></span><span>覆盖还原（整体替换）</span></label>
                 <label class="radio"><input type="radio" name="bkMode" value="merge" /><span class="radio-dot"></span><span>合并还原（并入列表）</span></label>
               </div>
-              <div class="field-row">
-                <button class="btn small" id="bkPick">选择备份文件…</button>
-                <button class="btn small primary" id="bkRestore" disabled>开始还原</button>
+              <div class="backup-footer">
+                <div class="bk-picked" id="bkPicked" style="display:none;" data-i18n-skip></div>
+                <div class="field-row backup-actions">
+                  <button class="btn small" id="bkPick">选择备份文件…</button>
+                  <button class="btn small primary" id="bkRestore" disabled>开始还原</button>
+                </div>
               </div>
-              <div class="bk-picked" id="bkPicked" style="display:none;" data-i18n-skip></div>
             </div>
           </div>
 
@@ -909,29 +943,31 @@
       <!-- 日志 -->
       <section class="view" id="view-logs">
         <header class="view-head">
-          <h1>日志</h1>
+          <div><h1>日志</h1><p class="view-subtitle">查看检测与通知记录，快速定位运行问题</p></div>
           <div class="head-actions">
+            <button class="btn small" id="logClear"></button>
+            <button class="btn small ghost" id="openLogDir">打开日志目录</button>
+          </div>
+        </header>
+        <div class="log-toolbar" role="search" aria-label="筛选日志">
             <div class="search-wrap">
               <span class="search-ic" data-icon="search"></span>
-              <input id="logFilter" class="search-input" type="text" placeholder="过滤：服务商名 / 关键字" />
+              <input id="logFilter" class="search-input" type="search" aria-label="搜索日志" title="过滤：服务商名 / 关键字" placeholder="搜索日志" />
             </div>
-            <select id="logLevelFilter" class="select-input filter-select">
+            <select id="logLevelFilter" class="select-input filter-select" aria-label="按日志级别筛选">
               <option value="">全部级别</option>
               <option value="debug">debug</option>
               <option value="info">info</option>
               <option value="warn">warn</option>
               <option value="error">error</option>
             </select>
-            <select id="logProviderFilter" class="select-input filter-select">
+            <select id="logProviderFilter" class="select-input filter-select" aria-label="按服务商筛选日志">
               <option value="">全部服务商</option>
             </select>
-            <label class="switch small-switch"><input type="checkbox" id="autoScroll" checked /><span class="knob"></span></label>
-            <span class="switch-label">自动滚动</span>
-            <button class="btn small" id="logClear"></button>
-            <button class="btn small ghost" id="openLogDir">打开日志目录</button>
-          </div>
-        </header>
-        <div class="log-card" id="logCard" data-i18n-skip></div>
+            <span class="log-result-count" id="logResultCount" data-i18n-skip aria-live="polite"></span>
+            <div class="log-follow"><label class="switch small-switch"><input type="checkbox" id="autoScroll" aria-label="自动滚动" checked /><span class="knob"></span></label><span class="switch-label">自动滚动</span></div>
+        </div>
+        <div class="log-card" id="logCard" data-i18n-skip tabindex="0" role="region" aria-label="日志内容"></div>
         <div class="panel log-files-panel">
           <div class="panel-head"><h2>日志文件</h2><span class="panel-hint" id="logFilesHint"></span></div>
           <div class="log-files-list" id="logFilesList"></div>
@@ -942,12 +978,17 @@
 
   <!-- 新增/编辑弹窗 -->
   <div class="modal-mask" id="providerModal">
-    <div class="modal">
+    <div class="modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="pmTitle">
       <div class="modal-head">
         <h3 id="pmTitle">新增服务商</h3>
         <button class="icon-btn" id="pmClose"></button>
       </div>
       <div class="modal-body">
+        <div class="field template-field"><label for="fTemplate">服务商模板</label>
+          <select id="fTemplate" class="select-input"></select>
+          <span class="hint" id="fTemplateHint" data-i18n-skip></span>
+        </div>
+
         <div class="field">
           <label>供应商名称 <i>*</i></label>
           <input type="text" id="fName" placeholder="例如：OpenAI / 本地 Ollama" />
@@ -978,6 +1019,14 @@
             <label class="switch"><input type="checkbox" id="fNotify" /><span class="knob"></span></label>
           </div>
         </div>
+        <details id="fAdvanced" class="advanced-form">
+          <summary><span>高级配置</span><span class="hint" id="fAdvancedHint" data-i18n-skip></span></summary>
+          <div class="advanced-body">
+            <div class="field-inline">
+              <div class="field"><label for="fProbePolicy">探测判定</label><select id="fProbePolicy" class="select-input"><option value="strict">严格推理（默认）</option><option value="reachable">兼容可达性</option></select></div>
+              <div class="field"><label for="fSloTarget">SLO 目标（%）</label><input type="number" id="fSloTarget" min="90" max="100" step="0.001" placeholder="留空继承全局目标" /></div>
+            </div>
+            <p class="hint">严格推理要求成功响应并通过断言；兼容模式可接受参数限制响应，配额错误仍视为失败。</p>
         <div class="field-inline">
           <div class="field">
             <label>分组</label>
@@ -1096,6 +1145,9 @@
           <label>备注</label>
           <input type="text" id="fNote" placeholder="可选" />
         </div>
+          </div>
+        </details>
+        <div class="request-preview" id="fRequestPreview" data-i18n-skip></div>
         <div class="form-error" id="fError"></div>
         <div class="hint" id="fTestHint" data-i18n-skip></div>
       </div>
@@ -1119,7 +1171,7 @@
         <div class="dm-banner" id="dmBanner" data-i18n-skip></div>
         <div class="detail-meta" id="dmMeta" data-i18n-skip></div>
         <div class="dm-section" id="dmUptimeBarsWrap" style="display:none;">
-          <div class="dm-sec-title">近 90 天<span class="dm-bars-hint" id="dmBarsHint"></span></div>
+          <div class="dm-sec-title"><span id="dmBarsTitle" data-i18n-skip>近 90 天</span><span class="dm-bars-hint" id="dmBarsHint"></span></div>
           <div class="up-bars" id="dmUptimeBars"></div>
         </div>
         <div class="dm-section" id="dmChartWrap" style="display:none;">
@@ -1169,7 +1221,7 @@
         </div>
         <div class="opt-row" style="border-top:1px solid var(--sep); border-bottom:none; padding:10px 0;">
           <div>
-            <div class="opt-title">包含 API Key</div>
+            <div class="opt-title">包含凭据（密钥、请求头、代理）</div>
             <div class="opt-sub">导出文件将包含明文密钥，请妥善保管</div>
           </div>
           <label class="switch"><input type="checkbox" id="emWithKey" /><span class="knob"></span></label>
@@ -1317,6 +1369,7 @@
   <div id="toastWrap" data-i18n-skip></div>
 
   <script src="../src/durfmt.js"></script>
+  <script src="../src/providerTemplates.js"></script>
   <script src="icons.js"></script>
   <script src="i18n.js"></script>
   <script src="app.js"></script>

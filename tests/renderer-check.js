@@ -5,6 +5,7 @@ const path = require('path');
 const { app, BrowserWindow } = require('electron');
 
 const root = path.join(__dirname, '..');
+require('./renderer-fixture').registerFixture();
 const msgs = [];
 
 app.disableHardwareAcceleration();
@@ -19,8 +20,9 @@ app.whenReady().then(async () => {
     }
   });
 
-  win.webContents.on('console-message', (_e, level, message) => {
-    msgs.push({ level, message });
+  win.webContents.on('console-message', (event) => {
+    const levels = { debug: 0, info: 1, warning: 2, error: 3 };
+    msgs.push({ level: levels[event.level] ?? 0, message: event.message });
   });
 
   await win.loadFile(path.join(root, 'renderer', 'index.html'));
@@ -44,7 +46,8 @@ app.whenReady().then(async () => {
     ['EDITABLE_UNITS 有 7 个单位', probe.unitsLen === 7],
     ['fromSeconds(3600) = hour', probe.fromSec === '{"value":1,"unit":"hour"}'],
     ['单位下拉已填充', probe.unitSelectFilled === 7],
-    ['CSP 未拦截任何资源', csp.length === 0]
+    ['CSP 未拦截任何资源', csp.length === 0],
+    ['渲染层无运行错误', errs.length === 0]
   ];
 
   for (const [n, ok] of checks) console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}`);

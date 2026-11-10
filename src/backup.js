@@ -8,7 +8,7 @@ const { normalizeGlobal } = require('./store');
 /**
  * 备份/还原模块
  * - 备份文件：providers.json 全量快照（global + providers），JSON 格式
- * - 自动备份：数据目录 backup/ 下保留最近 N 份，每次应用启动时若距上次超过 24h 则滚动一份
+ * - 自动备份：数据目录 backup/ 下保留最近 N 份，启动及常驻每日维护时按本地自然日滚动一份
  * - 还原：支持「覆盖」（整体替换）与「合并」（providers 按 id/url 合并，global 保留当前）
  */
 
@@ -103,6 +103,7 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
       added++;
     }
   }
+  ensureUniqueProviderIds(data.providers);
   logger.info(`[还原] 合并还原完成：新增 ${added}，更新 ${updated}，跳过 ${skipped}${invalid ? `，丢弃 ${invalid} 个非法条目` : ''}`);
   return { mode, providers: data.providers.length, added, updated, skipped, invalid };
 }
@@ -111,7 +112,7 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
 
 // ---------- 自动备份（滚动保留 N 份） ----------
 
-/** 启动时调用：距上次自动备份超过 24h 则滚动一份；超出保留数删除最旧 */
+/** 启动及每日维护调用：每天至多滚动一份；超出保留数删除最旧 */
 function autoBackup(data, dataDir, { keep = 10 } = {}) {
   const dir = backupDir(dataDir);
   ensureDir(dir);
@@ -119,7 +120,7 @@ function autoBackup(data, dataDir, { keep = 10 } = {}) {
   let last = 0;
   try { last = Number(fs.readFileSync(marker, 'utf8')) || 0; } catch (e) { /* first run */ }
   const now = Date.now();
-  if (now - last < 24 * 3600 * 1000) return null;
+  if (last && new Date(now).toDateString() === new Date(last).toDateString()) return null;
   const file = path.join(dir, `auto-${stamp()}.json`);
   exportTo(data, file);
   try { fs.writeFileSync(marker, String(now), 'utf8'); } catch (e) { /* ignore */ }

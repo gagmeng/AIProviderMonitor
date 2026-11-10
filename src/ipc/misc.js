@@ -33,6 +33,7 @@ function register(ctx) {
   ipcMain.handle('open:path', (e, p) => { if (!p) return { ok: false, error: '路径为空' }; shell.openPath(p); return { ok: true }; });
 
   ipcMain.handle('app:version', () => ctx.pkg.version || require('electron').app.getVersion());
+  ipcMain.handle('app:hotkeyCapture', (e, active) => { ctx.setHotkeyCapture(active === true); return { ok: true }; });
 
   ipcMain.handle('app:clearUnread', () => { ctx.clearAllUnread(); return { ok: true }; });
 
@@ -62,7 +63,7 @@ function register(ctx) {
   ipcMain.handle('mail:test', async () => {
     try {
       const { sendMail } = require('../mailer');
-      const sum = await ctx.history.summarize(ctx.DATA_DIR, { hours: 24 });
+      const sum = await ctx.history.summarize(ctx.DATA_DIR, { hours: 24, providers: ctx.getDb().providers, sloTarget: ctx.getDb().global.sloTarget });
       await sendMail(ctx.getDb().global, { subject: 'AI Provider Monitor 邮件测试', html: report.buildReportHTML(sum) });
       ctx.logger.info('[邮件] 测试邮件发送成功');
       return { ok: true };

@@ -3,6 +3,7 @@ node_modules/
 
 # 构建产物
 dist/
+dist-v*/
 
 # 运行时数据（本机配置/日志）
 *.log

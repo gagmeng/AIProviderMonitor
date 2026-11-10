@@ -4,7 +4,8 @@
  * 由 main.js 注入 ctx（db 访问 / 持久化 / 状态推送 / 调度器等），本模块只注册 handler。
  */
 const { ipcMain, clipboard } = require('electron');
-const { validateProviderConfig, newNumericId } = require('../providerSchema');
+const { validateProviderConfig, newNumericId, freshRuntime } = require('../providerSchema');
+const { normalizeBase } = require('../providerTemplates');
 const { detect } = require('../detector');
 const { formatDuration } = require('../durfmt');
 
@@ -12,7 +13,7 @@ const { formatDuration } = require('../durfmt');
 function buildProviderInput(data) {
   return {
     name: String(data.name || '').trim(),
-    url: String(data.url || '').trim().replace(/\/+$/, ''),
+    url: normalizeBase(data.url).replace(/\/+$/, ''),
     apiKey: String(data.apiKey || '').trim(),
     intervalSec: Math.max(5, Number(data.intervalSec) || 60),
     notifyOnModelChange: Boolean(data.notifyOnModelChange),
@@ -20,6 +21,8 @@ function buildProviderInput(data) {
     group: String(data.group || '').trim(),
     tags: Array.isArray(data.tags) ? data.tags.map((t) => String(t).trim()).filter(Boolean) : [],
     probeMode: String(data.probeMode || 'chat'),
+    probePolicy: data.probePolicy || 'strict',
+    sloTarget: data.sloTarget == null || data.sloTarget === '' ? null : Number(data.sloTarget),
     probePath: String(data.probePath || '').trim(),
     probeBody: String(data.probeBody || '').trim(),
     modelsPath: String(data.modelsPath || '/v1/models').trim(),
@@ -64,14 +67,16 @@ function buildProviderInput(data) {
 function applyProviderPatch(p, data) {
   Object.assign(p, {
     name: String(data.name || p.name).trim(),
-    url: String(data.url || p.url).trim().replace(/\/+$/, ''),
-    apiKey: String(data.apiKey ?? p.apiKey).trim(),
+    url: normalizeBase(data.url ?? p.url).replace(/\/+$/, ''),
+    apiKey: String(data.apiKey ?? p.apiKey ?? '').trim(),
     intervalSec: Math.max(5, Number(data.intervalSec) || p.intervalSec),
-    notifyOnModelChange: Boolean(data.notifyOnModelChange),
-    note: String(data.note ?? p.note).trim(),
+    notifyOnModelChange: data.notifyOnModelChange === undefined ? Boolean(p.notifyOnModelChange) : Boolean(data.notifyOnModelChange),
+    note: String(data.note ?? p.note ?? '').trim(),
     group: String(data.group ?? p.group ?? '').trim(),
     tags: Array.isArray(data.tags) ? data.tags.map((t) => String(t).trim()).filter(Boolean) : (p.tags || []),
     probeMode: String(data.probeMode || p.probeMode || 'chat'),
+    probePolicy: data.probePolicy ?? p.probePolicy ?? 'strict',
+    sloTarget: data.sloTarget === undefined ? (p.sloTarget ?? null) : data.sloTarget == null || data.sloTarget === '' ? null : Number(data.sloTarget),
     probePath: String(data.probePath ?? p.probePath ?? '').trim(),
     probeBody: String(data.probeBody ?? p.probeBody ?? '').trim(),
     modelsPath: String(data.modelsPath ?? p.modelsPath ?? '/v1/models').trim(),
@@ -116,11 +121,29 @@ function register(ctx) {
     return { ok: true, id };
   });
 
+  ipcMain.handle('provider:clone', (e, id) => {
+    const db = ctx.getDb(), source = db.providers.find((p) => p.id === Number(id));
+    if (!source) return { ok: false, error: 'Provider 不存在' };
+    // Clone configuration without credentials or runtime state; start paused.
+    const p = { ...JSON.parse(JSON.stringify(source)), ...freshRuntime(),
+      id: newNumericId(new Set(db.providers.map((x) => x.id))), enabled: false };
+    delete p.alertRuntime; p.apiKey = ''; p.customHeaders = ''; p.proxyUrl = '';
+    const stem = `${source.name.slice(0, 180)} 副本`;
+    p.name = stem; let suffix = 2;
+    while (db.providers.some((x) => x.name === p.name)) p.name = `${stem} ${suffix++}`;
+    db.providers.push(p);
+    const saved = ctx.persist();
+    if (!saved.ok) { db.providers.pop(); return saved; }
+    ctx.send('state-changed', ctx.publicState());
+    ctx.logger.info(`克隆 Provider [${source.name}] → [${p.name}]（停用）`);
+    return { ok: true, id: p.id };
+  });
+
   ipcMain.handle('provider:update', (e, { id, data }) => {
     const db = ctx.getDb();
     const p = db.providers.find((x) => x.id === Number(id));
     if (!p) return { ok: false, error: 'Provider 不存在' };
-    const periodChanged = Number(data.intervalSec) !== Number(p.intervalSec);
+    const periodChanged = data.intervalSec !== undefined && Number(data.intervalSec) !== Number(p.intervalSec);
     const before = { ...p, tags: [...(p.tags || [])] };
     applyProviderPatch(p, data);
     try { validateProviderConfig(p); } catch (err) { Object.assign(p, before); return { ok: false, error: err.message }; }
@@ -233,33 +256,12 @@ function register(ctx) {
     if (!p) return { ok: false };
     const before = JSON.parse(JSON.stringify(p));
     p.enabled = Boolean(enabled);
-    if (p.enabled) {
-      // 重新启用：以当前时间基线立即调度（schedule 内部会按 checkedAt 判断是否补检）
-      ctx.scheduler.schedule(p);
-    } else {
-      ctx.scheduler.cancel(p.id);
-      p.modelChanged = false;   // 停用时清除"变动"徽标，避免永久残留
-      // 停用后旧状态不再代表现实：回到待检测，避免列表里显示成"在线"
-      p.status = 'unknown';
-      p.latency = null;
-      p.modelsTotal = 0;
-      p.modelsAvailable = [];
-      p.modelsUnavailable = [];
-      p.modelsUnprobed = [];
-      p.modelDetails = [];
-      p.checkedAt = null;
-      p.lastError = null;
-      p.consecutiveFail = 0;
-      p.modelBaseline = [];
-      p.alertRuntime = null;
-      ctx.alerts.resetState(p.id);
-      ctx.scheduler.resetCircuit(p.id);
-    }
+    if (!p.enabled) { Object.assign(p, freshRuntime()); delete p.alertRuntime; }
     const saved = ctx.persist();
-    if (!saved.ok) {
-      Object.assign(p, before);
-      if (p.enabled) ctx.scheduler.schedule(p); else ctx.scheduler.cancel(p.id);
-      return saved;
+    if (!saved.ok) { Object.keys(p).forEach((key) => delete p[key]); Object.assign(p, before); return saved; }
+    if (p.enabled) ctx.scheduler.schedule(p);
+    else {
+      ctx.scheduler.cancel(p.id); ctx.scheduler.resetCircuit(p.id); ctx.alerts.resetState(p.id);
     }
     ctx.send('state-changed', ctx.publicState());
     ctx.updateTrayStatus();

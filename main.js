@@ -3,6 +3,10 @@ const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, nativeImage } = 
 const path = require('path');
 const fs = require('fs');
 const pkg = require('./package.json');
+// Isolate all module-level paths before loading store/logger in the smoke process.
+if (process.argv.includes('--smoke-test') && !process.env.AIPM_DATA_DIR) {
+  process.env.AIPM_DATA_DIR = fs.mkdtempSync(path.join(require('os').tmpdir(), 'aipm-app-'));
+}
 const { loadAll, saveAll, DATA_DIR, DATA_FILE, DEFAULT_GLOBAL } = require('./src/store');
 const logger = require('./src/logger');
 const { Scheduler } = require('./src/scheduler');
@@ -132,10 +136,12 @@ function applyResult(provider, result, reason) {
     available: provider.modelsAvailable,
     unavailable: provider.modelsUnavailable,
     unprobed: provider.modelsUnprobed,
-    firstCheck: firstRealCheck,
+    firstCheck: firstRealCheck || (!provider.modelCatalog?.length && listKnown),
+    catalog: provider.modelCatalog, unknown: provider.modelUnknown || [],
     skip: !firstRealCheck && !listKnown
   });
   provider.modelBaseline = diff.baseline;
+  provider.modelCatalog = diff.catalog; provider.modelUnknown = diff.unknown;
   const added = diff.added;
   const lost = diff.lost;
   const statusChanged = !firstRealCheck && prev.status !== provider.status;
@@ -166,19 +172,47 @@ function applyResult(provider, result, reason) {
   }
 
   // 告警策略引擎：消抖 / 恢复通知 / 静默时段 / 冷却去重
-  const decision = alerts.evaluate(db.global, provider, prev, { modelChanged, firstCheck: firstRealCheck });
+  const decision = alerts.evaluate(db.global, provider, prev, { modelChanged, firstCheck: firstRealCheck, added, lost });
   provider.consecutiveFail = decision.consecutiveFail;
-  for (const a of decision.alerts) {
-    if (a.kind === 'modelChange') {
-      notifyModelChange(db.global, provider, prev, provider, { added, lost }).catch((e) => logger.error(`通知失败: ${e.message}`));
-      logger.warn(`[告警] [${provider.name}] 模型变动已推送`);
-    } else {
-      notifyAlert(db.global, provider, a).catch((e) => logger.error(`通知失败: ${e.message}`));
-      logger.warn(`[告警] [${provider.name}] ${a.title}：${a.reason}`);
-    }
-  }
+  dispatchAlerts(provider, decision.alerts, prev);
   updateTrayStatus();
-  return { modelChanged, alerts: decision.alerts, firstCheck: firstRealCheck };
+  return { modelChanged, alerts: decision.alerts.filter((a) => a.isNew), firstCheck: firstRealCheck };
+}
+const deliveryInFlight = new Set(), deliveryJobs = new Set();
+function dispatchAlerts(provider, events, prev = null) {
+  for (const event of events) {
+    const key = `${provider.id}:${event.eventId}`;
+    if (deliveryInFlight.has(key)) continue;
+    deliveryInFlight.add(key);
+    const extra = { added: event.added || [], lost: event.lost || [], delivered: event.delivered || [] };
+    const operation = event.kind === 'modelChange'
+      ? notifyModelChange(db.global, provider, prev, provider, extra) : notifyAlert(db.global, provider, event, extra);
+    const job = operation.then((result) => {
+      if (!db.providers.includes(provider) || provider.enabled === false) return;
+      alerts.noteDelivery(provider, event, result);
+      persistSoon(); send('state-changed', publicState());
+    }).catch((e) => {
+      if (!db.providers.includes(provider) || provider.enabled === false) return;
+      alerts.noteDelivery(provider, event, { attempted: 0, delivered: [], failed: [{ error: e.message }] });
+      persistSoon(); logger.error(`通知失败: ${e.message}`);
+    }).finally(() => { deliveryInFlight.delete(key); deliveryJobs.delete(job); });
+    deliveryJobs.add(job);
+  }
+}
+function retryPendingAlerts() {
+  for (const provider of db.providers) {
+    if (provider.enabled === false || !Object.keys(provider.alertRuntime?.pending || {}).length) continue;
+    // Re-evaluate only delivery eligibility; do not count another failed sample.
+    const decision = alerts.evaluate(db.global, provider, snapshot(provider), { deliveryOnly: true });
+    dispatchAlerts(provider, decision.alerts);
+    const fresh = decision.alerts.filter((a) => a.isNew);
+    if (fresh.length) pushUnread(provider, fresh);
+  }
+}
+function applyGlobalConfig() {
+  scheduler.setConcurrency(db.global.concurrency || 4);
+  logger.configure(db.global); applyLoginItem(db.global); registerHotkey();
+  for (const provider of db.providers) alerts.retryPending(provider);
 }
 
 // ---------- 托盘（状态染色 + 每服务商状态菜单） ----------
@@ -359,10 +393,11 @@ function selfmonQueue() {
 }
 
 /** 全局快捷键：显示/隐藏主界面（可改键、可关闭） */
+let hotkeyCaptureActive = false;
 function registerHotkey() {
   try {
     globalShortcut.unregisterAll();
-    if (db.global.hotkeyEnabled === false) return;
+    if (db.global.hotkeyEnabled === false || hotkeyCaptureActive) return;
     const acc = String(db.global.hotkey || '').trim() || 'CommandOrCtrl+Alt+M';
     const ok = globalShortcut.register(acc, () => {
       if (win) { if (win.isVisible()) win.hide(); else { win.show(); win.focus(); } }
@@ -393,7 +428,7 @@ async function maybeDailyMail() {
   g.lastReportDay = day;
   persist();
   try {
-    const sum = await history.summarize(DATA_DIR, { hours: 24 });
+    const sum = await history.summarize(DATA_DIR, { hours: 24, providers: db.providers, sloTarget: g.sloTarget });
     await sendMail(g, { subject: `AI Provider 日报 ${day}（可用率 ${sum.overall.uptime}%）`, html: buildReportHTML(sum) });
     logger.info(`[邮件] 日报已发送至 ${g.mailTo}`);
   } catch (e) {
@@ -403,6 +438,20 @@ async function maybeDailyMail() {
   } finally {
     reportInFlight = false;
   }
+}
+
+let maintenanceDay = '', maintenanceInFlight = false;
+async function dailyMaintenance() {
+  const day = new Date().toLocaleDateString('sv-SE');
+  if (persistBlocked || maintenanceDay === day || maintenanceInFlight) return;
+  maintenanceInFlight = true;
+  try {
+    const file = backup.autoBackup({ global: db.global, providers: db.providers }, DATA_DIR, { keep: 10 });
+    if (file) logger.info(`[备份] 每日自动备份 ${path.basename(file)}`);
+    await history.prune(DATA_DIR, db.global.historyKeepDays || 90);
+    logger.pruneOldLogs(); maintenanceDay = day;
+  } catch (e) { logger.error(`[维护] ${e.message}`); }
+  finally { maintenanceInFlight = false; }
 }
 
 // ---------- 自动启动检测 ----------
@@ -472,7 +521,8 @@ const ctx = {
   DATA_DIR, DATA_FILE,
   pkg,
   SECRET_GLOBAL_KEYS,
-  applyLoginItem, registerHotkey,
+  applyLoginItem, registerHotkey, applyGlobalConfig,
+  setHotkeyCapture: (active) => { hotkeyCaptureActive = Boolean(active); registerHotkey(); },
   updateTrayStatus,
   clearAllUnread: clearUnread,
   ackUnreadById,
@@ -550,6 +600,8 @@ function createWindow() {
     }
   });
   win.on('closed', () => { win = null; });
+  win.on('blur', () => { if (hotkeyCaptureActive) { hotkeyCaptureActive = false; registerHotkey(); } });
+  win.webContents.on('render-process-gone', () => { hotkeyCaptureActive = false; registerHotkey(); });
   // 未读告警必须由用户显式确认，窗口获得焦点不再自动清零。
 }
 
@@ -585,7 +637,7 @@ if (process.argv.includes('--smoke-test') && fs.existsSync(path.join(__dirname, 
       // 全局快捷键（显示/隐藏主界面）
       registerHotkey();
       // 邮件日报轮询（30 秒粒度）
-      setInterval(() => { void maybeDailyMail(); }, 30000);
+      setInterval(() => { if (!quitting) { void maybeDailyMail(); retryPendingAlerts(); void dailyMaintenance(); } }, 30000);
       // 自动更新：打包版 + 开关开启时，启动 30 秒后静默检查一次
       try {
         const { createUpdater } = require('./src/updater');
@@ -594,25 +646,23 @@ if (process.argv.includes('--smoke-test') && fs.existsSync(path.join(__dirname, 
           setTimeout(() => { if (appUpdater) appUpdater.check(false).catch(() => {}); }, 30000);
         }
       } catch (e) { logger.warn(`[更新] 初始化失败: ${e.message}`); }
-      // 每日自动备份（保留最近 10 份）
-      const f = backup.autoBackup({ global: db.global, providers: db.providers }, DATA_DIR, { keep: 10 });
-      if (f) logger.info(`[备份] 已生成每日自动备份: ${path.basename(f)}`);
-      // 清理过期历史分片（默认保留 30 天）
-      try {
-        const days = Number(db.global.historyKeepDays) > 0 ? Number(db.global.historyKeepDays) : 30;
-        history.prune(DATA_DIR, days);
-      } catch (e) { logger.warn(`[历史] 清理失败: ${e.message}`); }
+      void dailyMaintenance();
       updateTrayStatus();
     });
 
-    app.on('before-quit', () => {
+    let quitFlushed = false, quitFlushing = false;
+    app.on('before-quit', (event) => {
       quitting = true;
-      scheduler.stop();
-      flushPersistSoon();   // 防抖窗口内退出，把最后一轮检测结果落盘
-      try { history.flushSync(); } catch (e) { /* ignore */ }
-      try { logger.flushSync(); } catch (e) { /* ignore */ }
-      try { globalShortcut.unregisterAll(); } catch (e) { /* ignore */ }
+      if (quitFlushed) return;
+      event.preventDefault();
+      if (quitFlushing) return;
+      quitFlushing = true; scheduler.stop(); flushPersistSoon();
+      Promise.allSettled([...deliveryJobs]).then(() => { flushPersistSoon(); return history.flush(); }).catch((err) => logger.error(`历史收尾失败: ${err.message}`)).finally(() => {
+        logger.flushSync(); globalShortcut.unregisterAll(); quitFlushed = true; app.quit();
+      });
     });
     app.on('window-all-closed', (e) => { /* 保持后台运行，由托盘退出 */ });
   }
 }
+
+if (process.env.AIPM_INTEGRATION_TEST === '1') module.exports = { ctx, scheduler, publicState, applyResult, retryPendingAlerts, dailyMaintenance, flushPersistSoon };

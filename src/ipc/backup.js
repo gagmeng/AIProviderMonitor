@@ -53,15 +53,18 @@ function register(ctx) {
   });
 
   ipcMain.handle('backup:restore', (e, { filePath, mode }) => {
+    const db = ctx.getDb();
+    const before = JSON.stringify(db);
+    let committed = false;
     try {
-      const db = ctx.getDb();
-      const before = JSON.stringify(db);
       const res = backup.restoreFrom(db, filePath, mode === 'merge' ? 'merge' : 'overwrite');
       const saved = ctx.persist();
       if (!saved.ok) { ctx.replaceDb(JSON.parse(before)); return saved; }
+      committed = true;
       // 重建全部定时器并刷新前端；旧熔断记录对应的 provider 可能已不在列表里，一并清空
       ctx.scheduler.removeAll();
       ctx.scheduler.resetAllCircuits();
+      ctx.alerts.resetState(); ctx.applyGlobalConfig();
       for (const p of db.providers) {
         if (p.enabled !== false) ctx.scheduler.schedule(p);
       }
@@ -69,6 +72,7 @@ function register(ctx) {
       ctx.send('state-changed', ctx.publicState());
       return { ok: true, ...res };
     } catch (err) {
+      if (!committed) ctx.replaceDb(JSON.parse(before));
       ctx.logger.error(`[还原] 失败: ${err.message}`);
       return { ok: false, error: err.message };
     }

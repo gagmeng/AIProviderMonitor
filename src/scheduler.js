@@ -1,225 +1,104 @@
 'use strict';
 const logger = require('./logger');
 const { detect } = require('./detector');
-
-/** Node setTimeout 超过 2^31-1 ms 会被钳成 1ms。月/年周期必须分段等待。 */
 const MAX_TIMER_MS = 2147483647;
-// 全局暂停期间 tick 的低频轮询间隔：不检测也不丢 provider，恢复时由 resume() 强制重挂
-const PAUSE_POLL_MS = 30000;
-
-function clampTimerMs(ms) {
-  const n = Math.max(0, Math.floor(Number(ms) || 0));
-  return n > MAX_TIMER_MS ? MAX_TIMER_MS : n;
-}
-
-/**
- * 调度器：按每个 Provider 的轮循周期调度检测。
- *
- * 设计要点：
- * - 每个 provider 一个绝对计时器，下次触发时间基于「上次检测时间 + 周期」计算，
- *   编辑周期后立即按新周期重排；若已到期则立即补检一次。
- * - 周期未变化时重复调用 schedule() 不会重置已排定的计时器（避免编辑其它字段
- *   或频繁保存导致检测被无限推迟）。
- * - tick 续链同样基于最新配置与上次检测时间，自动补齐错过的周期。
- */
+function clampTimerMs(ms) { return Math.min(MAX_TIMER_MS, Math.max(0, Math.floor(Number(ms) || 0))); }
 class Scheduler {
-  constructor({ concurrency = 4 } = {}) {
-    this.timers = new Map();      // id -> { handle, firedAt }
-    this.running = new Set();     // provider ids currently checking
-    this.queue = [];
-    this.circuits = new Map();  // id -> { failures, openUntil }
-    this.active = 0;
-    this.concurrency = Math.max(1, concurrency);
-    this.handlers = {};           // onResult / onState
-    this.stopped = false;
-    this.paused = false;          // 全局暂停：自动轮循挂起，手动检测不受影响
-    this.getProvider = null;      // (id) => provider
-    this.getGlobal = null;        // () => globalCfg，用于把超时/重试/代理等配置透传给 detector
+  constructor({ concurrency = 4, detector = detect } = {}) {
+    this.timers = new Map(); this.generations = new Map(); this.running = new Set();
+    this.controllers = new Map(); this.queued = new Set(); this.queue = []; this.circuits = new Map();
+    this.active = 0; this.concurrency = Math.max(1, concurrency); this.handlers = {};
+    this.stopped = false; this.paused = false; this.getProvider = null; this.getGlobal = null; this.detector = detector;
   }
-
-  setConcurrency(n) { this.concurrency = Math.max(1, n | 0 || 1); }
-
+  setConcurrency(n) { this.concurrency = Math.min(16, Math.max(1, n | 0 || 1)); this._drain(); }
   on(name, fn) { this.handlers[name] = fn; }
-
-  emit(name, ...args) { const fn = this.handlers[name]; if (fn) fn(...args); }
-
-  _periodOf(provider) {
-    return Math.max(5, Number(provider && provider.intervalSec) || 60) * 1000;
+  emit(name, ...args) { if (this.handlers[name]) this.handlers[name](...args); }
+  _periodOf(p) { return Math.max(5, Number(p && p.intervalSec) || 60) * 1000; }
+  _generation(id) { return this.generations.get(id) || 0; }
+  _clearTimer(id) { const t = this.timers.get(id); if (t) clearTimeout(t.handle); this.timers.delete(id); }
+  schedule(p) {
+    if (this.stopped || p.enabled === false) { this.cancel(p.id); return; }
+    const period = this._periodOf(p), old = this.timers.get(p.id);
+    if (old && old.period === period) return;
+    this.generations.set(p.id, this._generation(p.id) + 1);
+    this._armAt(p.id, Math.max(Date.now(), (Number(p.checkedAt) || 0) + period), period, this._generation(p.id));
   }
-
-  /**
-   * 注册/更新一个 provider 的周期调度。
-   * - 若该 provider 已有未触发的定时器且周期未变化，保持原定时器不动；
-   * - 若周期变化：按「上次检测时间 + 新周期」重排，已到期立即补检；
-   * - 若无定时器（新启用/刚删除）：同上。
-   */
-  schedule(provider) {
-    const id = provider.id;
-    const existing = this.timers.get(id);
-    const newPeriod = this._periodOf(provider);
-
-    // 已有待触发定时器且周期未变 → 不打扰（保持原节奏）
-    if (existing && existing.period === newPeriod) {
-      return;
-    }
-
-    this.cancel(id);
-
-    // 计算 ms 后触发：基于上次检测时间；从未检测过或已到期 → 立即
-    const last = Number(provider.checkedAt) || 0;
-    let delay = last + newPeriod - Date.now();
-    if (delay < 0) delay = 0;
-    // 刚完成过一轮检测（几秒内）时，仍给出一个小缓冲，避免紧贴着上一轮重复触发
-    if (delay === 0 && Date.now() - last < 1000) delay = 1000;
-
-    this._arm(id, delay, newPeriod);
-
-    if (delay === 0) {
-      const name = provider.name || `#${id}`;
-      logger.info(`[调度] [${name}] 周期 ${Math.round(newPeriod / 1000)}s 已到期，立即补检`);
-    } else if (!existing || existing.period !== newPeriod) {
-      const name = provider.name || `#${id}`;
-      logger.debug(`[调度] [${name}] 下次检测 ${Math.round(delay / 1000)}s 后（周期 ${Math.round(newPeriod / 1000)}s）`);
-    }
-  }
-
-  /** 设定定时器并记录计划信息 */
-  _arm(id, delay, period) {
-    const dueAt = Date.now() + delay;   // 真正到期时刻，可能远于单次 setTimeout 上限
-    const wait = clampTimerMs(delay);
-    const tick = async () => {
-      this.timers.delete(id);   // 触发后先摘除，检测完成后由 _afterCheck 续链
-      if (this.stopped) return;
-      // 暂停期间不检测也不丢 provider：低频轮询暂停状态，恢复时 resume() 会强制重挂
-      if (this.paused) {
-        this._arm(id, PAUSE_POLL_MS, period);
-        return;
-      }
-      const remain = dueAt - Date.now();
-      // 本次只是 24.8 天分段，还没到周期点，继续等，不要检测
-      if (remain > 1500) {
-        this._arm(id, remain, period);
-        return;
-      }
+  _armAt(id, dueAt, period, generation) {
+    if (this.stopped || generation !== this._generation(id)) return;
+    this._clearTimer(id);
+    const wait = this.paused && dueAt <= Date.now() ? 30000 : clampTimerMs(dueAt - Date.now());
+    const entry = { dueAt, period, generation, handle: null };
+    entry.handle = setTimeout(async () => {
+      if (this.timers.get(id) !== entry || generation !== this._generation(id)) return;
+      this.timers.delete(id);
+      const p = this.getProvider && this.getProvider(id);
+      if (this.stopped || !p || p.enabled === false) return;
+      if (this.paused || dueAt > Date.now()) { this._armAt(id, dueAt, period, generation); return; }
       await this.runCheck(id, { reason: 'auto' });
-      this._afterCheck(id, dueAt, period);
-    };
-    const handle = setTimeout(tick, wait);
-    this.timers.set(id, { handle, period, dueAt });
+      const latest = this.getProvider && this.getProvider(id);
+      if (!latest || latest.enabled === false || generation !== this._generation(id)) return;
+      this._armAt(id, Math.max(dueAt + this._periodOf(latest), Date.now() + 1000), this._periodOf(latest), generation);
+    }, wait);
+    this.timers.set(id, entry);
   }
-
-  /**
-   * 一轮自动检测完成后续排下一次。
-   * 基于「本轮计划触发时刻 + 周期」续排（而非检测完成时刻），
-   * 保证周期节奏稳定，不受检测耗时影响；若本轮（含检测）已超过
-   * 一个周期，则立即补检。
-   */
-  _afterCheck(id, firedAt, prevPeriod) {
-    if (this.stopped) return;
-    const latest = this.getProvider ? this.getProvider(id) : null;
-    if (!latest || latest.enabled === false) return;
-    const period = this._periodOf(latest);
-    let delay = firedAt + period - Date.now();
-    if (delay < 0) delay = 0;
-    // 检测刚完成时给 1s 缓冲，避免与手动触发/补检紧贴重复
-    if (delay < 1000) delay = 1000;
-    this._arm(id, delay, period);
-  }
-
   cancel(id) {
-    const t = this.timers.get(id);
-    if (t) { clearTimeout(t.handle); this.timers.delete(id); }
+    this._clearTimer(id); this.generations.set(id, this._generation(id) + 1);
+    this.queue = this.queue.filter((j) => { if (j.id !== id) return true; this.queued.delete(id); j.resolve(null); return false; });
+    if (this.controllers.has(id)) this.controllers.get(id).abort();
   }
-
-  /** 清除某服务商的熔断状态（删除/停用后残留的失败计数与开启窗口不再有意义） */
   resetCircuit(id) { this.circuits.delete(id); }
-
-  /** 清空全部熔断状态（覆盖还原后旧记录对应的 provider 可能已不存在） */
   resetAllCircuits() { this.circuits.clear(); }
-
-  removeAll() { for (const id of [...this.timers.keys()]) this.cancel(id); }
-
+  removeAll() { for (const id of new Set([...this.timers.keys(), ...this.queued, ...this.running])) this.cancel(id); }
   stop() { this.stopped = true; this.removeAll(); }
-
-  /** 全局暂停自动轮循：已排定的 tick 到期后转入 30s 轮询，不检测、不丢 provider */
-  pause() { this.paused = true; }
-
-  /** 恢复自动轮循：全部已挂定时器立即到期，错过周期的按补检一次性追上 */
+  pause() {
+    this.paused = true;
+    this.queue = this.queue.filter((j) => { if (j.reason === 'manual') return true; this.queued.delete(j.id); j.resolve(null); return false; });
+  }
   resume() {
     this.paused = false;
-    for (const [id, t] of [...this.timers.entries()]) {
-      this.cancel(id);
-      const latest = this.getProvider ? this.getProvider(id) : null;
-      if (!latest || latest.enabled === false) continue;
-      this._arm(id, 0, t.period);
-    }
+    for (const [id, t] of [...this.timers]) this._armAt(id, t.dueAt, t.period, t.generation);
+    this._drain();
   }
-
-  /** 入队一次检测（自动去重：同一 provider 进行中不重复入队） */
   runCheck(id, { reason = 'manual' } = {}) {
-    return new Promise((resolve) => {
-      const circuit = this.circuits.get(id);
-      if (reason === 'auto' && circuit && circuit.openUntil > Date.now()) {
-        logger.warn(`Provider #${id} 熔断中，跳过自动检测（${Math.ceil((circuit.openUntil - Date.now()) / 1000)}s 后恢复）`);
-        return resolve(null);
-      }
-      if (this.running.has(id) && reason === 'manual') {
-        logger.debug(`Provider #${id} 检测进行中，忽略重复触发`);
-        return resolve(null);
-      }
-      this.queue.push({ id, reason, resolve });
-      this._drain();
-    });
+    const p = this.getProvider && this.getProvider(id);
+    if (this.stopped || !p || this.running.has(id) || this.queued.has(id) ||
+      (reason !== 'manual' && (this.paused || p.enabled === false))) return Promise.resolve(null);
+    return new Promise((resolve) => { this.queued.add(id); this.queue.push({ id, reason, resolve }); this._drain(); });
   }
-
-  async _drain() {
-    while (this.active < this.concurrency && this.queue.length > 0) {
-      const job = this.queue.shift();
-      if (this.running.has(job.id)) { job.resolve(null); continue; }
-      this.active++;
-      this.running.add(job.id);
-      this.emit('state');
-      this._exec(job).finally(() => {
-        this.active--;
-        this.running.delete(job.id);
-        this.emit('state');
-        this._drain();
+  _drain() {
+    while (!this.stopped && this.active < this.concurrency && this.queue.length) {
+      const job = this.queue.shift(); this.queued.delete(job.id);
+      const p = this.getProvider && this.getProvider(job.id), circuit = this.circuits.get(job.id);
+      if (!p || this.running.has(job.id) || (job.reason !== 'manual' && (this.paused || p.enabled === false ||
+        (circuit && circuit.openUntil > Date.now())))) { job.resolve(null); continue; }
+      const controller = new AbortController(); this.controllers.set(job.id, controller);
+      this.running.add(job.id); this.active++; this.emit('state');
+      this._exec(job, p, controller).catch((e) => logger.error(e.message)).finally(() => {
+        this.controllers.delete(job.id); this.running.delete(job.id); this.active--; this.emit('state'); this._drain();
       });
     }
   }
-
-  async _exec(job) {
-    const provider = this.getProvider ? this.getProvider(job.id) : null;
-    if (!provider) { job.resolve(null); return; }
-    logger.info(`开始检测 [${provider.name}] (${job.reason})`);
+  async _exec(job, p, controller) {
     try {
+      logger.info(`开始检测 [${p.name}] (${job.reason})`);
       const globalCfg = this.getGlobal ? this.getGlobal() : {};
-      const result = await detect(provider, { globalCfg });
-      if (result && result.status === 'up') {
-        this.circuits.delete(provider.id);
-      } else {
-        const prev = this.circuits.get(provider.id) || { failures: 0, openUntil: 0 };
-        prev.failures++;
-        const threshold = Math.max(2, Number(globalCfg.circuitFailThreshold) || 5);
-        if (prev.failures >= threshold) {
-          prev.openUntil = Date.now() + Math.max(30, Number(globalCfg.circuitOpenSec) || 300) * 1000;
-          prev.failures = 0;
-          logger.warn(`[熔断] [${provider.name}] 连续失败达到 ${threshold} 次，暂停自动探测`);
+      const result = await this.detector({ ...p }, { globalCfg, signal: controller.signal });
+      if (controller.signal.aborted || this.stopped || (this.getProvider && !this.getProvider(job.id))) return;
+      if (result.status === 'up') this.circuits.delete(p.id);
+      else {
+        const c = this.circuits.get(p.id) || { failures: 0, openUntil: 0 }; c.failures++;
+        if (c.failures >= Math.max(2, Number(globalCfg.circuitFailThreshold) || 5)) {
+          c.openUntil = Date.now() + Math.max(30, Number(globalCfg.circuitOpenSec) || 300) * 1000; c.failures = 0;
         }
-        this.circuits.set(provider.id, prev);
+        this.circuits.set(p.id, c);
       }
-      this.emit('result', provider, result, job.reason);
-      job.resolve(result);
-    } catch (e) {
-      logger.error(`检测异常 [${provider.name}]: ${e.message}`);
-      job.resolve(null);
-    }
+      this.emit('result', this.getProvider ? this.getProvider(job.id) : p, result, job.reason); job.resolve(result);
+    } catch (e) { if (!controller.signal.aborted) logger.error(`检测异常 [${p.name}]: ${e.message}`); }
+    finally { job.resolve(null); }
   }
-
   isRunning(id) { return this.running.has(id); }
   runningList() { return [...this.running]; }
-  scheduleInfo() { return [...this.timers.entries()].map(([id, t]) => ({ id, dueAt: t.dueAt, period: t.period })); }
-  circuitInfo() { return [...this.circuits.entries()].map(([id, c]) => ({ id, failures: c.failures, openUntil: c.openUntil })); }
+  scheduleInfo() { return [...this.timers].map(([id, t]) => ({ id, dueAt: t.dueAt, period: t.period })); }
+  circuitInfo() { return [...this.circuits].map(([id, c]) => ({ id, ...c })); }
 }
-
 module.exports = { Scheduler, clampTimerMs, MAX_TIMER_MS };

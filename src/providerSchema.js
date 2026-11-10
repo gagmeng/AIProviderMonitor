@@ -9,7 +9,7 @@
 const RUNTIME_FIELDS = [
   'status', 'latency', 'modelsTotal', 'modelsAvailable', 'modelsUnavailable',
   'modelsUnprobed', 'modelDetails', 'checkedAt', 'lastError', 'modelChanged',
-  'consecutiveFail', 'probeCursor', 'modelBaseline', 'alertRuntime', 'quotaRemaining', 'quotaWarning', 'firstTokenMs', 'throughputTokensPerSec'
+  'consecutiveFail', 'probeCursor', 'modelBaseline', 'modelCatalog', 'modelUnknown', 'alertRuntime', 'probeLatencyAvg', 'probeLatencyP95', 'quotaRemaining', 'quotaWarning', 'firstTokenMs', 'throughputTokensPerSec'
 ];
 const PROBE_MODES = new Set(['chat', 'embeddings', 'completions', 'custom', 'none']);
 const NOTIFY_CHANNELS = new Set(['weixin', 'qq', 'dingtalk', 'telegram', 'feishu', 'slack', 'serverchan', 'custom']);
@@ -25,6 +25,7 @@ function ensureUniqueProviderIds(list) {
   for (const p of Array.isArray(list) ? list : []) {
     let id = Number(p && p.id);
     if (!Number.isSafeInteger(id) || id <= 0 || used.has(id)) id = newNumericId(used);
+    if (!p || typeof p !== 'object' || Array.isArray(p)) continue;
     p.id = id;
     used.add(id);
   }
@@ -52,6 +53,10 @@ function validateProviderConfig(p) {
     if (p[key] != null && !/^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(String(p[key]))) throw new Error(`${key} 时间格式无效`);
   }
   if (String(p.probeBody || '').length > 100000) throw new Error('自定义探测请求体过大');
+  if (p.probeMode === 'custom' && p.probeBody) {
+    try { JSON.parse(String(p.probeBody).replace(/\{\{\s*model\s*\}\}/g, 'example')); }
+    catch (e) { throw new Error('自定义探测请求体不是有效 JSON（模型占位符需放在字符串内）'); }
+  }
   if (p.modelsPath != null && !String(p.modelsPath).trim().startsWith('/')) throw new Error('模型列表路径必须以 / 开头');
   if (p.customHeaders) {
     let headers;
@@ -62,6 +67,10 @@ function validateProviderConfig(p) {
   if (p.modelIgnorePattern) { try { new RegExp(String(p.modelIgnorePattern)); } catch (e) { throw new Error('模型忽略规则不是有效正则表达式'); } }
   if (p.quotaPath && !String(p.quotaPath).trim().startsWith('/')) throw new Error('配额路径必须以 / 开头');
   if (p.quotaWarnBelow != null && p.quotaWarnBelow !== '' && !Number.isFinite(Number(p.quotaWarnBelow))) throw new Error('配额告警阈值必须是数字');
+  if (!['strict', 'reachable'].includes(p.probePolicy || 'strict')) throw new Error('探测判定方式无效');
+  if (p.sloTarget != null && (!Number.isFinite(Number(p.sloTarget)) || Number(p.sloTarget) < 90 || Number(p.sloTarget) > 100)) throw new Error('SLO 目标必须在 90-100% 之间');
+  if (p.capabilityModes != null && (!Array.isArray(p.capabilityModes) || p.capabilityModes.some((m) => !['chat', 'embeddings', 'completions'].includes(m)))) throw new Error('模型能力类型无效');
+  if (p.maintWeekdays != null && (!Array.isArray(p.maintWeekdays) || p.maintWeekdays.some((n) => !Number.isInteger(Number(n)) || Number(n) < 0 || Number(n) > 6))) throw new Error('维护星期无效');
   if (p.notifyChannels != null) {
     if (!Array.isArray(p.notifyChannels)) throw new Error('通知通道路由必须是数组');
     for (const c of p.notifyChannels) {
@@ -76,8 +85,8 @@ function freshRuntime() {
   return {
     status: 'unknown', latency: null, modelsTotal: 0,
     modelsAvailable: [], modelsUnavailable: [], modelsUnprobed: [], modelDetails: [],
-    checkedAt: null, lastError: null, modelChanged: false,
-    consecutiveFail: 0, probeCursor: 0, modelBaseline: [], quotaRemaining: null, quotaWarning: false, firstTokenMs: null, throughputTokensPerSec: null
+    checkedAt: null, lastError: null, modelChanged: false, probeLatencyAvg: null, probeLatencyP95: null,
+    consecutiveFail: 0, probeCursor: 0, modelBaseline: [], modelCatalog: [], modelUnknown: [], quotaRemaining: null, quotaWarning: false, firstTokenMs: null, throughputTokensPerSec: null
   };
 }
 
@@ -86,9 +95,11 @@ function boolVal(v) {
   return v === true || v === 1 || /^(1|true|yes|是|y)$/i.test(String(v ?? '').trim());
 }
 
-/** URL 匹配键：去首尾空白+尾部斜杠+小写（仅用于去重比对，不回写入库值） */
+/** URL 匹配键：规范协议/主机与尾部斜杠，保留路径和查询参数大小写。 */
 function normalizeUrlKey(u) {
-  return String(u || '').trim().replace(/\/+$/, '').toLowerCase();
+  const raw = String(u || '').trim().replace(/\/+$/, '');
+  try { const url = new URL(raw); return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}${url.search}`; }
+  catch (e) { return raw; }
 }
 
 /** URL 入库值：去首尾空白+尾部斜杠，保留大小写 */
@@ -111,6 +122,8 @@ function normalizeProvider(p) {
   out.group = String(src.group || '');
   out.tags = Array.isArray(src.tags) ? src.tags.map((t) => String(t)) : [];
   out.probeMode = String(src.probeMode || 'chat');
+  out.probePolicy = src.probePolicy || 'strict';
+  out.sloTarget = src.sloTarget == null || src.sloTarget === '' ? null : Number(src.sloTarget);
   out.probePath = String(src.probePath || '');
   out.probeBody = String(src.probeBody || '');
   out.modelsPath = String(src.modelsPath || '/v1/models');
@@ -118,7 +131,7 @@ function normalizeProvider(p) {
   out.authHeader = String(src.authHeader || 'X-API-Key');
   out.authPrefix = String(src.authPrefix || '');
   out.customHeaders = String(src.customHeaders || '');
-  out.capabilityModes = Array.isArray(src.capabilityModes) ? src.capabilityModes.filter((m) => ['chat', 'embeddings', 'completions'].includes(m)) : [];
+  out.capabilityModes = Array.isArray(src.capabilityModes) ? src.capabilityModes.map(String) : [];
   out.assertType = ['none', 'contains', 'jsonPath'].includes(src.assertType) ? src.assertType : 'none';
   out.assertValue = String(src.assertValue || '');
   out.modelIgnorePattern = String(src.modelIgnorePattern || '');
@@ -126,8 +139,8 @@ function normalizeProvider(p) {
   out.quotaValuePath = String(src.quotaValuePath || 'remaining');
   out.quotaWarnBelow = src.quotaWarnBelow === '' || src.quotaWarnBelow == null ? null : Number(src.quotaWarnBelow);
   out.measureStreaming = Boolean(src.measureStreaming);
-  out.notifyChannels = Array.isArray(src.notifyChannels) ? src.notifyChannels.map(String).filter((c) => NOTIFY_CHANNELS.has(c)) : [];
-  out.maintWeekdays = Array.isArray(src.maintWeekdays) ? src.maintWeekdays.map(Number).filter((n) => n >= 0 && n <= 6) : [];
+  out.notifyChannels = Array.isArray(src.notifyChannels) ? src.notifyChannels.map(String) : [];
+  out.maintWeekdays = Array.isArray(src.maintWeekdays) ? src.maintWeekdays.filter((n) => String(n).trim() !== '').map(Number) : [];
   out.maintDates = String(src.maintDates || '');
   out.probeLimit = Number(src.probeLimit) > 0 ? Number(src.probeLimit) : null;
   out.proxyUrl = String(src.proxyUrl || '');
@@ -153,7 +166,7 @@ function mergeProvider(exist, incoming) {
   for (const k of Object.keys(incoming)) {
     if (MERGE_SKIP.has(k)) continue;
     let v = incoming[k];
-    if (k === 'apiKey' && !v) continue;
+    if (['apiKey', 'customHeaders', 'proxyUrl'].includes(k) && !v) continue;
     if (k === 'url') v = cleanUrl(v);
     if (k === 'intervalSec') v = Math.max(5, Number(v) || exist.intervalSec || 60);
     if (k === 'notifyOnModelChange' && typeof v !== 'boolean') v = boolVal(v);

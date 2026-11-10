@@ -1,6 +1,6 @@
 'use strict';
 const logger = require('./logger');
-const { normalizeProvider, mergeProvider, normalizeUrlKey, validateProviderConfig } = require('./providerSchema');
+const { normalizeProvider, mergeProvider, normalizeUrlKey, validateProviderConfig, ensureUniqueProviderIds } = require('./providerSchema');
 
 /**
  * 服务商批量导入/导出模块
@@ -29,7 +29,7 @@ function toJSON(providers) {
     name: p.name, url: p.url, apiKey: p.apiKey || '', intervalSec: p.intervalSec,
     notifyOnModelChange: Boolean(p.notifyOnModelChange), note: p.note || '',
     group: p.group || '', tags: p.tags || [], enabled: p.enabled !== false,
-    probeMode: p.probeMode || 'chat', probePath: p.probePath || '', probeBody: p.probeBody || '',
+    probeMode: p.probeMode || 'chat', probePolicy: p.probePolicy || 'strict', sloTarget: p.sloTarget ?? null, probePath: p.probePath || '', probeBody: p.probeBody || '',
     modelsPath: p.modelsPath || '/v1/models', authType: p.authType || 'bearer', authHeader: p.authHeader || '', authPrefix: p.authPrefix || '',
     customHeaders: p.customHeaders || '', capabilityModes: p.capabilityModes || [], assertType: p.assertType || 'none', assertValue: p.assertValue || '',
     modelIgnorePattern: p.modelIgnorePattern || '', quotaPath: p.quotaPath || '', quotaValuePath: p.quotaValuePath || 'remaining', quotaWarnBelow: p.quotaWarnBelow ?? null, measureStreaming: Boolean(p.measureStreaming),
@@ -63,7 +63,7 @@ function toText(providers, delimiter = 'tab') {
  * opts: { format: 'json'|'csv'|'text', delimiter?: 'tab'|'comma'|'pipe'|'semicolon', withKey?: boolean }
  */
 function exportProviders(providers, opts = {}) {
-  const list = (providers || []).map((p) => (opts.withKey === false ? { ...p, apiKey: '' } : p));
+  const list = (providers || []).map((p) => (opts.withKey === true ? p : { ...p, apiKey: '', customHeaders: '', proxyUrl: '' }));
   let content;
   if (opts.format === 'csv') content = toCSV(list);
   else if (opts.format === 'text') content = toText(list, opts.delimiter);
@@ -97,14 +97,32 @@ function boolVal(v) {
 /** 从 JSON 文本解析 */
 function fromJSON(text) {
   const j = JSON.parse(text);
-  const arr = Array.isArray(j) ? j : (Array.isArray(j.providers) ? j.providers : null);
+  const arr = Array.isArray(j) ? j : (j && Array.isArray(j.providers) ? j.providers : null);
   if (!arr) throw new Error('JSON 中未找到服务商数组（需要数组或 { providers: [...] }）');
   return arr;
 }
 
 /** 从 CSV 文本解析（表头映射，兼容中英文表头） */
+function splitCSVRecords(text) {
+  const rows = []; let row = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      if (quoted && text[i + 1] === '"') { row += '""'; i++; continue; }
+      quoted = !quoted;
+    }
+    if ((c === '\n' || c === '\r') && !quoted) {
+      if (row.trim()) rows.push(row);
+      row = ''; if (c === '\r' && text[i + 1] === '\n') i++;
+    } else row += c;
+  }
+  if (quoted) throw new Error('CSV 存在未闭合的引号');
+  if (row.trim()) rows.push(row);
+  return rows;
+}
+
 function fromCSV(text) {
-  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter((l) => l.trim() !== '');
+  const lines = splitCSVRecords(text.replace(/^\uFEFF/, ''));
   if (lines.length < 2) throw new Error('CSV 至少需要表头行和一行数据');
   const header = parseCSVLine(lines[0]).map((h) => h.trim().toLowerCase());
   const idx = (names) => header.findIndex((h) => names.includes(h));
@@ -176,6 +194,7 @@ function parseImport(text, opts = {}) {
   const errors = [];
   raws.forEach((r, i) => {
     const lineNo = i + 1;
+    if (!r || typeof r !== 'object') { errors.push({ line: lineNo, msg: '条目必须是对象' }); return; }
     const name = String(r.name || '').trim();
     const url = String(r.url || '').trim();
     if (!name && !url) { errors.push({ line: lineNo, msg: '名称与 URL 均为空，已跳过' }); return; }
@@ -188,7 +207,10 @@ function parseImport(text, opts = {}) {
     // 否则坏正则会在运行时让 detector 误报「离线：Invalid regular expression」
     try {
       validateProviderConfig(item);
-      items.push(item);
+      const patch = {};
+      for (const key of Object.keys(r)) if (Object.hasOwn(item, key)) patch[key] = item[key];
+      patch.name = item.name; patch.url = item.url;
+      items.push(patch);
     } catch (e) {
       errors.push({ line: lineNo, msg: `「${name}」校验失败：${e.message}` });
     }
@@ -237,6 +259,7 @@ function applyImport(db, items, mode = 'merge') {
       }
     }
   }
+  ensureUniqueProviderIds(db.providers);
   logger.info(`[导入导出] 导入完成（${mode}）：新增 ${added}，更新 ${updated}，跳过 ${skipped}${invalid ? `，校验失败丢弃 ${invalid}` : ''}`);
   return { added, updated, skipped, invalid };
 }

@@ -7,6 +7,8 @@ let state = { providers: [], global: {}, running: [], dataFile: '', logDir: '' }
 const selected = new Set();
 let editingId = null;
 let view = 'dashboard';
+const viewScrollPositions = new Map();
+let settingsCategory = 'appearance';
 
 // ---------- 界面语言（v1.2.0：中文原文作 key，zh 直接返回原文） ----------
 const lang = () => (state.global && state.global.lang) || 'zh';
@@ -23,6 +25,8 @@ function initStaticIcons() {
   $('#btnCheckSel').textContent = '检测';
   $('#btnDelSel').innerHTML = icon('trash') + '<span>删除</span>';
   $('#btnGroupView').innerHTML = icon('list') + '<span>分组</span>';
+  $$('[data-icon]', $('#view-stats')).forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
+  $('#hotkeyReset').innerHTML = icon('refresh');
   $('.search-ic').innerHTML = icon('search');
   $('#pmClose').innerHTML = icon('close');
   $('#dmClose').innerHTML = icon('close');
@@ -68,16 +72,60 @@ $('#cfOk').addEventListener('click', () => { $('#confirmModal').classList.remove
 // ---------- 视图切换 ----------
 $$('.nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
+    // Cancel an in-progress channel jump before saving or restoring a page position.
+    $('#main').scrollTo({ top: $('#main').scrollTop, behavior: 'instant' });
+    const changing = view !== btn.dataset.view;
+    if (changing) viewScrollPositions.set(view, $('#main').scrollTop);
     view = btn.dataset.view;
-    $$('.nav-item').forEach((b) => b.classList.toggle('active', b === btn));
-    $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${view}`));
+    $$('.nav-item').forEach((b) => {
+      b.classList.toggle('active', b === btn);
+      if (b === btn) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+    $$('.view').forEach((v) => { const active = v.id === `view-${view}`; v.classList.toggle('active', active); v.inert = !active; });
     if (view === 'logs') renderLogs();
     if (view === 'notify') renderNotify();
     if (view === 'dashboard') renderDashboard();
     if (view === 'providers') renderProviders();
     if (view === 'settings') renderNotify();
     if (view === 'stats') renderStats();
+    applyLang();
+    if (changing) $('#main').scrollTop = viewScrollPositions.get(view) || 0;
   });
+});
+
+// Category switches only change visibility; values and pending autosaves stay in place.
+function selectSettingsCategory(category, focus = false) {
+  const tabs = $$('[data-settings-category]');
+  const selectedTab = tabs.find((tab) => tab.dataset.settingsCategory === category);
+  if (!selectedTab) return;
+  settingsCategory = category;
+  tabs.forEach((tab) => {
+    const active = tab === selectedTab;
+    tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+  });
+  $$('[data-settings-section]').forEach((section) => {
+    section.hidden = category !== 'all' && section.dataset.settingsSection !== category;
+    if (category === 'all') {
+      section.removeAttribute('role'); section.removeAttribute('aria-labelledby');
+    } else {
+      section.setAttribute('role', 'tabpanel'); section.setAttribute('aria-labelledby', selectedTab.id);
+    }
+  });
+  if (view === 'settings') { $('#main').scrollTop = 0; viewScrollPositions.set('settings', 0); }
+  if (focus) selectedTab.focus({ preventScroll: true });
+}
+$('.settings-categories').addEventListener('click', (event) => {
+  const tab = event.target.closest('[data-settings-category]');
+  if (tab) selectSettingsCategory(tab.dataset.settingsCategory);
+});
+$('.settings-categories').addEventListener('keydown', (event) => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const tabs = $$('[data-settings-category]'), current = tabs.indexOf(event.target);
+  if (current < 0) return;
+  event.preventDefault();
+  const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  selectSettingsCategory(tabs[index].dataset.settingsCategory, true);
 });
 
 // ---------- 状态渲染 ----------
@@ -115,7 +163,8 @@ function render() {
   applyTheme();
   if (view === 'dashboard') renderDashboard();
   if (view === 'providers') renderProviders();
-  if (view === 'stats') renderStats();
+  if (view === 'stats') void renderStats(false);
+  if ($('#detailModal').classList.contains('show') && detailId != null) refreshOpenDetail();
   // 只刷新健康面板，不整页 renderNotify——后者会清空正在输入的密钥输入框
   if (view === 'notify' || view === 'settings') renderNotifyHealth();
   $('#footRunning').textContent = state.running.length;
@@ -138,12 +187,16 @@ if (window.matchMedia) {
 
 function renderNav() {
   $('#navProviderCount').textContent = state.providers.length;
+  $$('.nav-item').forEach((btn) => {
+    if (btn.dataset.view === view) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
+  });
+  $$('.view').forEach((section) => { section.inert = section.id !== `view-${view}`; });
 }
 
-// 最近检测圆点色（authfail 无对应 CSS 变量，用紫色字面量）
+// 活动流与服务商列表共用语义状态色。
 const actDotColor = (cls) => cls === 'up' ? 'var(--green)'
   : cls === 'degraded' ? 'var(--orange)' : cls === 'down' ? 'var(--red)'
-  : cls === 'authfail' ? '#af52de' : 'var(--gray)';
+  : cls === 'authfail' ? 'var(--purple)' : 'var(--text-3)';
 
 function renderDashboard() {
   const up = state.providers.filter((p) => p.status === 'up').length;
@@ -173,24 +226,25 @@ function renderDashboard() {
 
   const recent = [...state.providers].filter((p) => p.checkedAt).sort((a, b) => b.checkedAt - a.checkedAt).slice(0, 8);
   const wrap = $('#recentList');
-  if (state.providers.length === 0) {
+  const guideComplete = state.providers.length > 0 && state.providers.some((p) => p.checkedAt) && Object.keys(state.global || {}).some((k) => /^notify\w+Enabled$/.test(k) && state.global[k]);
+  if (!state.global.onboardingDismissed && !guideComplete) {
     wrap.innerHTML = renderEmptyWizard();
   } else if (recent.length === 0) {
     wrap.innerHTML = `<div class="empty">${tx('暂无检测记录，点击右上角"检测全部"开始')}</div>`;
   } else {
     wrap.innerHTML = recent.map((p) => {
-      const si = statusInfo(p.status);
-      return `<div class="act-item" data-act="${p.id}" title="${tx('双击查看详情')}">
+      const si = p.enabled === false ? { cls: 'unknown', text: tx('已停用') } : statusInfo(p.status);
+      return `<button type="button" class="act-item" data-act="${p.id}" title="${tx('查看详情')}">
         <span class="act-dot" style="background: ${actDotColor(si.cls)};"></span>
-        <div>
-          <div class="act-name">${escapeHtml(p.name)}</div>
-          <div class="act-sub">${p.modelsAvailable.length}/${p.modelsTotal} ${tx('模型可用')}${p.lastError ? ' · ' + escapeHtml(p.lastError) : ''}</div>
-        </div>
-        <div class="act-right">
-          <div class="act-status st-${si.cls}">${si.text}</div>
-          <div class="act-time">${fmtDate(p.checkedAt)}</div>
-        </div>
-      </div>`;
+        <span class="act-copy">
+          <span class="act-name">${escapeHtml(p.name)}</span>
+          <span class="act-sub">${(p.modelsAvailable || []).length}/${p.modelsTotal || 0} ${tx('模型可用')}${p.lastError ? ' · ' + escapeHtml(p.lastError) : ''}</span>
+        </span>
+        <span class="act-right">
+          <span class="act-status st-${si.cls}">${si.text}</span>
+          <span class="act-time">${fmtDate(p.checkedAt)}</span>
+        </span>
+      </button>`;
     }).join('');
   }
   const latest = recent[0];
@@ -214,7 +268,7 @@ function renderEmptyWizard() {
     { n: 3, done: anyCheck, title: tx('完成首轮检测'), desc: tx('点击「检测全部」，仪表盘开始实时反映各服务商状态'), btn: tx('立即检测'), act: () => { window.aipm.checkAll(); toast(tx('已触发全部检测')); } }
   ];
   return `<div class="wizard">
-    <div class="wz-lead">${tx('快速开始')}</div>
+    <div class="wz-lead">${tx('快速开始')} <button class="btn small ghost" data-wz-dismiss>${tx('关闭引导')}</button></div>
     ${steps.map((s) => `
       <div class="wz-step ${s.done ? 'done' : ''}">
         <span class="wz-num">${s.done ? icon('check') : s.n}</span>
@@ -228,6 +282,12 @@ function renderEmptyWizard() {
 }
 
 $('#recentList').addEventListener('click', (e) => {
+  const activity = e.target.closest('[data-act]');
+  if (activity) { openDetail(Number(activity.dataset.act)); return; }
+  if (e.target.closest('[data-wz-dismiss]')) {
+    window.aipm.setGlobal({ onboardingDismissed: true }).then((r) => { if (r.ok) { state.global.onboardingDismissed = true; renderDashboard(); } else toast(r.error || tx('保存失败'), 'err'); });
+    return;
+  }
   const btn = e.target.closest('[data-wz]');
   if (!btn) return;
   const steps = { 1: () => openProviderModal(), 2: () => navTo('notify'), 3: () => { window.aipm.checkAll(); toast(tx('已触发全部检测')); } };
@@ -242,12 +302,6 @@ $('#btnPauseAll').addEventListener('click', async () => {
   state.paused = next;
   renderDashboard();
   toast(next ? tx('已暂停自动检测，手动检测不受影响') : tx('已恢复自动检测'));
-});
-
-// 仪表盘最近检测条目：双击打开详情
-$('#recentList').addEventListener('dblclick', (e) => {
-  const item = e.target.closest('[data-act]');
-  if (item) openDetail(Number(item.dataset.act));
 });
 
 // 未读徽标：打开未读列表弹窗（逐条确认 / 全部确认）
@@ -305,7 +359,7 @@ function filteredProviders() {
   const st = $('#statusFilter') ? $('#statusFilter').value : '';
   return state.providers.filter((p) => {
     if (g && (p.group || '') !== g) return false;
-    if (st && (p.status || 'unknown') !== st) return false;
+    if (st === 'disabled' ? p.enabled !== false : st && (p.enabled === false || (p.status || 'unknown') !== st)) return false;
     if (!q) return true;
     const tags = (p.tags || []).join(',').toLowerCase();
     return (p.name || '').toLowerCase().includes(q)
@@ -338,7 +392,7 @@ async function refreshUptime24(force = false) {
   try {
     const r = await window.aipm.historySummary({ hours: 24 });
     if (r && r.ok) {
-      uptime24 = { map: new Map((r.perProvider || []).map((p) => [p.id, p.uptime])), at: Date.now() };
+      uptime24 = { map: new Map((r.perProvider || []).map((p) => [p.id, p.timeUptime])), at: Date.now() };
       if (view === 'providers') renderProviders();
     }
   } catch (e) { /* 静默：列表徽标缺失不影响主功能 */ }
@@ -350,7 +404,7 @@ const collapsedGroups = new Set();
 let dragId = null;
 
 function providerRowHtml(p, canDrag) {
-  const si = statusInfo(p.status);
+  const si = p.enabled === false ? { cls: 'unknown', text: tx('已停用') } : statusInfo(p.status);
   const checking = state.running.includes(p.id);
   const total = p.modelsTotal || 0;
   const avail = (p.modelsAvailable || []).length;
@@ -359,18 +413,18 @@ function providerRowHtml(p, canDrag) {
   const checked = p.checkedAt ? fmtTime(p.checkedAt) : tx('未检测');
   const schedule = (state.schedule || []).find((s) => s.id === p.id);
   const nextSub = schedule && schedule.dueAt
-    ? `<div class="cell-sub">${tx('下次检测')} ${fmtWhen(schedule.dueAt)}</div>` : '';
+    ? `<div class="cell-sub" title="${tx('下次检测')} ${fmtWhen(schedule.dueAt)}">${tx('下次')} ${fmtWhen(schedule.dueAt)}</div>` : '';
   const up24 = uptime24.map.get(p.id);
   const upSub = up24 != null
-    ? `<div class="cell-sub ${up24 >= 99 ? 'u-up' : up24 >= 90 ? 'u-degraded' : 'u-down'}">24h ${up24}%</div>` : '';
-  return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''}" data-id="${p.id}"${canDrag ? ' draggable="true"' : ''}>
-        <div class="col-sel"><span class="drag-handle${canDrag ? '' : ' spacer'}" title="${canDrag ? tx('拖拽排序') : ''}">${icon('grip')}</span><label class="checkbox"><input type="checkbox" data-sel="${p.id}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
+    ? `<div class="cell-sub ${up24 >= 99 ? 'u-up' : up24 >= 90 ? 'u-degraded' : 'u-down'}">${tx('24h 时间加权')} ${up24}%</div>` : '';
+  return `<div class="row p-row ${selected.has(p.id) ? 'selected' : ''} ${checking ? 'checking' : ''} ${p.enabled === false ? 'disabled' : ''}" data-id="${p.id}"${canDrag ? ' draggable="true"' : ''}>
+        <div class="col-sel"><span class="drag-handle${canDrag ? '' : ' spacer'}" title="${canDrag ? tx('拖拽排序') : ''}">${icon('grip')}</span><label class="checkbox"><input type="checkbox" data-sel="${p.id}" aria-label="${escapeHtml(tx('选择 {name}', { name: p.name }))}" ${selected.has(p.id) ? 'checked' : ''}/><span class="box">${icon('check')}</span></label></div>
         <div class="col-name"><div class="provider-cell">
           <div class="provider-name">
-            <span class="name-text" data-detail="${p.id}">${escapeHtml(p.name)}</span>
+            <button type="button" class="name-text" data-detail="${p.id}" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</button>
             ${p.modelChanged ? `<span class="changed-badge">${tx('变动')}</span>` : ''}
           </div>
-          <div class="provider-url">${escapeHtml(p.url)}</div>
+          <div class="provider-url" title="${escapeHtml(p.url)}">${escapeHtml(p.url)}</div>
           ${(p.group || (p.tags && p.tags.length)) ? `<div class="provider-meta">${p.group ? `<span class="chip group">${escapeHtml(p.group)}</span>` : ''}${(p.tags || []).slice(0, 3).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
         </div></div>
         <div class="col-status"><span class="status-pill st-${si.cls}"><span class="status-dot ${si.cls} ${checking ? 'pulse' : ''}"></span>${checking ? tx('检测中') : si.text}</span></div>
@@ -378,11 +432,13 @@ function providerRowHtml(p, canDrag) {
         <div class="col-latency">${p.latency != null ? p.latency + ' ms' : '—'}</div>
         <div class="col-cycle cycle-cell">${cycleMin}${nextSub}</div>
         <div class="col-notify">${p.notifyOnModelChange ? `<span class="status-pill st-up">${tx('开启')}</span>` : `<span class="status-pill st-unknown">${tx('关闭')}</span>`}</div>
-        <div class="col-checked checked-cell">${checked}${p.lastError ? `<br/><span class="st-down" style="font-size:11px;" title="${escapeHtml(p.lastError)}">${escapeHtml(String(p.lastError).slice(0, 26))}</span>` : ''}${upSub}</div>
+        <div class="col-checked checked-cell">${checked}${p.lastError ? `<span class="checked-error" title="${escapeHtml(p.lastError)}">${escapeHtml(p.lastError)}</span>` : ''}${upSub}</div>
         <div class="col-ops">
-          <button class="op-btn run" data-run="${p.id}" title="${tx('立即检测')}">${icon('refresh')}</button>
-          <button class="op-btn edit" data-edit="${p.id}" title="${tx('编辑')}">${icon('pencil')}</button>
-          <button class="op-btn del" data-del="${p.id}" title="${tx('删除')}">${icon('trash')}</button>
+          <button class="op-btn run" data-run="${p.id}" title="${tx('立即检测')}" aria-label="${tx('立即检测')}">${icon('refresh')}</button>
+          <button class="op-btn" data-toggle="${p.id}" title="${p.enabled === false ? tx('启用') : tx('停用')}" aria-label="${p.enabled === false ? tx('启用') : tx('停用')}">${icon(p.enabled === false ? 'play' : 'pause')}</button>
+          <button class="op-btn" data-clone="${p.id}" title="${tx('克隆')}" aria-label="${tx('克隆')}">${icon('copy')}</button>
+          <button class="op-btn edit" data-edit="${p.id}" title="${tx('编辑')}" aria-label="${tx('编辑')}">${icon('pencil')}</button>
+          <button class="op-btn del" data-del="${p.id}" title="${tx('删除')}" aria-label="${tx('删除')}">${icon('trash')}</button>
         </div>
       </div>`;
 }
@@ -390,6 +446,10 @@ function providerRowHtml(p, canDrag) {
 function renderProviders() {
   const list = filteredProviders();
   const wrap = $('#providerList');
+  const focusOrigin = document.activeElement;
+  const focusedAttribute = focusOrigin?.closest('#providerList')
+    ? ['data-sel', 'data-detail', 'data-run', 'data-toggle', 'data-clone', 'data-edit', 'data-del'].find((attr) => focusOrigin.hasAttribute(attr)) : null;
+  const focusId = focusedAttribute ? focusOrigin.getAttribute(focusedAttribute) : null;
 
   // 拖拽排序只在「扁平视图 + 无筛选」下启用：筛选结果的局部顺序无法代表全量顺序
   const noFilter = !($('#searchInput').value || '').trim()
@@ -398,7 +458,7 @@ function renderProviders() {
   const canDrag = !groupViewOn && noFilter && list.length > 1 && list.length === state.providers.length;
 
   if (list.length === 0) {
-    wrap.innerHTML = `<div class="empty">${state.providers.length === 0 ? tx('暂无服务商，点击"新增服务商"开始添加') : tx('没有匹配的结果')}</div>`;
+    wrap.innerHTML = `<div class="empty provider-empty">${icon(state.providers.length ? 'search' : 'server')}<span>${state.providers.length === 0 ? tx('暂无服务商，点击"新增服务商"开始添加') : tx('没有匹配的结果')}</span><button class="btn small ${state.providers.length ? 'ghost' : 'primary'}" data-provider-empty="${state.providers.length ? 'clear' : 'add'}">${state.providers.length ? tx('清空筛选') : tx('新增服务商')}</button></div>`;
   } else if (groupViewOn) {
     // 分组视图：按 group 分节（未分组垫底），节内保持现有顺序；节头可折叠
     const sections = new Map();
@@ -435,10 +495,23 @@ function renderProviders() {
   $('#btnEditSel').disabled = selected.size === 0;
   $('#btnDelSel').disabled = selected.size === 0;
   $('#btnDelSel').textContent = selected.size > 0 ? `${tx('删除')} (${selected.size})` : tx('删除');
+  $('#providerResultCount').textContent = noFilter ? tx('共 {n} 个服务商', { n: state.providers.length }) : tx('显示 {shown} / {total} 个服务商', { shown: list.length, total: state.providers.length });
+  $('#providerSelectionCount').textContent = selected.size ? tx('已选 {n} 项', { n: selected.size }) : '';
+  $('#providerClearFilters').hidden = noFilter;
+  $('#btnGroupView').setAttribute('aria-pressed', String(groupViewOn));
+  if (focusedAttribute) wrap.querySelector(`[${focusedAttribute}="${focusId}"]`)?.focus({ preventScroll: true });
 }
 
+function clearProviderFilters() {
+  $('#searchInput').value = ''; $('#groupFilter').value = ''; $('#statusFilter').value = '';
+  renderProviders(); $('#searchInput').focus();
+}
+$('#providerClearFilters').addEventListener('click', clearProviderFilters);
+
 // 列表事件委托
-$('#providerList').addEventListener('click', (e) => {
+$('#providerList').addEventListener('click', async (e) => {
+  const emptyAction = e.target.closest('[data-provider-empty]');
+  if (emptyAction) { if (emptyAction.dataset.providerEmpty === 'add') openProviderModal(); else clearProviderFilters(); return; }
   const gh = e.target.closest('.group-head');
   if (gh) {
     const g = gh.dataset.group;
@@ -459,12 +532,28 @@ $('#providerList').addEventListener('click', (e) => {
   if (run) { window.aipm.checkNow([Number(run.dataset.run)]); toast(tx('已触发检测')); return; }
   const edit = e.target.closest('[data-edit]');
   if (edit) { openProviderModal(Number(edit.dataset.edit)); return; }
+  const toggle = e.target.closest('[data-toggle]');
+  if (toggle) {
+    const id = Number(toggle.dataset.toggle), p = state.providers.find((x) => x.id === id);
+    const r = await window.aipm.toggleEnabled(id, p?.enabled === false);
+    if (!r?.ok) toast(r?.error || tx('保存失败'), 'err');
+    return;
+  }
+  const clone = e.target.closest('[data-clone]');
+  if (clone) {
+    const r = await window.aipm.cloneProvider(Number(clone.dataset.clone));
+    if (!r?.ok) { toast(r?.error || tx('保存失败'), 'err'); return; }
+    state = await window.aipm.getState(); renderProviders(); openProviderModal(r.id);
+    toast(tx('已克隆为停用副本，请补充凭据后启用'));
+    return;
+  }
   const del = e.target.closest('[data-del]');
   if (del) {
     const id = Number(del.dataset.del);
     const p = state.providers.find((x) => x.id === id);
     confirmDialog(tx('删除服务商'), tx('确定删除「{name}」吗？该操作不可撤销。', { name: p ? p.name : id }), async () => {
-      await window.aipm.deleteProvider(id);
+      const r = await window.aipm.deleteProvider(id);
+      if (!r?.ok) { toast(r?.error || tx('删除失败'), 'err'); return; }
       selected.delete(id);
       toast(tx('已删除'));
     });
@@ -582,7 +671,8 @@ $('#bmSave').addEventListener('click', async () => {
 $('#btnDelSel').addEventListener('click', () => {
   const n = selected.size;
   confirmDialog(tx('批量删除'), tx('确定删除选中的 {n} 个服务商吗？该操作不可撤销。', { n }), async () => {
-    await window.aipm.deleteMany([...selected]);
+    const r = await window.aipm.deleteMany([...selected]);
+    if (!r?.ok) { toast(r?.error || tx('删除失败'), 'err'); return; }
     selected.clear();
     toast(tx('批量删除完成'));
   });
@@ -700,6 +790,12 @@ function openProviderModal(id = null) {
   $('#fGroup').value = p ? (p.group || '') : '';
   $('#fTags').value = p && Array.isArray(p.tags) ? p.tags.join(', ') : '';
   $('#fProbeMode').value = (p && p.probeMode) || 'chat';
+  $('#fProbePolicy').value = p?.probePolicy || 'strict';
+  $('#fSloTarget').value = p?.sloTarget ?? '';
+  $('#fAdvanced').open = false;
+  $('#fAdvancedHint').textContent = p ? tx('已保留当前高级配置') : '';
+  $('#fTemplate').value = p ? '' : 'compatible';
+  $('#fTemplateHint').textContent = p ? tx('选择模板可替换端点与探测设置') : tx(window.providerTemplates.templates[0].hint);
   $('#fProbeLimit').value = p && p.probeLimit ? p.probeLimit : '';
   $('#fProbePath').value = p ? (p.probePath || '') : '';
   $('#fProbeBody').value = p ? (p.probeBody || '') : '';
@@ -732,7 +828,7 @@ function openProviderModal(id = null) {
   $('#fMaintStart').value = (p && p.maintStart) || '02:00';
   $('#fMaintEnd').value = (p && p.maintEnd) || '04:00';
   $('#fTlsVerify').value = !p || p.insecureSkipVerify == null ? 'follow' : p.insecureSkipVerify === true ? 'skip' : 'verify';
-  syncProbeCustomVisibility();
+  syncProbeCustomVisibility(); updateRequestPreview();
   $('#providerModal').classList.add('show');
   setTimeout(() => $('#fName').focus(), 120);
 }
@@ -740,6 +836,31 @@ function syncProbeCustomVisibility() {
   const wrap = $('#fProbeCustomWrap');
   if (wrap) wrap.style.display = $('#fProbeMode').value === 'custom' ? '' : 'none';
 }
+const presetFields = { probeMode: '#fProbeMode', modelsPath: '#fModelsPath', authType: '#fAuthType', probePath: '#fProbePath', probeBody: '#fProbeBody', assertType: '#fAssertType', assertValue: '#fAssertValue', probePolicy: '#fProbePolicy' };
+$('#fTemplate').innerHTML = '<option value="">' + tx('当前配置') + '</option>' + window.providerTemplates.templates.map((t) => `<option value="${t.id}">${tx(t.name)}</option>`).join('');
+$('#fTemplate').addEventListener('change', () => {
+  const template = window.providerTemplates.templates.find((t) => t.id === $('#fTemplate').value);
+  if (!template) return;
+  for (const [key, selector] of Object.entries(presetFields)) $(selector).value = template.config[key];
+  if (!editingId && !$('#fName').value.trim()) $('#fName').value = template.name;
+  if (template.url) $('#fUrl').value = template.url;
+  $('#fCapChat').checked = $('#fCapEmbeddings').checked = $('#fCapCompletions').checked = false;
+  $('#fMeasureStreaming').checked = false;
+  $('#fTemplateHint').textContent = tx(template.hint);
+  $('#fAdvanced').open = template.id === 'custom';
+  $('#fAdvancedHint').textContent = tx('模板已应用');
+  syncProbeCustomVisibility(); updateRequestPreview();
+});
+function updateRequestPreview() {
+  try {
+    const base = window.providerTemplates.normalizeBase($('#fUrl').value);
+    const mode = $('#fProbeMode').value;
+    const path = mode === 'custom' ? $('#fProbePath').value || '/v1/chat/completions' : '/v1/' + ({ chat: 'chat/completions', embeddings: 'embeddings', completions: 'completions' }[mode] || 'models');
+    $('#fRequestPreview').textContent = 'GET ' + window.providerTemplates.endpoint(base, $('#fModelsPath').value || '/v1/models') + (mode === 'none' ? '' : '\nPOST ' + window.providerTemplates.endpoint(base, path));
+  } catch (e) { $('#fRequestPreview').textContent = tx('填写 URL 后显示实际请求端点'); }
+}
+$('#providerModal').addEventListener('input', updateRequestPreview);
+$('#providerModal').addEventListener('change', updateRequestPreview);
 $('#fProbeMode').addEventListener('change', syncProbeCustomVisibility);
 $('#btnAdd').addEventListener('click', () => openProviderModal());
 $('#pmClose').addEventListener('click', () => $('#providerModal').classList.remove('show'));
@@ -747,9 +868,9 @@ $('#pmCancel').addEventListener('click', () => $('#providerModal').classList.rem
 
 /** 表单 → 主进程 payload（保存与测试连接共用） */
 function collectProviderForm() {
-  return {
+  const data = {
     name: $('#fName').value.trim(),
-    url: $('#fUrl').value.trim(),
+    url: window.providerTemplates.normalizeBase($('#fUrl').value),
     apiKey: $('#fKey').value.trim() || undefined,
     intervalSec: toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value),
     notifyOnModelChange: $('#fNotify').checked,
@@ -757,6 +878,8 @@ function collectProviderForm() {
     group: $('#fGroup').value.trim(),
     tags: $('#fTags').value.split(',').map((t) => t.trim()).filter(Boolean),
     probeMode: $('#fProbeMode').value,
+    probePolicy: $('#fProbePolicy').value,
+    sloTarget: $('#fSloTarget').value === '' ? null : Number($('#fSloTarget').value),
     probePath: $('#fProbePath').value.trim(),
     probeBody: $('#fProbeBody').value.trim(),
     modelsPath: $('#fModelsPath').value.trim() || '/v1/models',
@@ -773,7 +896,7 @@ function collectProviderForm() {
     quotaWarnBelow: $('#fQuotaWarnBelow').value === '' ? null : Number($('#fQuotaWarnBelow').value),
     measureStreaming: $('#fMeasureStreaming').checked,
     notifyChannels: $$('#fNotifyChannelsBox input[data-nch]').filter((c) => c.checked).map((c) => c.dataset.nch),
-    maintWeekdays: $('#fMaintWeekdays').value.split(',').map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6),
+    maintWeekdays: $('#fMaintWeekdays').value.split(',').map((v) => v.trim()).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6),
     maintDates: $('#fMaintDates').value.trim(),
     probeLimit: Number($('#fProbeLimit').value) > 0 ? Number($('#fProbeLimit').value) : null,
     proxyUrl: $('#fProxyUrl').value.trim(),
@@ -783,6 +906,11 @@ function collectProviderForm() {
     maintEnd: $('#fMaintEnd').value || '04:00',
     insecureSkipVerify: $('#fTlsVerify').value === 'follow' ? null : $('#fTlsVerify').value === 'skip'
   };
+  for (const key of ['apiKey', 'customHeaders', 'proxyUrl']) {
+    if (pmClearState[key]) data[key] = '';
+    else if (editingId && !data[key]) delete data[key];
+  }
+  return data;
 }
 
 // 测试连接：不保存直接跑一轮检测，避免「保存 → 等轮循 → 失败 → 再编辑」的循环
@@ -828,13 +956,6 @@ $('#pmSave').addEventListener('click', async () => {
   data.name = name;
   data.url = url;
   if (editingId) {
-    // 留空 = 不修改；点过「清除」按钮 = 显式提交空串让主进程清掉
-    if (pmClearState.apiKey) data.apiKey = '';
-    else if (!data.apiKey) delete data.apiKey;
-    if (pmClearState.customHeaders) data.customHeaders = '';
-    else if (!data.customHeaders) delete data.customHeaders;
-    if (pmClearState.proxyUrl) data.proxyUrl = '';
-    else if (!data.proxyUrl) delete data.proxyUrl;
     const r = await window.aipm.updateProvider(editingId, data);
     if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
     toast(tx('已保存'));
@@ -850,13 +971,21 @@ $('#providerModal').addEventListener('click', (e) => { if (e.target === e.curren
 $('#detailModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
 
 // ---------- 详情弹窗 ----------
+let detailId = null, detailFingerprint = '';
 let detailSeq = 0;   // 请求序号：快速重开详情时旧响应不得写入新弹窗
 
+function refreshOpenDetail() {
+  const p = state.providers.find((x) => x.id === detailId);
+  if (!p || JSON.stringify(p) !== detailFingerprint) openDetail(detailId);
+}
 function openDetail(id) {
   const seq = ++detailSeq;
   const p = state.providers.find((x) => x.id === id);
-  if (!p) return;
-  const si = statusInfo(p.status);
+  if (!p) { $('#detailModal').classList.remove('show'); detailId = null; return; }
+  detailId = id; detailFingerprint = JSON.stringify(p);
+  for (const selector of ['#dmChartWrap', '#dmUptimeBarsWrap']) $(selector).style.display = 'none';
+  $('#dmChart').innerHTML = ''; $('#dmUptimeBars').innerHTML = '';
+  const si = p.enabled === false ? { cls: 'unknown', text: tx('已停用') } : statusInfo(p.status);
   const avail = p.modelsAvailable || [];
   const unavail = p.modelsUnavailable || [];
   const total = p.modelsTotal || (avail.length + unavail.length);
@@ -911,6 +1040,14 @@ function openDetail(id) {
       upWrap.style.display = 'none';
     }
   }
+  (async () => {
+    try {
+      const r = await window.aipm.historySLO({ providerId: id });
+      if (!r.ok || seq !== detailSeq) return;
+      const slo = r.perProvider[0]; if (!slo) return;
+      $('#dmMeta').insertAdjacentHTML('beforeend', `<div class="dm-item wide"><span>SLO · ${r.windowDays}d</span><b>${slo.timeUptime == null ? '—' : slo.timeUptime + '%'} · ${tx('覆盖率')} ${coverageText(slo)} · ${tx('剩余错误预算')} ${signedDuration(slo.budgetRemainingMs)} · ${sloStatus(slo.sloMet)}</b></div>`);
+    } catch (e) { /* historical metrics are optional in the live detail */ }
+  })();
   // v1.2.0：单模型 24h 可用率徽标（异步追加，失败静默；序号防串弹窗）
   (async () => {
     try {
@@ -931,7 +1068,9 @@ function openDetail(id) {
   // 90 天可用率色条（status-page 风格）：每天一格，无数据补灰格
   (async () => {
     try {
-      const r = await window.aipm.historyPerDay({ providerId: id, days: 90 });
+      const retainedDays = Math.min(90, state.global.historyKeepDays || 90);
+      $('#dmBarsTitle').textContent = tx('最近 {n} 天', { n: retainedDays });
+      const r = await window.aipm.historyPerDay({ providerId: id, days: retainedDays });
       const wrap = $('#dmUptimeBarsWrap');
       if (!wrap || !r || !r.ok || seq !== detailSeq) return;
       const byTs = new Map((r.days || []).map((d) => [d.t, (d.providers || []).find((x) => x.id === id)]));
@@ -939,7 +1078,7 @@ function openDetail(id) {
       today.setHours(0, 0, 0, 0);
       let cells = '';
       let hit = 0;
-      for (let i = 89; i >= 0; i--) {
+      for (let i = retainedDays - 1; i >= 0; i--) {
         const ts = today.getTime() - i * 86400000;
         const e = byTs.get(ts);
         let cls = 'l-none';
@@ -947,13 +1086,13 @@ function openDetail(id) {
         if (e) {
           hit++;
           cls = e.uptime >= 99 ? 'l-ok' : e.uptime >= 90 ? 'l-mid' : 'l-bad';
-          tip = `${fmtDate(ts)} · ${tx('可用率')} ${e.uptime}%（${e.samples} ${tx('个样本')}）`;
+          tip = `${fmtDate(ts)} · ${tx('样本可用率')} ${e.uptime}%（${e.samples} ${tx('个样本')}）`;
         }
         cells += `<i class="up-bar ${cls}" title="${escapeHtml(tip)}"></i>`;
       }
       if (!hit) { wrap.style.display = 'none'; return; }
       $('#dmUptimeBars').innerHTML = cells;
-      $('#dmBarsHint').textContent = ` · ${hit} ${tx('天有数据')}`;
+      $('#dmBarsHint').textContent = ` · ${hit}/${retainedDays} ${tx('天有数据')}`;
       wrap.style.display = '';
     } catch (err) { /* 色条失败不打扰 */ }
   })();
@@ -1014,22 +1153,84 @@ document.addEventListener('click', async (e) => {
   if (!btn) return;
   const key = btn.dataset.clear;
   try {
+    if (!(await flushSettings()).ok) return;
     const r = await window.aipm.clearSecrets([key]);
     if (!r || !r.ok) { toast((r && r.error) || tx('保存失败'), 'err'); return; }
     if (state.global) state.global[`${key}Configured`] = false;
     const input = btn.parentElement.querySelector('input,textarea');
-    if (input) { input.placeholder = ''; input.dataset.i18nPh = ''; }
+    if (input) { input.value = ''; input.placeholder = ''; input.dataset.i18nPh = ''; }
+    if (pendingSettings) delete pendingSettings[key];
     btn.style.display = 'none';
     toast(tx('已清除'));
   } catch (err) { toast(tx('保存失败'), 'err'); }
 });
 
-function renderNotify() {
+let recordingHotkey = false, hotkeyCapturePending = false;
+function hotkeyLabels(value) {
+  const mac = /mac/i.test(navigator.platform);
+  return String(value || 'CommandOrCtrl+Alt+M').split('+').map((part) => ({
+    commandorctrl: mac ? '⌘' : 'Ctrl', cmdorctrl: mac ? '⌘' : 'Ctrl', control: 'Ctrl', ctrl: 'Ctrl',
+    command: '⌘', cmd: '⌘', alt: 'Alt', option: 'Alt', shift: 'Shift', super: mac ? '⌘' : 'Win',
+    meta: mac ? '⌘' : 'Win', plus: '+', space: 'Space', up: '↑', down: '↓', left: '←', right: '→'
+  }[part.toLowerCase()] || part));
+}
+function renderHotkey() {
+  const button = $('#hotkeyRecorder'), enabled = $('#hotkeyEnabled').checked;
+  button.disabled = !enabled || hotkeyCapturePending; $('#hotkeyReset').disabled = !enabled;
+  button.classList.toggle('recording', recordingHotkey);
+  button.setAttribute('aria-label', tx(recordingHotkey ? '按下新的快捷键，Esc 取消' : '点击录制快捷键'));
+  button.innerHTML = recordingHotkey ? `<span class="hotkey-record-dot"></span><span>${tx('按下快捷键…')}</span>`
+    : hotkeyLabels($('#hotkey').value).map((label) => `<kbd>${escapeHtml(label)}</kbd>`).join('<span class="key-plus">+</span>');
+  $('#hotkeyHint').textContent = tx(recordingHotkey ? '按下新组合，Esc 取消' : !enabled ? '开启全局快捷键后可修改' : '点击右侧按键组合录制，修改后自动保存');
+}
+function stopHotkeyRecording() {
+  recordingHotkey = false;
+  void window.aipm.setHotkeyCapture(false).catch(() => {});
+  renderHotkey();
+}
+$('#hotkeyRecorder').addEventListener('click', async () => {
+  if (recordingHotkey || hotkeyCapturePending) return;
+  hotkeyCapturePending = true; renderHotkey();
+  try {
+    const result = await window.aipm.setHotkeyCapture(true);
+    if (!result.ok) throw new Error(result.error || tx('无法开始录制快捷键'));
+    recordingHotkey = true;
+  } catch (err) { toast(err.message, 'err'); }
+  finally { hotkeyCapturePending = false; renderHotkey(); $('#hotkeyRecorder').focus(); }
+});
+$('#hotkeyRecorder').addEventListener('keydown', (event) => {
+  if (!recordingHotkey) return;
+  event.preventDefault(); event.stopPropagation();
+  if (event.key === 'Escape') { stopHotkeyRecording(); return; }
+  if (['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) return;
+  const named = { Space: 'Space', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+    Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert', Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown', Enter: 'Return', Tab: 'Tab', Equal: 'Plus', Minus: '-' };
+  const key = /^Key[A-Z]$/.test(event.code) ? event.code.slice(3) : /^Digit\d$/.test(event.code) ? event.code.slice(5)
+    : /^F(?:[1-9]|1\d|2[0-4])$/.test(event.key) ? event.key : named[event.code];
+  if (!key || !(event.ctrlKey || event.altKey || event.metaKey)) {
+    $('#hotkeyHint').textContent = tx('请包含 Ctrl、Alt 或 Win / Command 之一'); return;
+  }
+  const modifiers = [event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.shiftKey && 'Shift', event.metaKey && 'Super'].filter(Boolean);
+  $('#hotkey').value = [...modifiers, key].join('+');
+  recordingHotkey = false; renderHotkey(); saveNotify();
+  void flushSettings().finally(() => window.aipm.setHotkeyCapture(false).catch(() => {}));
+});
+$('#hotkeyRecorder').addEventListener('blur', () => { if (recordingHotkey) stopHotkeyRecording(); });
+$('#hotkeyReset').addEventListener('click', () => {
+  $('#hotkey').value = 'CommandOrCtrl+Alt+M'; stopHotkeyRecording(); saveNotify();
+});
+$('#hotkeyEnabled').addEventListener('change', () => { if (recordingHotkey) stopHotkeyRecording(); renderHotkey(); });
+let notifyFormInitialized = false;
+function renderNotify(force = false) {
+  if (notifyFormInitialized && !force) { renderNotifyHealth(); renderHotkey(); return; }
+  notifyFormInitialized = true;
   const g = state.global || {};
   const secretValue = (sel, key) => {
     const el = $(sel);
+    el.dataset.secretDefaultPlaceholder ??= el.getAttribute('placeholder') || '';
+    el.dataset.dynamicPlaceholder = '1';
     el.value = '';
-    el.placeholder = g[`${key}Configured`] ? tx('已配置，留空保持不变') : '';
+    el.placeholder = g[`${key}Configured`] ? tx('已配置，留空保持不变') : tx(el.dataset.secretDefaultPlaceholder);
     const btn = el.parentElement.querySelector('[data-clear]');
     if (btn) btn.style.display = g[`${key}Configured`] ? '' : 'none';
   };
@@ -1089,7 +1290,9 @@ function renderNotify() {
   // 历史与日志
   $('#historyEnabled').checked = g.historyEnabled !== false;
   $('#modelHistoryEnabled').checked = g.modelHistoryEnabled !== false;
-  $('#historyKeepDays').value = g.historyKeepDays || 30;
+  $('#historyKeepDays').value = g.historyKeepDays || 90;
+  $('#sloTarget').value = g.sloTarget ?? 99.9;
+  $('#sloWindowDays').value = g.sloWindowDays || 30;
   $('#logKeepDays').value = g.logKeepDays || 7;
   $('#logMaxFileMB').value = g.logMaxFileMB || 10;
   $('#logLevel').value = g.logLevel || 'info';
@@ -1100,6 +1303,7 @@ function renderNotify() {
   $('#lang').value = g.lang || 'zh';
   $('#hotkeyEnabled').checked = g.hotkeyEnabled !== false;
   $('#hotkey').value = g.hotkey || '';
+  renderHotkey();
   $('#trayBalloonEnabled').checked = g.trayBalloonEnabled !== false;
   $('#autoUpdateCheck').checked = g.autoUpdateCheck !== false;
   // 邮件日报
@@ -1152,6 +1356,7 @@ function renderNotifyHealth() {
   const health = (state.selfmon && state.selfmon.notifyHealth) || {};
   const g = state.global || {};
   const LABELS = { weixin: '微信', qq: 'QQ', dingtalk: '钉钉', telegram: 'Telegram', feishu: '飞书', slack: 'Slack', serverchan: 'Server酱', custom: tx('自定义') };
+  const focusChannel = document.activeElement?.closest('[data-channel]')?.dataset.channel;
   let readyCount = 0;
   let usedCount = 0;
   wrap.innerHTML = Object.keys(LABELS).map((ch) => {
@@ -1179,21 +1384,35 @@ function renderNotifyHealth() {
       meta = tx('配置不完整');
     }
     const errTip = ready && h && h.lastError ? ` title="${escapeHtml(h.lastError)}"` : '';
-    return `<div class="health-item"${errTip}>
+    return `<button type="button" class="health-item" data-channel="${ch}"${errTip} aria-label="${escapeHtml(tx('配置 {name} 通知', { name: tx(LABELS[ch]) }))}">
       <span class="health-dot ${dot}"></span>
       <span class="health-name">${escapeHtml(LABELS[ch])}</span>
       <span class="health-meta">${escapeHtml(meta)}</span>
-    </div>`;
+    </button>`;
   }).join('');
+  if (focusChannel) wrap.querySelector(`[data-channel="${focusChannel}"]`)?.focus({ preventScroll: true });
   const hint = $('#nhHint');
   if (!readyCount) hint.textContent = tx('尚未启用任何通知通道');
   else if (!usedCount) hint.textContent = tx('发送过通知后这里会显示各通道最近的成功 / 失败状态');
   else hint.textContent = '';
 }
-let notifySaveTimer = null;
-function saveNotify() {
-  clearTimeout(notifySaveTimer);
-  notifySaveTimer = setTimeout(async () => {
+$('#notifyHealthList').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-channel]');
+  if (!button) return;
+  const panel = document.getElementById('channel-' + button.dataset.channel);
+  if (!panel) return;
+  panel.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  panel.querySelector('.panel-body input')?.focus({ preventScroll: true });
+});
+let notifySaveTimer = null, pendingSettings = null;
+let settingsSaving = 0;
+let settingsCommit = Promise.resolve({ ok: true });
+function settingsStatus(text, bad = false) {
+  $$('.settings-save-status').forEach((el) => { el.textContent = text; el.classList.toggle('bad', bad); });
+  const days = Number($('#sloWindowDays').value), keep = Number($('#historyKeepDays').value);
+  $('#sloRetentionHint').textContent = keep < days ? tx('历史保留短于 SLO 窗口，缺失时段将记为未知') : '';
+}
+function captureSettings() {
     const int = (sel, def, min, max) => {
       const v = Number($(sel).value);
       if (!Number.isFinite(v)) return def;
@@ -1203,7 +1422,7 @@ function saveNotify() {
       const value = $(sel).value.trim();
       return value ? { [key]: value } : {};
     };
-    const r = await window.aipm.setGlobal({
+    return {
       notifyWeixinEnabled: $('#wxEnable').checked,
       ...secretPatch('weixinWebhook', '#wxWebhook'),
       notifyQQEnabled: $('#qqEnable').checked,
@@ -1233,7 +1452,7 @@ function saveNotify() {
       requestTimeoutMs: int('#requestTimeoutMs', 20000, 1000, 120000),
       probeTimeoutMs: int('#probeTimeoutMs', 15000, 1000, 120000),
       retries: int('#retries', 1, 0, 5),
-      probeConcurrency: int('#probeConcurrency', 8, 5, 10),
+      probeConcurrency: int('#probeConcurrency', 8, 1, 16),
       probeJitterMs: int('#probeJitterMs', 120, 0, 2000),
       probeRotate: $('#probeRotate').checked,
       insecureSkipVerify: $('#insecureSkipVerify').checked,
@@ -1252,7 +1471,9 @@ function saveNotify() {
       ...secretPatch('proxyUrl', '#proxyUrl'),
       historyEnabled: $('#historyEnabled').checked,
       modelHistoryEnabled: $('#modelHistoryEnabled').checked,
-      historyKeepDays: int('#historyKeepDays', 30, 1, 365),
+      historyKeepDays: int('#historyKeepDays', 90, 1, 365),
+      sloTarget: Math.min(100, Math.max(90, Number($('#sloTarget').value) || 99.9)),
+      sloWindowDays: int('#sloWindowDays', 30, 1, 90),
       logKeepDays: int('#logKeepDays', 7, 1, 365),
       logMaxFileMB: int('#logMaxFileMB', 10, 1, 200),
       logLevel: $('#logLevel').value || 'info',
@@ -1277,10 +1498,51 @@ function saveNotify() {
       autoStartCheckOnLaunch: $('#autoStart').checked,
       concurrency: Math.max(1, Math.min(16, Number($('#concurrency').value) || 4)),
       closeAction: $('#closeAction').value === 'exit' ? 'exit' : 'tray'
-    });
-    if (!r || !r.ok) toast((r && r.error) || tx('保存失败'), 'err');
-  }, 350);
+    };
 }
+function saveNotify() {
+  if (!notifyFormInitialized) renderNotify();
+  // Capture immediately: navigation must never replace the input before debounce fires.
+  pendingSettings = { ...(pendingSettings || {}), ...captureSettings() };
+  settingsStatus(tx('等待保存…'));
+  clearTimeout(notifySaveTimer);
+  notifySaveTimer = setTimeout(() => { void flushSettings(); }, 350);
+}
+function flushSettings() {
+  clearTimeout(notifySaveTimer); notifySaveTimer = null;
+  const patch = pendingSettings; pendingSettings = null;
+  if (!patch) return settingsCommit;
+  settingsSaving++;
+  settingsCommit = settingsCommit.catch(() => ({ ok: false })).then(async () => {
+    settingsStatus(tx('保存中…'));
+    try {
+      const r = await window.aipm.setGlobal(patch);
+      if (!r?.ok) throw new Error(r?.error || tx('保存失败'));
+      const secretKeys = new Set(SECRET_CLEAR_FIELDS.map(([, key]) => key));
+      for (const [key, value] of Object.entries(patch)) {
+        if (!secretKeys.has(key)) state.global[key] = value;
+        else if (value) state.global[key + 'Configured'] = true;
+      }
+      for (const [sel, key] of SECRET_CLEAR_FIELDS) {
+        if (patch[key] && $(sel).value.trim() === patch[key]) {
+          $(sel).value = ''; $(sel).placeholder = tx('已配置，留空保持不变');
+          const clear = $(sel).parentElement.querySelector('[data-clear]');
+          if (clear) clear.style.display = '';
+        }
+      }
+      settingsStatus(tx(pendingSettings ? '等待保存…' : '已保存'));
+      applyTheme(); applyLang();
+      return { ok: true };
+    } catch (err) {
+      pendingSettings = { ...patch, ...(pendingSettings || {}) };
+      settingsStatus(tx('保存失败，点击重试'), true);
+      toast(err.message || tx('保存失败'), 'err');
+      return { ok: false, error: err.message };
+    } finally { settingsSaving--; }
+  });
+  return settingsCommit;
+}
+$$('.settings-save-status').forEach((el) => el.addEventListener('click', () => { void flushSettings(); }));
 ['wxEnable', 'qqEnable', 'dtEnable', 'autoStart', 'tgEnable', 'fsEnable', 'skEnable', 'scEnable', 'cwEnable',
  'alertRecoverNotify', 'alertOnModelChange', 'alertQuietEnabled', 'proxyEnabled', 'historyEnabled',
  'launchAtLogin', 'launchMinimized', 'probeRotate', 'insecureSkipVerify', 'modelHistoryEnabled',
@@ -1292,18 +1554,15 @@ function saveNotify() {
  'cwWebhook', 'cwTemplate', 'cwHeaders', 'probeLimit', 'requestTimeoutMs', 'probeTimeoutMs', 'retries',
  'alertFailThreshold', 'alertCooldownMin', 'alertEscalateMin', 'alertQuietStart', 'alertQuietEnd', 'proxyUrl',
  'latencyAlertMs', 'latencyAlertConsecutive',
- 'historyKeepDays', 'logKeepDays', 'logMaxFileMB', 'probeConcurrency', 'probeJitterMs', 'hotkey',
+ 'sloTarget', 'sloWindowDays', 'historyKeepDays', 'logKeepDays', 'logMaxFileMB', 'probeConcurrency', 'probeJitterMs', 'hotkey',
  'dailyReportTime', 'smtpHost', 'smtpPort', 'smtpUser', 'smtpPass', 'mailFrom', 'mailTo']
   .forEach((id) => { const el = $('#' + id); if (el) el.addEventListener('input', saveNotify); });
 $('#qqTargetType').addEventListener('change', saveNotify);
 $('#closeAction').addEventListener('change', saveNotify);
 $('#logLevel').addEventListener('change', saveNotify);
-$('#theme').addEventListener('change', () => { saveNotify(); setTimeout(applyTheme, 400); });
+$('#theme').addEventListener('change', () => { saveNotify(); state.global.theme = $('#theme').value; applyTheme(); });
 $('#lang').addEventListener('change', () => {
-  saveNotify();
-  // 即时预览 + 落盘推送后整页重渲染
-  if (window.aipmi18n) window.aipmi18n.applyI18n($('#lang').value);
-  setTimeout(() => { if (state.global) state.global.lang = $('#lang').value; render(); }, 450);
+  saveNotify(); state.global.lang = $('#lang').value; applyLang(); render();
 });
 
 // 指引折叠
@@ -1314,64 +1573,27 @@ $$('.guide-toggle').forEach((btn) => {
   });
 });
 
-$('#wxTest').addEventListener('click', async () => {
-  saveNotify();
-  $('#wxHint').textContent = tx('发送中…'); $('#wxHint').className = 'hint';
-  await new Promise((r) => setTimeout(r, 420));
-  const r = await window.aipm.testNotify('weixin');
-  $('#wxHint').textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
-  $('#wxHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
-});
-$('#qqTest').addEventListener('click', async () => {
-  saveNotify();
-  $('#qqHint').textContent = tx('发送中…'); $('#qqHint').className = 'hint';
-  await new Promise((r) => setTimeout(r, 420));
-  const r = await window.aipm.testNotify('qq');
-  $('#qqHint').textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
-  $('#qqHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
-});
-$('#dtTest').addEventListener('click', async () => {
-  saveNotify();
-  $('#dtHint').textContent = tx('发送中…'); $('#dtHint').className = 'hint';
-  await new Promise((r) => setTimeout(r, 420));
-  const r = await window.aipm.testNotify('dingtalk');
-  $('#dtHint').textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
-  $('#dtHint').className = 'hint ' + (r.ok ? 'ok' : 'bad');
-});
-
-/** 扩展渠道测试按钮：先落盘配置再发测试，避免用刚输入但未保存的值失败 */
-[['tgTest', 'tgHint', 'telegram'], ['fsTest', 'fsHint', 'feishu'], ['skTest', 'skHint', 'slack'],
- ['scTest', 'scHint', 'serverchan'], ['cwTest', 'cwHint', 'custom']]
-  .forEach(([btnId, hintId, channel]) => {
-    const btn = $('#' + btnId);
-    if (!btn) return;
-    btn.addEventListener('click', async () => {
-      saveNotify();
-      const hint = $('#' + hintId);
-      hint.textContent = tx('发送中…'); hint.className = 'hint';
-      // 等待防抖保存落盘后再发送
-      await new Promise((r) => setTimeout(r, 420));
-      const r = await window.aipm.testNotify(channel);
-      hint.textContent = r.ok ? tx('发送成功') : tx('失败: ') + r.error;
-      hint.className = 'hint ' + (r.ok ? 'ok' : 'bad');
-    });
-  });
-
-// 邮件日报测试
-$('#btnMailTest').addEventListener('click', async () => {
-  saveNotify();
-  const hint = $('#mailHint');
-  hint.textContent = tx('发送中…'); hint.className = 'hint';
-  await new Promise((r) => setTimeout(r, 420));
+async function testSavedSettings(buttonId, hintId, operation) {
+  const button = $('#' + buttonId), hint = $('#' + hintId);
+  button.disabled = true; saveNotify();
+  hint.textContent = tx('保存中…'); hint.className = 'hint';
   try {
-    const r = await window.aipm.testMail();
-    hint.textContent = r.ok ? tx('发送成功') : tx('失败: ') + (r.error || '');
-    hint.className = 'hint ' + (r.ok ? 'ok' : 'bad');
-  } catch (e) {
-    hint.textContent = tx('失败: ') + (e.message || e);
-    hint.className = 'hint bad';
-  }
-});
+    const saved = await flushSettings();
+    if (!saved.ok) throw new Error(saved.error || tx('保存失败'));
+    hint.textContent = tx('发送中…');
+    const result = await operation();
+    hint.textContent = result.ok ? tx('发送成功') : tx('失败: ') + result.error;
+    hint.className = 'hint ' + (result.ok ? 'ok' : 'bad');
+  } catch (err) { hint.textContent = tx('失败: ') + err.message; hint.className = 'hint bad'; }
+  finally { button.disabled = false; }
+}
+[['wxTest', 'wxHint', 'weixin'], ['qqTest', 'qqHint', 'qq'], ['dtTest', 'dtHint', 'dingtalk'],
+ ['tgTest', 'tgHint', 'telegram'], ['fsTest', 'fsHint', 'feishu'], ['skTest', 'skHint', 'slack'],
+ ['scTest', 'scHint', 'serverchan'], ['cwTest', 'cwHint', 'custom']]
+  .forEach(([buttonId, hintId, channel]) => $('#' + buttonId).addEventListener('click', () => {
+    void testSavedSettings(buttonId, hintId, () => window.aipm.testNotify(channel));
+  }));
+$('#btnMailTest').addEventListener('click', () => { void testSavedSettings('btnMailTest', 'mailHint', () => window.aipm.testMail()); });
 
 // ---------- 统计分析 ----------
 function statsHours() {
@@ -1380,78 +1602,131 @@ function statsHours() {
 }
 
 // 请求序号：快速切换时间范围/视图时，旧响应不得覆盖新数据
-let statsSeq = 0;
+let statsSeq = 0, statsAt = 0, statsKey = '';
 
-async function renderStats() {
-  const seq = ++statsSeq;
-  const hours = statsHours();
-  const [sum, ser] = await Promise.all([
-    window.aipm.historySummary({ hours }),
-    window.aipm.historySeries({ hours, buckets: 48 })
-  ]);
-  if (seq !== statsSeq) return;
-  if (!sum.ok) { $('#stTable').innerHTML = `<div class="empty">${tx('统计读取失败：')}${escapeHtml(sum.error || '')}</div>`; return; }
-
+function statsIncludesHistory() { return $('#stScope').value === 'history'; }
+function statsPercent(value) {
+  return value == null ? '—' : Number(value).toLocaleString(lang() === 'en' ? 'en-US' : 'zh-CN', { maximumFractionDigits: 2 }) + '%';
+}
+function metricValue(value, unit = '') { return value == null ? '—' : Number(value).toLocaleString() + (unit ? ' ' + unit : ''); }
+function providerStatsName(p) {
+  const badge = p.archived ? tx('历史记录') : p.enabled === false ? tx('已停用') : '';
+  return `<div class="stats-provider-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div>${badge ? `<span class="stats-provider-meta">${badge}</span>` : ''}`;
+}
+async function renderStats(force = true) {
+  const includeHistorical = statsIncludesHistory();
+  const key = JSON.stringify([statsHours(), includeHistorical, state.global.sloTarget, state.global.sloWindowDays, state.providers.map((p) => [p.id, p.name, p.enabled, p.sloTarget])]);
+  if (!force && key === statsKey && Date.now() - statsAt < 30000) return;
+  statsAt = Date.now(); statsKey = key;
+  const seq = ++statsSeq, hours = statsHours(), button = $('#stRefresh');
+  button.disabled = true; button.classList.add('loading');
+  $('#stScopeHint').textContent = tx(includeHistorical ? '含已不在配置中的历史记录' : '仅统计当前配置中的服务商');
+  try {
+    const [sum, ser, slo] = await Promise.all([
+      window.aipm.historySummary({ hours, includeHistorical }),
+      window.aipm.historySeries({ hours, buckets: 48, includeHistorical }),
+      window.aipm.historySLO({ includeHistorical })
+    ]);
+    if (seq !== statsSeq) return;
+    if (!sum.ok) throw new Error(sum.error || tx('统计读取失败'));
+    const o = sum.overall;
+    $('#stUptime').textContent = statsPercent(o.timeUptime);
+    $('#stUptimeHint').textContent = tx('基于已观测时长');
+    $('#stCoverageValue').textContent = coverageText(o);
+    $('#stCoverage').textContent = tx('未知') + ' ' + signedDuration(o.unknownMs);
+    $('#stProviders').textContent = o.providers;
+    $('#stSamples').textContent = metricValue(o.samples);
+    $('#stSamplesHint').textContent = tx('{n} 个服务商', { n: o.providers });
+    $('#stP95').innerHTML = o.latencyP95 == null ? '—' : `${metricValue(o.latencyP95)}<small>ms</small>`;
+    $('#stLatencyHint').textContent = tx('平均延迟') + ' ' + metricValue(o.latencyAvg, 'ms');
+    $('#stUpdated').textContent = tx('更新于 {time}', { time: fmtTime(sum.to) });
+    renderObservation(o);
+    if (slo.ok) renderSLO(slo);
+    else { $('#sloOverview').textContent = tx('统计读取失败：') + (slo.error || ''); $('#sloTable').innerHTML = ''; }
+    if (ser.ok) drawChart(ser);
+    else $('#stChart').textContent = tx('统计读取失败：') + (ser.error || '');
+    $('#stChartHint').textContent = tx('按样本统计，空白区间表示无采样') + (o.samples ? ' · ' + tx('每桶 {n} 分钟', { n: Math.round((ser.bucketMs || 0) / 60000) }) : '');
+    if (!sum.perProvider.length) {
+      $('#stTable').innerHTML = `<div class="stats-empty">${icon('server')}<strong>${tx('当前范围内没有服务商')}</strong><span>${tx('添加服务商并完成检测后，这里会展示运行数据')}</span></div>`;
+      return;
+    }
+    $('#stTable').innerHTML = `<table class="analytics-table detail-stats-table"><thead><tr>
+      <th>${tx('服务商')}</th><th>${tx('可用率 / 覆盖率')}</th><th>${tx('检测结果')}</th><th>${tx('故障与恢复')}</th><th>${tx('延迟')}</th><th>${tx('最后状态')}</th>
+      </tr></thead><tbody>` + sum.perProvider.map((p) => {
+      const cls = p.timeUptime == null ? 'unknown' : p.timeUptime >= 99 ? 'up' : p.timeUptime >= 90 ? 'degraded' : 'down';
+      const si = statusInfo(p.lastStatus);
+      return `<tr><td>${providerStatsName(p)}</td>
+        <td><strong class="st-uptime u-${cls}">${statsPercent(p.timeUptime)}</strong><span class="table-secondary">${tx('覆盖率')} ${coverageText(p)}</span></td>
+        <td><div class="sample-breakdown"><span class="sample-up" title="${tx('在线')}">${p.upCount}</span><span class="sample-degraded" title="${tx('异常')}">${p.degCount}</span><span class="sample-down" title="${tx('离线')}">${p.downCount}</span><span class="sample-auth" title="${tx('鉴权失败')}">${p.authCount || 0}</span></div><span class="table-secondary">${p.samples} ${tx('个样本')}</span></td>
+        <td><span>${p.incidents || 0} ${tx('次故障')}</span><span class="table-secondary ${p.currentOutageMs ? 'is-negative' : ''}">${p.currentOutageMs ? tx('当前故障') + ' ' + signedDuration(p.currentOutageMs) : 'MTTR ' + (p.recoveredIncidents ? signedDuration(p.mttrMs) : '—')}</span></td>
+        <td><strong>${metricValue(p.latencyAvg, 'ms')}</strong><span class="table-secondary">P95 ${metricValue(p.latencyP95, 'ms')}</span></td>
+        <td><span class="status-pill st-${si.cls}"><span class="status-dot ${si.cls}"></span>${si.text}</span><span class="table-secondary">${p.lastAt ? fmtWhen(p.lastAt) : tx('尚无检测记录')}</span></td></tr>`;
+    }).join('') + '</tbody></table>';
+  } catch (err) {
+    if (seq === statsSeq) {
+      $('#stUpdated').textContent = tx('更新失败');
+      $('#stTable').textContent = tx('统计读取失败：') + err.message;
+    }
+  } finally { if (seq === statsSeq) { button.disabled = false; button.classList.remove('loading'); } }
+}
+function renderObservation(o) {
+  const total = o.windowMs || 1, online = o.upMs / total * 100, failed = o.downMs / total * 100;
+  const rows = [[tx('在线时长'), o.upMs, 'online'], [tx('已知故障'), o.downMs, 'failed'], [tx('未知时长'), o.unknownMs, 'unknown']];
+  $('#stObservation').innerHTML = `<div class="observation-donut" style="--online-end:${online}%;--failure-end:${online + failed}%"><div><strong>${coverageText(o)}</strong><span>${tx('已观测')}</span></div></div><div class="observation-legend">` + rows.map(([label, ms, cls]) => `<div><span><i class="observation-dot ${cls}"></i>${label}</span><strong>${signedDuration(ms)}</strong></div>`).join('') + `</div><p class="observation-note">${tx('时长按服务商累计')}</p>`;
+}
+function signedDuration(ms) {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  const sign = ms < 0 ? '−' : '', sec = Math.floor(Math.abs(ms) / 1000);
+  if (Math.abs(ms) > 0 && sec === 0) return sign + '<1s';
+  if (sec < 60) return sign + sec + 's';
+  if (sec < 3600) return `${sign}${Math.floor(sec / 60)}m ${sec % 60}s`;
+  if (sec < 86400) return `${sign}${Math.floor(sec / 3600)}h ${Math.floor(sec % 3600 / 60)}m`;
+  return `${sign}${Math.floor(sec / 86400)}d ${Math.floor(sec % 86400 / 3600)}h`;
+}
+function coverageText(row) {
+  const raw = row.windowMs ? row.observedMs / row.windowMs * 100 : 0;
+  return raw > 0 && raw < 0.01 ? '<0.01%' : `${row.coverage ?? 0}%`;
+}
+function sloStatus(value) {
+  return tx(value === 'met' ? '已达标' : value === 'breached' ? '已超预算' : '数据不足');
+}
+function renderSLO(sum) {
   const o = sum.overall;
-  $('#stUptime').textContent = o.samples ? o.uptime + '%' : '—';
-  $('#stProviders').textContent = o.providers;
-  $('#stSamples').textContent = o.samples;
-  $('#stP95').textContent = o.latencyP95 != null ? o.latencyP95 + ' ms' : '—';
-
-  if (ser.ok) drawChart(ser);
-  $('#stChartHint').textContent = o.samples
-    ? `${o.samples} ${tx('个样本')} · ${tx('每桶约')} ${Math.round((ser.bucketMs || 0) / 60000)} ${tx('分钟')}`
-    : tx('暂无历史数据，检测运行一段时间后自动积累');
-
-  const rows = sum.perProvider;
-  if (!rows.length) {
-    if (seq === statsSeq) $('#stTable').innerHTML = `<div class="empty">${tx('该时间范围内暂无检测记录')}</div>`;
-    return;
-  }
-  if (seq !== statsSeq) return;
-  $('#stTable').innerHTML = `
-    <div class="st-row st-head">
-      <div>${tx('服务商')}</div><div>${tx('样本')}</div><div>${tx('可用率')}</div>
-      <div>${tx('在线/异常/离线/鉴权')}</div><div>${tx('故障次数')}</div><div>${tx('MTTR')}</div><div>${tx('最长故障')}</div>
-      <div>${tx('平均延迟')}</div><div>${tx('P95')}</div><div>${tx('最后状态')}</div>
-    </div>` + rows.map((p) => {
-    const cls = p.uptime >= 99 ? 'up' : p.uptime >= 90 ? 'degraded' : 'down';
-    const si = statusInfo(p.lastStatus);
-    return `<div class="st-row">
-      <div class="st-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div>
-      <div>${p.samples}</div>
-      <div><span class="st-uptime u-${cls}">${p.uptime}%</span></div>
-      <div class="st-mini">${p.upCount}/${p.degCount}/${p.downCount}/${p.authCount || 0}</div>
-      <div class="st-mini">${p.incidents || 0}</div>
-      <div class="st-mini">${p.mttrMs ? fmtMsShort(p.mttrMs) : '—'}</div>
-      <div class="st-mini">${p.maxOutageMs ? fmtMsShort(p.maxOutageMs) : '—'}</div>
-      <div>${p.latencyAvg != null ? p.latencyAvg + ' ms' : '—'}</div>
-      <div>${p.latencyP95 != null ? p.latencyP95 + ' ms' : '—'}</div>
-      <div><span class="status-pill st-${si.cls}">${si.text}</span></div>
-    </div>`;
-  }).join('');
+  $('#sloWindow').textContent = tx('最近 {n} 天', { n: sum.windowDays });
+  const breached = sum.perProvider.filter((p) => p.sloMet === 'breached').length;
+  const insufficient = sum.perProvider.filter((p) => p.sloMet === 'insufficient').length;
+  const met = sum.perProvider.length - breached - insufficient;
+  $('#sloOverview').innerHTML = `<div class="slo-summary-cell"><span>${tx('目标达成情况')}</span><div class="slo-status-counts"><span class="met">${met}<small>${tx('已达标')}</small></span><span class="breached">${breached}<small>${tx('已超预算')}</small></span><span class="insufficient">${insufficient}<small>${tx('数据不足')}</small></span></div></div>
+    <div class="slo-summary-cell"><span>${tx('剩余错误预算')}</span><strong class="${o.budgetRemainingMs < 0 ? 'is-negative' : ''}">${sum.perProvider.length ? signedDuration(o.budgetRemainingMs) : '—'}</strong><small>${tx('服务商合计')} · ${tx('允许故障')} ${signedDuration(o.allowedDowntimeMs)}</small></div>
+    <div class="slo-summary-cell"><span>${tx('窗口数据覆盖率')}</span><strong>${coverageText(o)}</strong><small>${tx('未知')} ${signedDuration(o.unknownMs)} · ${tx('服务商合计')}</small></div>`;
+  if (!sum.perProvider.length) { $('#sloTable').innerHTML = `<div class="stats-empty compact">${tx('当前范围内没有服务商')}</div>`; return; }
+  $('#sloTable').innerHTML = `<table class="analytics-table slo-stats-table"><thead><tr><th>${tx('服务商')}</th><th>${tx('可用率 / 目标')}</th><th>${tx('数据覆盖')}</th><th>${tx('剩余错误预算')}</th><th>${tx('SLO 状态')}</th></tr></thead><tbody>` + sum.perProvider.map((p) => {
+    const used = p.budgetUsedPercent == null ? (p.downMs ? 100 : 0) : p.budgetUsedPercent;
+    return `<tr><td>${providerStatsName(p)}</td><td><strong>${statsPercent(p.timeUptime)}</strong><span class="table-secondary">${tx('目标')} ${p.sloTarget}%</span></td>
+      <td><strong>${coverageText(p)}</strong><div class="coverage-track"><i style="width:${Math.min(100, Math.max(0, p.coverage))}%"></i></div><span class="table-secondary">${tx('未知')} ${signedDuration(p.unknownMs)}</span></td>
+      <td><strong class="${p.budgetRemainingMs < 0 ? 'is-negative' : ''}">${signedDuration(p.budgetRemainingMs)}</strong><div class="slo-budget ${p.budgetRemainingMs < 0 ? 'breached' : ''}"><i style="width:${Math.min(100, Math.max(0, used))}%"></i></div><span class="table-secondary">${tx('已知故障')} ${signedDuration(p.downMs)} · ${tx('已使用')} ${p.budgetUsedPercent == null ? (p.downMs ? '∞' : '0') : p.budgetUsedPercent}%</span></td>
+      <td><span class="slo-status ${p.sloMet}"><i></i>${sloStatus(p.sloMet)}</span></td></tr>`;
+  }).join('') + '</tbody></table>';
 }
-
-function fmtMsShort(ms) {
-  const s = Math.floor((Number(ms) || 0) / 1000);
-  if (s <= 0) return '—';
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
-}
+$('#sloExport').addEventListener('click', async () => {
+  const r = await window.aipm.reportExport({ format: 'html', hours: (state.global.sloWindowDays || 30) * 24, includeHistorical: statsIncludesHistory() });
+  if (r.ok) toast(tx('已导出到文件')); else if (!r.canceled) toast(r.error || tx('保存失败'), 'err');
+});
 
 /** 内联 SVG 双轴折线图：可用率(绿, 0-100) + 平均延迟(蓝, 自适应)。
  * 统计页大图与详情弹窗迷你图共用；mountId 为挂载容器 id。 */
 function drawChart(ser, mountId = 'stChart', W = 900, H = 200) {
-  const PAD = { l: 38, r: 44, t: 12, b: 22 };
+  if (mountId === 'stChart') { W = Math.max(430, $('#' + mountId).clientWidth || 760); H = 240; }
   const pts = ser.buckets || [];
-  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
   const valid = pts.filter((b) => b.samples > 0);
   if (!valid.length) {
-    $('#' + mountId).innerHTML = `<div class="empty" style="padding:48px 0;">${tx('暂无数据')}</div>`;
+    $('#' + mountId).innerHTML = `<div class="stats-empty">${icon('chart')}<strong>${tx('暂无趋势数据')}</strong><span>${tx('检测运行一段时间后，趋势会在这里逐步形成')}</span></div>`;
     return;
   }
   const maxLat = Math.max(1, ...valid.map((b) => b.latencyAvg || 0));
+  const latencyLabel = metricValue(maxLat, 'ms');
+  const PAD = { l: 40, r: Math.max(60, latencyLabel.length * 7.5 + 12), t: 16, b: 28 };
+  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
   const x = (i) => PAD.l + (pts.length <= 1 ? iw / 2 : (i / (pts.length - 1)) * iw);
   const yU = (v) => PAD.t + ih - (v / 100) * ih;
   const yL = (v) => PAD.t + ih - (v / maxLat) * ih;
@@ -1465,8 +1740,7 @@ function drawChart(ser, mountId = 'stChart', W = 900, H = 200) {
       cur.push(`${x(i).toFixed(1)},${yfn(v).toFixed(1)}`);
     });
     if (cur.length) out.push(cur);
-    return out.map((c) => `<polyline points="${c.join(' ')}" fill="none" stroke-width="2"
-      stroke-linejoin="round" stroke-linecap="round"/>`).join('');
+    return out.map((c) => c.length === 1 ? `<circle cx="${c[0].split(',')[0]}" cy="${c[0].split(',')[1]}" r="3.5"/>` : `<polyline points="${c.join(' ')}" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join('');
   };
 
   const grid = [0, 25, 50, 75, 100].map((v) =>
@@ -1474,28 +1748,31 @@ function drawChart(ser, mountId = 'stChart', W = 900, H = 200) {
      <text x="${PAD.l - 6}" y="${yU(v) + 4}" class="ch-lbl" text-anchor="end">${v}</text>`).join('');
 
   const t0 = new Date(ser.from), t1 = new Date(ser.to);
-  const hm = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const hm = (d) => ser.to - ser.from > 86400000 ? `${d.getMonth() + 1}/${d.getDate()}` : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const middle = new Date((ser.from + ser.to) / 2);
 
-  $('#' + mountId).innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="ch-svg">
+  $('#' + mountId).innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="ch-svg" role="img" aria-label="${tx('可用率与延迟趋势')}">
     ${grid}
     <g class="ch-lat">${seg('latencyAvg', yL)}</g>
     <g class="ch-up">${seg('uptime', yU)}</g>
     <text x="${PAD.l}" y="${H - 6}" class="ch-lbl">${hm(t0)}</text>
+    <text x="${PAD.l + iw / 2}" y="${H - 6}" class="ch-lbl" text-anchor="middle">${hm(middle)}</text>
     <text x="${W - PAD.r}" y="${H - 6}" class="ch-lbl" text-anchor="end">${hm(t1)}</text>
-    <text x="${W - PAD.r + 6}" y="${PAD.t + 8}" class="ch-lbl">${maxLat}ms</text>
+    <text x="${W - 4}" y="${PAD.t + 4}" class="ch-lbl" text-anchor="end">${latencyLabel}</text>
   </svg>`;
 }
 
 if ($('#stRefresh')) {
   $('#stRefresh').addEventListener('click', renderStats);
   $('#stRange').addEventListener('change', renderStats);
+  $('#stScope').addEventListener('change', renderStats);
   $('#stExportCsv').addEventListener('click', async () => {
-    const r = await window.aipm.historyExportCSV({ hours: statsHours() });
+    const r = await window.aipm.historyExportCSV({ hours: statsHours(), includeHistorical: statsIncludesHistory() });
     if (r.ok) toast(tx('历史明细已导出'));
     else if (!r.canceled) toast(tx('导出失败: ') + r.error, 'err');
   });
   $('#stExportReport').addEventListener('click', async () => {
-    const r = await window.aipm.reportExport({ format: 'html', hours: statsHours() });
+    const r = await window.aipm.reportExport({ format: 'html', hours: statsHours(), includeHistorical: statsIncludesHistory() });
     if (r.ok) toast(tx('状态报告已导出'));
     else if (!r.canceled) toast(tx('导出失败: ') + r.error, 'err');
   });
@@ -1572,6 +1849,7 @@ $('#logFilesList').addEventListener('click', (e) => {
 function appendLogLines(lines, replace = false) {
   const card = $('#logCard');
   if (replace) card.innerHTML = '';
+  card.querySelector('.empty')?.remove();
   for (const l of lines) {
     if (!logMatchesFilter(l)) continue;
     const div = document.createElement('div');
@@ -1580,6 +1858,11 @@ function appendLogLines(lines, replace = false) {
     card.appendChild(div);
   }
   while (card.children.length > 600) card.removeChild(card.firstChild);
+  $('#logResultCount').textContent = tx('显示 {n} 条日志', { n: card.children.length });
+  if (!card.children.length) {
+    const filtering = $('#logFilter').value.trim() || $('#logLevelFilter').value || $('#logProviderFilter').value;
+    card.innerHTML = `<div class="empty">${filtering ? tx('没有匹配的日志，请调整筛选条件') : tx('暂无日志，检测或发送通知后会在此显示')}</div>`;
+  }
   if ($('#autoScroll').checked) card.scrollTop = card.scrollHeight;
 }
 window.aipm.onLogLine((l) => {
@@ -1611,7 +1894,7 @@ $('#logClear').addEventListener('click', () => {
   confirmDialog(tx('清除日志'), tx('确定清除当前显示的日志吗？（磁盘日志文件保留）'), async () => {
     await window.aipm.clearLogs();
     logLines = [];
-    $('#logCard').innerHTML = '';
+    appendLogLines([], true);
     toast(tx('日志已清除'));
   }, { okText: tx('清除'), danger: true });
 });
@@ -1782,25 +2065,35 @@ bindSeg('emFormat', (btn) => {
 bindSeg('emDelim', (btn) => { emState.delimiter = btn.dataset.d; refreshExportPreview(); });
 $('#emWithKey').addEventListener('change', refreshExportPreview);
 
-async function refreshExportPreview() {
+let exportContent = '', exportSeq = 0, exportPending = Promise.resolve();
+function refreshExportPreview() {
+  exportPending = loadExportPreview(); return exportPending;
+}
+async function loadExportPreview() {
+  const seq = ++exportSeq;
   const r = await window.aipm.transferExport({ format: emState.format, delimiter: emState.delimiter, withKey: $('#emWithKey').checked });
+  if (seq !== exportSeq) return;
   if (r.ok) {
+    exportContent = r.content;
     $('#emPreview').textContent = r.content.length > 2000 ? r.content.slice(0, 2000) + '\n…' : r.content;
     $('#emError').textContent = '';
   } else {
+    exportContent = '';
     $('#emError').textContent = r.error;
   }
 }
 
 $('#emCopy').addEventListener('click', async () => {
-  if ($('#emWithKey').checked && state.providers.some((p) => p.hasApiKey)) {
-    confirmDialog(tx('包含 API Key'), tx('复制内容包含明文 API Key，请注意剪贴板与目标位置的保管。确定继续吗？'), async () => {
-      await navigator.clipboard.writeText($('#emPreview').textContent);
+  await exportPending;
+  if (!exportContent) return;
+  if ($('#emWithKey').checked && state.providers.some((p) => p.hasApiKey || p.hasCustomHeaders || p.hasProxyUrl)) {
+    confirmDialog(tx('包含凭据'), tx('复制内容包含明文凭据（API Key、请求头及代理），请注意剪贴板与目标位置的保管。确定继续吗？'), async () => {
+      await navigator.clipboard.writeText(exportContent);
       toast(tx('已复制到剪贴板'));
     }, { danger: false });
     return;
   }
-  await navigator.clipboard.writeText($('#emPreview').textContent);
+  await navigator.clipboard.writeText(exportContent);
   toast(tx('已复制到剪贴板'));
 });
 
@@ -1811,8 +2104,8 @@ $('#emSave').addEventListener('click', async () => {
     if (r.ok) { toast(tx('已导出到文件')); $('#exportModal').classList.remove('show'); }
     else $('#emError').textContent = r.error;
   };
-  if ($('#emWithKey').checked && state.providers.some((p) => p.hasApiKey)) {
-    confirmDialog(tx('包含 API Key'), tx('导出文件将包含明文 API Key，请妥善保管。确定继续吗？'), doSave, { danger: false });
+  if ($('#emWithKey').checked && state.providers.some((p) => p.hasApiKey || p.hasCustomHeaders || p.hasProxyUrl)) {
+    confirmDialog(tx('包含凭据'), tx('导出文件将包含明文凭据（API Key、请求头及代理），请妥善保管。确定继续吗？'), doSave, { danger: false });
     return;
   }
   await doSave();
@@ -1884,7 +2177,7 @@ async function parseAndPreviewImport() {
     ? `<div class="io-err">${r.errors.length} ${tx('条已跳过：')}</div><ul>${r.errors.slice(0, 5).map((e) => `<li>${tx('第 {n} 行：', { n: e.line })}${escapeHtml(e.msg)}</li>`).join('')}${r.errors.length > 5 ? `<li>${tx('… 共 {n} 条', { n: r.errors.length })}</li>` : ''}</ul>`
     : '';
   box.innerHTML = `<span class="io-ok">${tx('解析成功：')}${r.items.length} ${tx('条服务商')}</span>${errHtml}
-    <ul>${r.items.slice(0, 5).map((p) => `<li>${escapeHtml(p.name)} — ${escapeHtml(p.url)}（${tx('周期 {d}，上报 {s}', { d: fmtDuration(p.intervalSec), s: tx(p.notifyOnModelChange ? '开' : '关') })}）</li>`).join('')}${r.items.length > 5 ? `<li>${tx('… 共 {n} 条', { n: r.items.length })}</li>` : ''}</ul>`;
+    <ul>${r.items.slice(0, 5).map((p) => `<li>${escapeHtml(p.name)} — ${escapeHtml(p.url)}（${tx('周期 {d}，上报 {s}', { d: p.intervalSec === undefined ? tx('不修改') : fmtDuration(p.intervalSec), s: p.notifyOnModelChange === undefined ? tx('不修改') : tx(p.notifyOnModelChange ? '开' : '关') })}）</li>`).join('')}${r.items.length > 5 ? `<li>${tx('… 共 {n} 条', { n: r.items.length })}</li>` : ''}</ul>`;
   $('#imApply').disabled = false;
 }
 
@@ -1932,11 +2225,72 @@ window.aipm.onOpenProvider((id) => {
   if (view !== 'providers') navTo('providers');
   setTimeout(() => openDetail(Number(id)), 120);
 });
-window.aipm.onStateChanged((s) => { state = s; queueRender(); });
-window.aipm.getState().then((s) => { state = s; render(); refreshUptime24(true); });
+window.aipm.onStateChanged((s) => {
+  const changed = JSON.stringify(state.global) !== JSON.stringify(s.global);
+  state = s;
+  if (changed && notifyFormInitialized && !pendingSettings && !notifySaveTimer && !settingsSaving) renderNotify(true);
+  queueRender();
+});
+window.aipm.getState().then((s) => { state = s; renderNotify(); render(); refreshUptime24(true); });
 window.aipm.getAppVersion().then((v) => { $('#appVersion').textContent = 'V' + v; }).catch(() => {});
 setInterval(() => { void refreshUptime24(); }, 5 * 60 * 1000);
 initSecretClearButtons();
+for (const sel of ['#fKey', '#fCustomHeaders', '#fProxyUrl', ...SECRET_CLEAR_FIELDS.map(([sel]) => sel)]) $(sel).dataset.dynamicPlaceholder = '1';
 initStaticIcons();
+$('#settings-appearance').parentElement.prepend($('#settings-appearance'));
+selectSettingsCategory(settingsCategory);
+// Connect static labels and descriptions to their fields for keyboard and screen-reader use.
+$$('.field').forEach((field, index) => {
+  const label = [...field.children].find((el) => el.tagName === 'LABEL' && !el.classList.contains('switch') && !el.classList.contains('checkbox'));
+  const control = field.querySelector('input:not([type="hidden"]),select,textarea');
+  if (!label || !control || label.contains(control)) return;
+  if (control.id) label.htmlFor = control.id;
+  const hint = field.querySelector('.field-hint');
+  if (hint) { hint.id ||= 'field-hint-' + index; control.setAttribute('aria-describedby', hint.id); }
+});
+$$('.opt-row').forEach((row, index) => {
+  const title = row.querySelector('.opt-title'), hint = row.querySelector('.opt-sub');
+  if (!title) return;
+  title.id ||= 'option-title-' + index;
+  if (hint) hint.id ||= 'option-hint-' + index;
+  $$('input:not([type="hidden"]),select,textarea', row).forEach((input) => {
+    input.setAttribute('aria-labelledby', title.id);
+    if (hint) input.setAttribute('aria-describedby', hint.id);
+  });
+});
+$$('.notify-channel').forEach((panel) => {
+  const title = panel.querySelector('h2'); title.id = panel.id + '-title';
+  panel.querySelector('.panel-head input').setAttribute('aria-labelledby', title.id);
+});
 render();
 refreshUptime24();
+
+let modalFocusOrigin = null;
+const modalObserver = new MutationObserver((changes) => {
+  for (const change of changes) {
+    const mask = change.target;
+    if (mask.classList.contains('show') && !(change.oldValue || '').split(' ').includes('show')) {
+      modalFocusOrigin = document.activeElement;
+      const dialog = mask.firstElementChild;
+      dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+      const focusable = dialog.querySelector('input, select, button, textarea');
+      if (focusable) focusable.focus();
+    } else if (!mask.classList.contains('show') && (change.oldValue || '').split(' ').includes('show')) {
+      if (mask.id === 'detailModal') { detailSeq++; detailId = null; }
+      if (modalFocusOrigin?.isConnected) modalFocusOrigin.focus();
+    }
+  }
+});
+$$('.modal-mask').forEach((mask) => modalObserver.observe(mask, { attributes: true, attributeFilter: ['class'], attributeOldValue: true }));
+document.addEventListener('keydown', (event) => {
+  const modal = $('#confirmModal.show') || $$('.modal-mask.show').at(-1);
+  if (!modal) return;
+  if (event.key === 'Escape') { event.preventDefault(); modal.classList.remove('show'); return; }
+  if (event.key === 'Enter' && modal.id === 'providerModal' && event.target.tagName === 'INPUT') { event.preventDefault(); $('#pmSave').click(); return; }
+  if (event.key !== 'Tab') return;
+  const nodes = $$('button:not(:disabled),input:not(:disabled),textarea,select,summary,[tabindex="0"]', modal).filter((el) => el.getClientRects().length);
+  const first = nodes[0], last = nodes.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+});
+$$('.icon-btn').forEach((el) => el.setAttribute('aria-label', tx('关闭')));

@@ -44,7 +44,7 @@ function formatDuration(sec) {
   const major = Math.floor(sec / u.factor);
   const rest = sec % u.factor;
   const next = UNITS[bi - 1];
-  const minor = Math.round(rest / next.factor);
+  const minor = Math.floor(rest / next.factor);
   if (minor > 0) return `${major} ${u.label} ${minor} ${next.label}`;
   return `${major} ${u.label}`;
 }

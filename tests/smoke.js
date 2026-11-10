@@ -263,13 +263,18 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     const { diffBaseline } = require('../src/baseline');
     // 构造隔离环境执行真实 applyResult
     const fn = new Function('snapshot', 'logger', 'notifyModelChange', 'notifyAlert', 'statusText',
-      'db', 'history', 'alerts', 'updateTrayStatus', 'DATA_DIR', 'diffBaseline', `
+      'db', 'history', 'alerts', 'updateTrayStatus', 'DATA_DIR', 'diffBaseline', 'dispatchAlerts', `
       ${m[0]}
       return applyResult;
     `);
     const applyResult = fn(snapshot, logger, notifierStub.notifyModelChange, notifyAlertStub, statusText,
       { global: { historyEnabled: false, alertFailThreshold: 99, alertOnModelChange: true, alertCooldownMin: 0 }, providers: [] },
-      historyStub, alertsReal, updateTrayStatus, DATA_DIR, diffBaseline);
+      historyStub, alertsReal, updateTrayStatus, DATA_DIR, diffBaseline, (provider, events) => {
+        for (const event of events) {
+          if (event.kind === 'modelChange') pushes.push(event);
+          alertsReal.noteDelivery(provider, event, { attempted: 1, delivered: ['custom'], failed: [] });
+        }
+      });
 
     // 首次检测（status=unknown 基线）
     const p = { id: 1, name: 'A', status: 'unknown', modelsAvailable: [], modelsTotal: 0, notifyOnModelChange: true };
@@ -312,7 +317,7 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
       { name: 'A 甲', url: 'http://a', apiKey: 'k1', intervalSec: 60, notifyOnModelChange: true, note: 'note,1' },
       { name: 'B', url: 'http://b', apiKey: '', intervalSec: 30, notifyOnModelChange: false, note: '' }
     ];
-    const j = JSON.parse(exportProviders(providers, { format: 'json' }));
+    const j = JSON.parse(exportProviders(providers, { format: 'json', withKey: true }));
     assert.strictEqual(j.length, 2);
     assert.strictEqual(j[0].apiKey, 'k1');
 
@@ -341,7 +346,7 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     assert.strictEqual(r.items[0].url, 'http://b.com', 'host:port 简写应补 http://');
 
     // CSV（含引号转义与中文表头）
-    const csv = 'name,url,apiKey,intervalSec,notifyOnModelChange,note\n"A,1",http://a,k1,60,1,"备注""引" "\nB,http://b,,30,0,x"';
+    const csv = 'name,url,apiKey,intervalSec,notifyOnModelChange,note\n"A,1",http://a,k1,60,1,"备注""引"""\nB,http://b,,30,0,x';
     r = parseImport(csv, { format: 'csv' });
     assert.strictEqual(r.items.length, 2, 'CSV 应解析两行');
     assert.strictEqual(r.items[0].name, 'A,1');
@@ -622,6 +627,7 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     const hit = alerts.evaluate(g, p, {}, {});
     assert.strictEqual(hit.alerts.length, 1, '达阈值应告警');
     assert.strictEqual(hit.alerts[0].kind, 'down');
+    alerts.noteDelivery(p, hit.alerts[0], { attempted: 1, delivered: ['weixin'], failed: [] });
     assert.strictEqual(alerts.evaluate(g, p, {}, {}).alerts.length, 0, '告警态内不重复推送');
     const rec = alerts.evaluate(g, { ...p, status: 'up', modelsAvailable: ['m'], modelsTotal: 1 }, {}, {});
     assert.strictEqual(rec.alerts[0].kind, 'recover', '恢复应告警');
@@ -644,6 +650,7 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
     alerts.evaluate(g, p, {}, { firstCheck: true });
     const first = alerts.evaluate(g, p, {}, { modelChanged: true });
     assert.strictEqual(first.alerts.length, 1, '首次变动应告警');
+    alerts.noteDelivery(p, first.alerts[0], { attempted: 1, delivered: ['weixin'], failed: [] });
     const second = alerts.evaluate(g, p, {}, { modelChanged: true });
     assert.strictEqual(second.alerts.length, 0, '冷却内不应重复');
     assert.ok(second.suppressed.some((s) => s.why === '冷却中'));
@@ -691,7 +698,7 @@ function makeMockServer({ models = ['gpt-4o', 'gpt-4o-mini', 'dead-model'], chat
       checkedAt: Date.now(), status: 'up', latency: 10,
       modelsTotal: 1, modelsAvailable: ['a'], modelsUnavailable: [], modelsUnprobed: []
     });
-    const removed = history.prune(dir, 30);
+    const removed = await history.prune(dir, 30);
     assert.strictEqual(removed, 1, '应删除 1 个过期分片');
     assert.ok(fs.readdirSync(hdir).length >= 1, '当日分片应保留');
   });

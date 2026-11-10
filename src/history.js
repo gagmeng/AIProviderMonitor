@@ -3,6 +3,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const logger = require('./logger');
+const { StringDecoder } = require('string_decoder');
 
 /**
  * 历史时序存储：按天分片的 JSONL（每行一条检测记录），便于追加写与按范围裁剪。
@@ -20,44 +21,38 @@ function historyDir(dataDir) { return path.join(dataDir, DIR_NAME); }
 
 function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch (e) { /* ignore */ } }
 
-// 写入先入队，下一拍异步落盘，避免检测回调里同步写盘卡住界面。
-// 读取前 flushSync，保证同一次调用链里刚写入的记录可见。
-const writeQueue = [];
-let writeTimer = null;
-
+// Writes are ordered per file. Queries and quit await all in-flight appends.
+const writeQueue = [], writeChains = new Map(), readCache = new Map();
+let writeTimer = null, revision = 0;
 function enqueueWrite(file, text) {
-  writeQueue.push({ file, text });
+  revision++; readCache.clear(); writeQueue.push({ file, text });
   if (!writeTimer) writeTimer = setImmediate(flushAsync);
 }
-
 function groupedQueue(batch) {
   const byFile = new Map();
-  for (const job of batch) {
-    byFile.set(job.file, (byFile.get(job.file) || '') + job.text);
-  }
+  for (const job of batch) byFile.set(job.file, (byFile.get(job.file) || '') + job.text);
   return byFile;
 }
-
 function flushAsync() {
+  if (writeTimer) clearImmediate(writeTimer);
   writeTimer = null;
-  const batch = writeQueue.splice(0, writeQueue.length);
-  for (const [file, text] of groupedQueue(batch)) {
-    fs.appendFile(file, text, 'utf8', (err) => {
-      if (err) logger.warn(`[历史] 异步写入失败: ${err.message}`);
+  for (const [file, text] of groupedQueue(writeQueue.splice(0))) {
+    const chain = (writeChains.get(file) || Promise.resolve()).catch(() => {}).then(() => fsp.appendFile(file, text, 'utf8'));
+    writeChains.set(file, chain);
+    chain.catch((err) => logger.warn(`[历史] 写入失败: ${err.message}`)).finally(() => {
+      if (writeChains.get(file) === chain) writeChains.delete(file);
     });
   }
 }
-
+async function flush() {
+  do { flushAsync(); await Promise.all([...writeChains.values()]); } while (writeQueue.length || writeChains.size);
+}
 function flushSync() {
-  if (writeTimer) { clearImmediate(writeTimer); writeTimer = null; }
-  const batch = writeQueue.splice(0, writeQueue.length);
-  for (const [file, text] of groupedQueue(batch)) {
-    try {
-      ensureDir(path.dirname(file));
-      fs.appendFileSync(file, text, 'utf8');
-    } catch (e) {
-      logger.warn(`[历史] 写入失败: ${e.message}`);
-    }
+  if (writeChains.size) return flush();
+  if (writeTimer) clearImmediate(writeTimer);
+  writeTimer = null;
+  for (const [file, text] of groupedQueue(writeQueue.splice(0))) {
+    ensureDir(path.dirname(file)); fs.appendFileSync(file, text, 'utf8');
   }
 }
 
@@ -68,12 +63,13 @@ async function readLinesAsync(file, onLine) {
   try { fh = await fsp.open(file, 'r'); } catch (e) { return; }
   try {
     const buf = Buffer.alloc(64 * 1024);
+    const decoder = new StringDecoder('utf8');
     let leftover = '';
     let chunks = 0;
     for (;;) {
       const { bytesRead } = await fh.read(buf, 0, buf.length, null);
       if (bytesRead <= 0) break;
-      leftover += buf.toString('utf8', 0, bytesRead);
+      leftover += decoder.write(buf.subarray(0, bytesRead));
       let idx;
       while ((idx = leftover.indexOf('\n')) >= 0) {
         const line = leftover.slice(0, idx).replace(/\r$/, '');
@@ -83,6 +79,7 @@ async function readLinesAsync(file, onLine) {
       if (leftover.length > 2 * 1024 * 1024) leftover = leftover.slice(-2048);
       if (++chunks % 32 === 0) await new Promise((r) => setImmediate(r));
     }
+    leftover += decoder.end();
     if (leftover.trim()) onLine(leftover.replace(/\r$/, ''));
   } finally {
     try { await fh.close(); } catch (e) { /* ignore */ }
@@ -113,6 +110,8 @@ function append(dataDir, provider, result) {
       id: provider.id,
       name: provider.name,
       status: result.status,
+      intervalSec: Math.max(5, Number(provider.intervalSec) || 300),
+      sloTarget: provider.sloTarget ?? null,
       latency: result.latency == null ? null : Number(result.latency),
       total: Number(result.modelsTotal) || 0,
       avail: (result.modelsAvailable || []).length,
@@ -151,7 +150,7 @@ function appendModels(dataDir, providerId, checkedAt, details) {
 
 /** 读取某服务商指定时间范围内的单模型记录 */
 async function readModelRange(dataDir, providerId, fromTs, toTs) {
-  flushSync();
+  await flush();
   const dir = historyDir(dataDir);
   const out = [];
   let files;
@@ -197,8 +196,9 @@ async function modelRates(dataDir, providerId, { hours = 24 } = {}) {
 }
 
 /** 读取指定时间范围内的全部记录（按天分片定位，避免全量扫描） */
-async function readRange(dataDir, fromTs, toTs) {
-  flushSync();
+async function readRangeUncached(dataDir, fromTs, toTs, { providerId = null, providerIds = null } = {}) {
+  await flush();
+  const allowed = Array.isArray(providerIds) ? new Set(providerIds.map(Number)) : null;
   const dir = historyDir(dataDir);
   const out = [];
   let files;
@@ -213,7 +213,7 @@ async function readRange(dataDir, fromTs, toTs) {
     await readLinesAsync(path.join(dir, f), (line) => {
       try {
         const r = JSON.parse(line);
-        if (r.t >= fromTs && r.t <= toTs) out.push(r);
+        if (r.t >= fromTs && r.t <= toTs && (providerId == null || r.id === Number(providerId)) && (!allowed || allowed.has(r.id))) out.push(r);
       } catch (e) { /* 跳过损坏行 */ }
     });
     // 分片之间也让出一次事件循环，多分片统计时界面保持可响应
@@ -221,6 +221,53 @@ async function readRange(dataDir, fromTs, toTs) {
   }
   out.sort((a, b) => a.t - b.t);
   return out;
+}
+
+function readRange(dataDir, fromTs, toTs, options = {}) {
+  const key = JSON.stringify([dataDir, fromTs, toTs, options.providerId ?? null, options.providerIds ?? null, revision]);
+  const cached = readCache.get(key);
+  if (cached && Date.now() - cached.at < 1000) return cached.promise;
+  const promise = readRangeUncached(dataDir, fromTs, toTs, options);
+  readCache.set(key, { at: Date.now(), promise });
+  if (readCache.size > 6) readCache.delete(readCache.keys().next().value);
+  promise.catch(() => readCache.delete(key));
+  return promise;
+}
+
+/** Carry a sample forward for at most two planned periods; stale time stays unknown. */
+function timeMetrics(records, from, to, target = 99.9) {
+  const list = records.slice().sort((a, b) => a.t - b.t);
+  const gaps = list.slice(1).map((r, i) => r.t - list[i].t).filter((n) => n > 0).sort((a, b) => a - b);
+  const fallback = Math.min(86400000, gaps[Math.floor(gaps.length / 2)] || 300000);
+  let upMs = 0, downMs = 0;
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i], start = Math.max(from, r.t);
+    const horizon = Math.max(5000, Number(r.intervalSec) * 1000 || fallback) * 2;
+    const end = Math.min(to, list[i + 1]?.t ?? to, r.t + horizon);
+    if (end <= start) continue;
+    if (r.status === 'up') upMs += end - start;
+    else if (['down', 'degraded', 'authfail'].includes(r.status)) downMs += end - start;
+  }
+  const windowMs = Math.max(0, to - from), observedMs = upMs + downMs;
+  const unknownMs = Math.max(0, windowMs - observedMs), allowed = Math.round(windowMs * (1 - target / 100));
+  return { upMs, downMs, observedMs, unknownMs, windowMs,
+    timeUptime: observedMs ? Number((upMs / observedMs * 100).toFixed(4)) : null,
+    coverage: windowMs ? Number((observedMs / windowMs * 100).toFixed(2)) : 0,
+    sloTarget: target, allowedDowntimeMs: Math.round(allowed), budgetRemainingMs: Math.round(allowed - downMs),
+    budgetUsedPercent: allowed > 0 ? Number((downMs / allowed * 100).toFixed(1)) : (downMs ? null : 0),
+    sloMet: downMs > allowed ? 'breached' : unknownMs > 0 || !observedMs ? 'insufficient' : 'met'
+  };
+}
+
+function aggregateTimeMetrics(rows) {
+  const sum = (key) => rows.reduce((total, row) => total + (row[key] || 0), 0);
+  const observedMs = sum('observedMs'), windowMs = sum('windowMs'), downMs = sum('downMs'), allowedDowntimeMs = sum('allowedDowntimeMs');
+  return { observedMs, windowMs, downMs, upMs: sum('upMs'), unknownMs: sum('unknownMs'), allowedDowntimeMs,
+    timeUptime: observedMs ? Number((sum('upMs') / observedMs * 100).toFixed(4)) : null,
+    coverage: windowMs ? Number((observedMs / windowMs * 100).toFixed(2)) : 0,
+    budgetRemainingMs: allowedDowntimeMs - downMs,
+    budgetUsedPercent: allowedDowntimeMs > 0 ? Number((downMs / allowedDowntimeMs * 100).toFixed(1)) : null
+  };
 }
 
 function percentile(sorted, p) {
@@ -234,10 +281,13 @@ function percentile(sorted, p) {
  * 返回 { rangeHours, overall, perProvider: [...] }
  * 可用率定义：status==='up' 的样本数 / 总样本数
  */
-async function summarize(dataDir, { hours = 24, providerId = null } = {}) {
-  const to = Date.now();
+async function summarize(dataDir, { hours = 24, providerId = null, providers = null, includeHistorical = false, sloTarget = 99.9, now = Date.now() } = {}) {
+  const to = now;
   const from = to - hours * 3600 * 1000;
-  let recs = await readRange(dataDir, from, to);
+  const configuredProviders = Array.isArray(providers) ? providers : [];
+  // A configured list, including an empty list, is authoritative. Old IDs are opt-in.
+  const providerIds = Array.isArray(providers) && !includeHistorical ? providers.map((p) => p.id) : null;
+  let recs = await readRange(dataDir, from, to, { providerId, providerIds });
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
 
   const byProvider = new Map();
@@ -246,6 +296,11 @@ async function summarize(dataDir, { hours = 24, providerId = null } = {}) {
     byProvider.get(r.id).push(r);
   }
 
+  const lookback = Math.max(86400000, ...configuredProviders.map((p) => (Number(p.intervalSec) || 300) * 2000));
+  const seed = await readRange(dataDir, from - lookback, from - 1, { providerId, providerIds });
+  const prior = new Map(); for (const r of seed) prior.set(r.id, r);
+  for (const id of prior.keys()) if (!byProvider.has(id)) byProvider.set(id, []);
+  for (const p of configuredProviders) if ((providerId == null || p.id === Number(providerId)) && !byProvider.has(p.id)) byProvider.set(p.id, []);
   const perProvider = [];
   for (const [id, list] of byProvider) {
     const total = list.length;
@@ -254,55 +309,30 @@ async function summarize(dataDir, { hours = 24, providerId = null } = {}) {
     const downCount = list.filter((r) => r.status === 'down').length;
     const authCount = list.filter((r) => r.status === 'authfail').length;
     const lats = list.map((r) => r.latency).filter((v) => typeof v === 'number' && v >= 0).sort((a, b) => a - b);
-    // 故障时长：连续非 up 样本按相邻采样间隔累加
-    let downMs = 0;
-    const gaps = [];
-    for (let i = 1; i < list.length; i++) {
-      const gap = Math.max(0, list[i].t - list[i - 1].t);
-      gaps.push(gap);
-      if (list[i - 1].status !== 'up') downMs += gap;
-    }
-    // 故障事件（SLA）：连续非 up 记为一次故障，时长 ≈ 恢复时刻 − 首个非 up 时刻。
-    // 窗口开头就在故障中的按首个样本起算，尾端未恢复的按统计终点截止——都是近似值。
-    let incidents = 0, mttrSum = 0, maxOutage = 0, openFrom = 0;
+    const configured = configuredProviders.find((p) => p.id === id);
+    const last = list[list.length - 1] || prior.get(id);
+    const target = Math.min(100, Math.max(90, Number(configured?.sloTarget ?? sloTarget) || 99.9));
+    const weighted = timeMetrics([...(prior.has(id) ? [prior.get(id)] : []), ...list], from, to, target);
+    let incidents = 0, recovered = 0, mttrSum = 0, maxOutage = 0, openFrom = null;
     for (const r of list) {
       if (r.status === 'up') {
-        if (openFrom) {
-          const dur = Math.max(0, r.t - openFrom);
-          mttrSum += dur;
-          if (dur > maxOutage) maxOutage = dur;
-          openFrom = 0;
-        }
-      } else if (!openFrom) { openFrom = r.t; incidents++; }
+        if (openFrom != null) { const duration = Math.max(0, r.t - openFrom); recovered++; mttrSum += duration; maxOutage = Math.max(maxOutage, duration); openFrom = null; }
+      } else if (['down', 'degraded', 'authfail'].includes(r.status) && openFrom == null) { openFrom = r.t; incidents++; }
     }
-    if (openFrom) {
-      const dur = Math.max(0, to - openFrom);
-      mttrSum += dur;
-      if (dur > maxOutage) maxOutage = dur;
-    }
-    const mttrMs = incidents ? Math.round(mttrSum / incidents) : 0;
-    // 末尾样本仍处于非 up 时，故障仍在持续：按典型采样间隔把尾段补进统计，
-    // 否则「正在发生的故障」会始终显示为 0。用间隔中位数的 2 倍封顶，
-    // 避免长期无采样（数据陈旧）把故障时长放大成不真实的数值。
-    const lastRec = list[list.length - 1];
-    if (lastRec && lastRec.status !== 'up') {
-      const tail = Math.max(0, to - lastRec.t);
-      if (gaps.length) {
-        const sorted = gaps.slice().sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)] || 0;
-        downMs += median > 0 ? Math.min(tail, median * 2) : tail;
-      } else {
-        downMs += tail;
-      }
-    }
+    const currentOutageMs = openFrom == null ? 0 : Math.max(0, to - openFrom);
+    maxOutage = Math.max(maxOutage, currentOutageMs);
+    const mttrMs = recovered ? Math.round(mttrSum / recovered) : 0;
     perProvider.push({
       id,
-      name: list[list.length - 1].name,
+      name: configured?.name || last?.name || `#${id}`,
+      archived: Array.isArray(providers) && !configured,
+      enabled: configured?.enabled !== false,
       samples: total,
       uptime: total ? Number(((upCount / total) * 100).toFixed(2)) : 0,
       upCount, degCount, downCount,
       authCount,
-      downMs,
+      ...weighted,
+      currentOutageMs, recoveredIncidents: recovered,
       incidents,
       mttrMs,
       maxOutageMs: maxOutage,
@@ -310,8 +340,8 @@ async function summarize(dataDir, { hours = 24, providerId = null } = {}) {
       latencyP50: percentile(lats, 50),
       latencyP95: percentile(lats, 95),
       latencyMax: lats.length ? lats[lats.length - 1] : null,
-      lastStatus: list[list.length - 1].status,
-      lastAt: list[list.length - 1].t
+      lastStatus: last?.status || 'unknown',
+      lastAt: last?.t || null
     });
   }
   perProvider.sort((a, b) => a.uptime - b.uptime);
@@ -326,6 +356,7 @@ async function summarize(dataDir, { hours = 24, providerId = null } = {}) {
     rangeHours: hours,
     from, to,
     overall: {
+      ...aggregateTimeMetrics(perProvider),
       samples: totalSamples,
       providers: perProvider.length,
       uptime: totalSamples ? Number(((totalUp / totalSamples) * 100).toFixed(2)) : 0,
@@ -342,10 +373,11 @@ async function summarize(dataDir, { hours = 24, providerId = null } = {}) {
  * 生成用于折线图的分桶序列。
  * 返回 { buckets: [{ t, uptime, latencyAvg, samples }], bucketMs }
  */
-async function series(dataDir, { hours = 24, providerId = null, buckets = 48 } = {}) {
+async function series(dataDir, { hours = 24, providerId = null, providers = null, includeHistorical = false, buckets = 48 } = {}) {
   const to = Date.now();
   const from = to - hours * 3600 * 1000;
-  let recs = await readRange(dataDir, from, to);
+  const providerIds = Array.isArray(providers) && !includeHistorical ? providers.map((p) => p.id) : null;
+  let recs = await readRange(dataDir, from, to, { providerId, providerIds });
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
 
   const bucketMs = Math.max(60000, Math.floor((to - from) / buckets));
@@ -377,7 +409,7 @@ async function series(dataDir, { hours = 24, providerId = null, buckets = 48 } =
 async function perDay(dataDir, { days = 90, providerId = null } = {}) {
   const to = Date.now();
   const from = to - days * 86400000;
-  let recs = await readRange(dataDir, from, to);
+  let recs = await readRange(dataDir, from, to, { providerId });
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
 
   const byDay = new Map();   // 当日零点 -> Map(id -> {up, total})
@@ -404,8 +436,8 @@ async function perDay(dataDir, { days = 90, providerId = null } = {}) {
 }
 
 /** 清理超过保留天数的历史分片 */
-function prune(dataDir, keepDays = 30) {
-  flushSync();
+async function prune(dataDir, keepDays = 90) {
+  await flush();
   const dir = historyDir(dataDir);
   let files;
   try { files = fs.readdirSync(dir).filter((f) => /^(hist|mhist)-\d{8}\.jsonl$/.test(f)); } catch (e) { return 0; }
@@ -417,15 +449,17 @@ function prune(dataDir, keepDays = 30) {
       try { fs.unlinkSync(path.join(dir, f)); removed++; } catch (e) { /* ignore */ }
     }
   }
+  if (removed) { revision++; readCache.clear(); }
   if (removed) logger.info(`[历史] 已清理 ${removed} 个过期分片（保留 ${keepDays} 天）`);
   return removed;
 }
 
 /** 导出为 CSV（供报告下载） */
-async function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
+async function exportCSV(dataDir, { hours = 24, providerId = null, providers = null, includeHistorical = false } = {}) {
   const to = Date.now();
   const from = to - hours * 3600 * 1000;
-  let recs = await readRange(dataDir, from, to);
+  const providerIds = Array.isArray(providers) && !includeHistorical ? providers.map((p) => p.id) : null;
+  let recs = await readRange(dataDir, from, to, { providerId, providerIds });
   if (providerId != null) recs = recs.filter((r) => r.id === Number(providerId));
   const head = ['time', 'providerId', 'name', 'status', 'latencyMs', 'modelsTotal', 'available', 'unavailable', 'unprobed', 'error'];
   const esc = (v) => {
@@ -440,4 +474,4 @@ async function exportCSV(dataDir, { hours = 24, providerId = null } = {}) {
   return [head.join(','), ...rows].join('\r\n');
 }
 
-module.exports = { append, appendModels, readRange, readModelRange, summarize, modelRates, series, perDay, prune, exportCSV, historyDir, modelFileFor, DIR_NAME, flushSync };
+module.exports = { append, appendModels, readRange, readModelRange, summarize, modelRates, series, perDay, prune, exportCSV, historyDir, modelFileFor, DIR_NAME, flushSync, flush, timeMetrics };

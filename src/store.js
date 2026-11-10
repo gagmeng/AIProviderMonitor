@@ -68,7 +68,10 @@ const DEFAULT_GLOBAL = {
   proxyUrl: '',
   // --- 历史与日志 ---
   historyEnabled: true,
-  historyKeepDays: 30,
+  historyKeepDays: 90,
+  sloTarget: 99.9,
+  sloWindowDays: 30,
+  onboardingDismissed: false,
   logKeepDays: 7,
   logMaxFileMB: 10,
   logLevel: 'info',
@@ -134,7 +137,8 @@ const NUM_RANGES = {
   latencyAlertMs: [100, 3600000, 5000],
   latencyAlertConsecutive: [1, 100, 3],
   smtpPort: [1, 65535, 465],
-  historyKeepDays: [1, 365, 30],
+  historyKeepDays: [1, 365, 90],
+  sloWindowDays: [1, 90, 30],
   logKeepDays: [1, 365, 7],
   logMaxFileMB: [1, 500, 10],
   selfmonSlowMs: [0, 3600000, 60000],
@@ -149,7 +153,7 @@ const BOOL_FIELDS = [
   'historyEnabled', 'modelHistoryEnabled', 'launchAtLogin', 'launchMinimized',
   'autoStartCheckOnLaunch', 'probeRotate', 'insecureSkipVerify', 'autoUpdateCheck',
   'trayBalloonEnabled', 'hotkeyEnabled', 'dailyReportEnabled', 'smtpSecure', 'smtpInsecureSkipVerify',
-  'latencyAlertEnabled'
+  'latencyAlertEnabled', 'onboardingDismissed'
 ];
 const ENUM_FIELDS = {
   theme: ['system', 'light', 'dark'],
@@ -207,6 +211,7 @@ function normalizeGlobal(rawGlobal = {}) {
   }
   // 日报标记只接受 YYYY-MM-DD，其余（含外部篡改的乱值）一律清空，宁可多发一次也不永久漏发
   g.lastReportDay = /^\d{4}-\d{2}-\d{2}$/.test(String(g.lastReportDay || '')) ? String(g.lastReportDay) : '';
+  g.sloTarget = Number.isFinite(Number(g.sloTarget)) ? Math.min(100, Math.max(90, Number(g.sloTarget))) : 99.9;
   g.configVersion = CURRENT_CONFIG_VERSION;
   return g;
 }
@@ -234,7 +239,7 @@ function loadAll() {
       throw new Error('根节点不是对象');
     }
     const g = normalizeGlobal(raw.global);
-    const list = ensureUniqueProviderIds(Array.isArray(raw.providers) ? raw.providers : []);
+    const list = ensureUniqueProviderIds((Array.isArray(raw.providers) ? raw.providers : []).filter((p) => p && typeof p === 'object' && !Array.isArray(p)));
     // 手改文件可能带来坏正则 / 坏 URL：逐条校验（校验用归一化副本，不改写已保存的运行态），
     // 非法条目停用而不是丢弃——保留用户数据，同时防止 detector 每轮在 filterIgnoredModels
     // 里抛异常导致该服务商状态永久卡在旧值。

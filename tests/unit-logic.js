@@ -122,7 +122,9 @@ test('alerts: 静默不记已告警，结束后补发一次', () => {
   const d2 = alerts.evaluate(g, provider, { status: 'up' }, { firstCheck: false, now: new Date(2026, 0, 2, 13, 0) });
   assert.strictEqual(d2.alerts.length, 1);
   assert.strictEqual(d2.alerts[0].kind, 'down');
-  assert.strictEqual(d2.inAlarm, true);
+  assert.strictEqual(d2.inAlarm, false, '发送前不确认告警');
+  alerts.noteDelivery(provider, d2.alerts[0], { attempted: 1, delivered: ['custom'], failed: [] });
+  assert.strictEqual(provider.alertRuntime.inAlarm, true);
 });
 
 test('alerts: 维护日期与星期规则', () => {
@@ -319,7 +321,9 @@ test('alerts: 故障持续超过升级分钟数重复提醒', () => {
   alerts.resetState(id);
   const d1 = alerts.evaluate(g, p, { status: 'up' }, {});
   assert.strictEqual(d1.alerts.length, 1, '首推故障告警');
-  assert.strictEqual(d1.inAlarm, true);
+  assert.strictEqual(d1.inAlarm, false);
+  alerts.noteDelivery(p, d1.alerts[0], { attempted: 1, delivered: ['custom'], failed: [] });
+  assert.strictEqual(p.alertRuntime.inAlarm, true);
   // runtime 按 id 缓存，重绑持久态前先 resetState（模拟进程重启后的恢复路径）
   const rebind = (runtime) => { alerts.resetState(id); return alerts.evaluate(g, { ...p, alertRuntime: runtime }, { status: 'up' }, {}); };
   const d2 = rebind({ consecutiveFail: 1, inAlarm: true, lastSent: { down: t0 - 10 * 60000 } });

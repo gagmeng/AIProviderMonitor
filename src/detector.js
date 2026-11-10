@@ -1,9 +1,9 @@
 'use strict';
-const http = require('http');
-const https = require('https');
 const { URL } = require('url');
 const logger = require('./logger');
 const { headersForRedirect } = require('./httpguard');
+const { requestRaw } = require('./httpRequest');
+const { endpoint } = require('./providerTemplates');
 
 const DEFAULT_REQUEST_TIMEOUT = 20000;
 const DEFAULT_PROBE_TIMEOUT = 15000;
@@ -34,71 +34,44 @@ function getProxyAgent(proxyUrl, insecureSkipVerify) {
     const opts = insecureSkipVerify ? { rejectUnauthorized: false } : undefined;
     return opts ? new ProxyAgentCtor(proxyUrl, opts) : new ProxyAgentCtor(proxyUrl);
   } catch (e) {
-    logger.warn(`[代理] 代理地址无效: ${proxyUrl}`);
+    logger.warn('[代理] 代理地址无效');
     return null;
   }
 }
 
 /** 解析本次请求应使用的代理地址：服务商级 > 全局 > 环境变量 */
 function resolveProxy(provider, globalCfg) {
+  if (provider && provider.useProxy === false) return '';
   const own = String((provider && provider.proxyUrl) || '').trim();
   if (own) return own;
-  if (provider && provider.useProxy === false) return '';
   const g = globalCfg || {};
   if (g.proxyEnabled && String(g.proxyUrl || '').trim()) return String(g.proxyUrl).trim();
   return '';
 }
 
-function fetchJSON(targetUrl, { method = 'GET', headers = {}, body = null, timeout = DEFAULT_REQUEST_TIMEOUT, proxy = '', insecureSkipVerify = false, _redirects = 0 } = {}) {
-  return new Promise((resolve, reject) => {
-    let u;
-    try { u = new URL(targetUrl); } catch (e) { return reject(new Error(`URL 无效: ${targetUrl}`)); }
-    const mod = u.protocol === 'http:' ? http : https;
-    const opts = { method, headers, timeout };
-    if (mod === https && insecureSkipVerify) opts.rejectUnauthorized = false;
-    const agent = getProxyAgent(proxy, insecureSkipVerify);
-    if (agent) opts.agent = agent;
-    const req = mod.request(u, opts, (res) => {
-      // 重定向跟随（≤3 跳）：http→https 等站点不再被误判离线
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && _redirects < MAX_REDIRECTS) {
-        res.resume();
-        let next;
-        try { next = new URL(res.headers.location, u).toString(); }
-        catch (e) { reject(new Error(`重定向地址无效: ${res.headers.location}`)); return; }
-        const m = res.statusCode === 303 ? 'GET' : method;
-        resolve(fetchJSON(next, {
-          method: m,
-          headers: headersForRedirect(u.toString(), next, headers),
-          body: m === 'GET' ? null : body,
-          timeout, proxy, insecureSkipVerify, _redirects: _redirects + 1
-        }));
-        return;
-      }
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => { data += c; if (data.length > 5 * 1024 * 1024) req.destroy(new Error('响应过大')); });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(data)); }
-          catch (e) { reject(new Error(`响应不是有效 JSON (HTTP ${res.statusCode})`)); }
-        } else {
-          const err = new Error(`HTTP ${res.statusCode}`);
-          err.statusCode = res.statusCode;
-          const retryAfter = res.headers['retry-after'];
-          if (retryAfter) {
-            const seconds = Number(retryAfter);
-            const at = Date.parse(retryAfter);
-            err.retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : (Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0);
-          }
-          reject(err);
-        }
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('请求超时')));
-    req.on('error', (e) => reject(e));
-    if (body != null) req.write(body);
-    req.end();
-  });
+async function fetchJSON(targetUrl, { method = 'GET', headers = {}, body = null, timeout = DEFAULT_REQUEST_TIMEOUT,
+  proxy = '', insecureSkipVerify = false, signal, deadlineAt = Date.now() + timeout, _redirects = 0 } = {}) {
+  const res = await requestRaw(targetUrl, { method, headers, body, timeout, deadlineAt, signal,
+    agent: getProxyAgent(proxy, insecureSkipVerify), insecureSkipVerify });
+  if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && _redirects < MAX_REDIRECTS) {
+    const next = new URL(res.headers.location, targetUrl).toString();
+    const m = res.statusCode === 303 ? 'GET' : method;
+    return fetchJSON(next, { method: m, headers: headersForRedirect(targetUrl, next, headers), body: m === 'GET' ? null : body,
+      timeout, deadlineAt, proxy, insecureSkipVerify, signal, _redirects: _redirects + 1 });
+  }
+  if (res.statusCode >= 200 && res.statusCode < 300) {
+    try { return JSON.parse(res.body); } catch (e) { throw new Error(`响应不是有效 JSON (HTTP ${res.statusCode})`); }
+  }
+  const err = new Error(`HTTP ${res.statusCode}`);
+  err.statusCode = res.statusCode;
+  err.responseBody = res.body.slice(0, 2000);
+  try { err.apiError = JSON.parse(res.body).error; } catch (e) { /* optional */ }
+  const retryAfter = res.headers['retry-after'];
+  if (retryAfter) {
+    const seconds = Number(retryAfter), at = Date.parse(retryAfter);
+    err.retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : (Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0);
+  }
+  throw err;
 }
 
 /** 判断错误是否值得重试：网络层抖动与 408/429/5xx 可重试；其余 4xx 语义明确不重试 */
@@ -116,7 +89,12 @@ function isRetryable(err) {
   return true;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  if (signal && signal.aborted) { reject(new Error('检测已取消')); return; }
+  const abort = () => { clearTimeout(timer); reject(new Error('检测已取消')); };
+  const timer = setTimeout(() => { if (signal) signal.removeEventListener('abort', abort); resolve(); }, ms);
+  if (signal) signal.addEventListener('abort', abort, { once: true });
+});
 
 /** 带退避重试的请求封装 */
 async function fetchWithRetry(url, opts, { retries = DEFAULT_RETRIES, tag = '', what = '请求' } = {}) {
@@ -126,10 +104,10 @@ async function fetchWithRetry(url, opts, { retries = DEFAULT_RETRIES, tag = '', 
       return await fetchJSON(url, opts);
     } catch (e) {
       lastErr = e;
-      if (attempt >= retries || !isRetryable(e)) break;
+      if ((opts.signal && opts.signal.aborted) || attempt >= retries || !isRetryable(e)) break;
       const wait = Math.min(60000, Number(e.retryAfterMs) > 0 ? Number(e.retryAfterMs) : RETRY_BACKOFF_MS * Math.pow(2, attempt));
       logger.debug(`${tag} ${what}失败（${e.message}），${wait} ms 后第 ${attempt + 1} 次重试`);
-      await sleep(wait);
+      await sleep(wait, opts.signal);
     }
   }
   throw lastErr;
@@ -156,9 +134,9 @@ async function mapPool(items, limit, fn, jitterMs = 0) {
 
 function extractModelIds(payload) {
   // OpenAI: { data: [{id}] }; Ollama: { models: [{name}] }
-  if (Array.isArray(payload)) return payload.map((m) => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean);
-  if (payload && Array.isArray(payload.data)) return payload.data.map((m) => m.id || m.name).filter(Boolean);
-  if (payload && Array.isArray(payload.models)) return payload.models.map((m) => m.id || m.name).filter(Boolean);
+  if (Array.isArray(payload)) return payload.map((m) => (typeof m === 'string' ? m : m && (m.id || m.name))).filter(Boolean);
+  if (payload && Array.isArray(payload.data)) return payload.data.map((m) => m && (m.id || m.name)).filter(Boolean);
+  if (payload && Array.isArray(payload.models)) return payload.models.map((m) => m && (m.id || m.name)).filter(Boolean);
   return [];
 }
 
@@ -198,40 +176,28 @@ function extractSSEDelta(line) {
   } catch (e) { return ''; }
 }
 
-function measureOpenAIStream(base, modelId, provider, { headers, timeout, proxy, insecureSkipVerify }) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(`${base}/v1/chat/completions`);
-    const mod = u.protocol === 'http:' ? http : https;
-    const opts = { method: 'POST', headers, timeout };
-    if (mod === https && insecureSkipVerify) opts.rejectUnauthorized = false;
-    const agent = getProxyAgent(proxy, insecureSkipVerify);
-    if (agent) opts.agent = agent;
-    const started = Date.now();
-    let firstTokenAt = 0, chars = 0, pending = '';
-    const req = mod.request(u, opts, (res) => {
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        res.resume(); const err = new Error(`HTTP ${res.statusCode}`); err.statusCode = res.statusCode; reject(err); return;
-      }
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => {
-        pending += chunk;
-        const lines = pending.split(/\r?\n/); pending = lines.pop() || '';
-        for (const line of lines) {
-          const delta = extractSSEDelta(line);
-          if (delta) { if (!firstTokenAt) firstTokenAt = Date.now(); chars += delta.length; }
-        }
-      });
-      res.on('end', () => {
-        const ended = Date.now();
-        const generationMs = firstTokenAt ? Math.max(1, ended - firstTokenAt) : 0;
-        resolve({ firstTokenMs: firstTokenAt ? firstTokenAt - started : null, throughputTokensPerSec: generationMs ? Number(((chars / 4) / (generationMs / 1000)).toFixed(2)) : null, outputChars: chars });
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('流式探测超时')));
-    req.on('error', reject);
-    req.write(JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'Reply with pong.' }], max_tokens: 16, stream: true }));
-    req.end();
+async function measureOpenAIStream(base, modelId, provider, { headers, timeout, proxy, insecureSkipVerify, signal }) {
+  const started = Date.now();
+  let firstTokenAt = 0, chars = 0, pending = '';
+  const consume = (line) => {
+    const delta = extractSSEDelta(line);
+    if (delta) { if (!firstTokenAt) firstTokenAt = Date.now(); chars += delta.length; }
+  };
+  const res = await requestRaw(endpoint(base, '/v1/chat/completions'), {
+    method: 'POST', headers, timeout, signal, insecureSkipVerify, agent: getProxyAgent(proxy, insecureSkipVerify),
+    body: JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'Reply with pong.' }], max_tokens: 16, stream: true }),
+    onChunk(chunk) {
+      pending += chunk;
+      const lines = pending.split(/\r?\n/); pending = lines.pop() || '';
+      if (pending.length > 1024 * 1024) throw new Error('流式响应过大');
+      lines.forEach(consume);
+    }
   });
+  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`HTTP ${res.statusCode}`);
+  consume(pending);
+  if (!firstTokenAt) throw new Error('流式响应未包含有效内容');
+  const generationMs = Math.max(1, Date.now() - firstTokenAt);
+  return { firstTokenMs: firstTokenAt - started, throughputTokensPerSec: Number(((chars / 4) / (generationMs / 1000)).toFixed(2)), outputChars: chars };
 }
 
 function providerHeaders(provider) {
@@ -279,10 +245,10 @@ function assertProbeResponse(payload, provider) {
 function buildProbeRequest(base, modelId, provider) {
   const mode = String((provider && provider.probeMode) || 'chat');
   if (mode === 'embeddings') {
-    return { url: `${base}/v1/embeddings`, body: JSON.stringify({ model: modelId, input: 'ping' }) };
+    return { url: endpoint(base, '/v1/embeddings'), body: JSON.stringify({ model: modelId, input: 'ping' }) };
   }
   if (mode === 'completions') {
-    return { url: `${base}/v1/completions`, body: JSON.stringify({ model: modelId, prompt: 'ping', max_tokens: 1 }) };
+    return { url: endpoint(base, '/v1/completions'), body: JSON.stringify({ model: modelId, prompt: 'ping', max_tokens: 1 }) };
   }
   if (mode === 'custom') {
     const p = String(provider.probePath || '/v1/chat/completions');
@@ -291,10 +257,10 @@ function buildProbeRequest(base, modelId, provider) {
     if (!body) body = JSON.stringify({ model: '{{model}}', messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 });
     // 函数替换，避免模型名里的引号、$ 破坏 JSON
     body = body.replace(/\{\{\s*model\s*\}\}/g, () => JSON.stringify(String(modelId)).slice(1, -1));
-    return { url: `${base}${path}`, body };
+    return { url: endpoint(base, path), body };
   }
   return {
-    url: `${base}/v1/chat/completions`,
+    url: endpoint(base, '/v1/chat/completions'),
     body: JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false })
   };
 }
@@ -328,7 +294,8 @@ async function detect(provider, opts = {}) {
   const proxy = resolveProxy(provider, g);
   const probeMode = String(provider.probeMode || 'chat');
   const probeConcurrency = Math.max(1, Math.floor(num(opts.probeConcurrency, g.probeConcurrency) || DEFAULT_PROBE_CONCURRENCY));
-  const probeJitterMs = Math.max(0, Math.floor(num(opts.probeJitterMs, g.probeJitterMs) || DEFAULT_PROBE_JITTER_MS));
+  const jitter = opts.probeJitterMs ?? g.probeJitterMs ?? DEFAULT_PROBE_JITTER_MS;
+  const probeJitterMs = Math.max(0, Math.floor(Number(jitter) || 0));
   const probeRotate = opts.probeRotate !== undefined ? Boolean(opts.probeRotate) : g.probeRotate !== false;
   const tlsSkip = provider.insecureSkipVerify === true ? true
     : provider.insecureSkipVerify === false ? false : Boolean(g.insecureSkipVerify);
@@ -358,15 +325,15 @@ async function detect(provider, opts = {}) {
   let models = [];
   let cursor = 0;
   const modelsPath = String(provider.modelsPath || '/v1/models');
-  const modelsUrl = `${base}${modelsPath.startsWith('/') ? modelsPath : '/' + modelsPath}`;
-  logger.info(`${tag} 检测开始 → GET ${modelsUrl}${proxy ? `（经代理 ${proxy}）` : ''}`);
+  const modelsUrl = endpoint(base, modelsPath);
+  logger.info(`${tag} 检测开始 → GET ${modelsUrl}${proxy ? '（经代理）' : ''}`);
   try {
-    const payload = await fetchWithRetry(modelsUrl, { headers, timeout: requestTimeout, proxy, insecureSkipVerify: tlsSkip },
+    const payload = await fetchWithRetry(modelsUrl, { headers, timeout: requestTimeout, proxy, insecureSkipVerify: tlsSkip, signal: opts.signal },
       { retries, tag, what: '连接' });
     result.latency = Date.now() - t0;
     const fmt = Array.isArray(payload) ? 'array' : (payload && payload.data ? 'openai' : (payload && payload.models ? 'ollama' : 'unknown'));
     // 上游模型列表顺序可能抖动，先稳定排序再截取 probeLimit，避免每轮探测子集变化造成误报。
-    const allModels = extractModelIds(payload).sort((a, b) => String(a).localeCompare(String(b)));
+    const allModels = [...new Set(extractModelIds(payload).map(String))].sort((a, b) => String(a).localeCompare(String(b)));
     models = filterIgnoredModels(allModels, provider.modelIgnorePattern);
     if (models.length !== allModels.length) logger.info(`${tag} 模型忽略规则已排除 ${allModels.length - models.length} 个模型`);
     // 轮询覆盖：超出上限时按游标旋转，本轮探测不同子集，多轮覆盖全量（游标由主进程回写）。
@@ -398,9 +365,9 @@ async function detect(provider, opts = {}) {
   // 可选配额端点：失败不影响服务健康状态，仅记录日志；字段路径兼容嵌套 JSON。
   if (String(provider.quotaPath || '').trim()) {
     const qp = String(provider.quotaPath).trim();
-    const quotaUrl = `${base}${qp.startsWith('/') ? qp : '/' + qp}`;
+    const quotaUrl = endpoint(base, qp);
     try {
-      const quotaPayload = await fetchWithRetry(quotaUrl, { headers, timeout: requestTimeout, proxy, insecureSkipVerify: tlsSkip },
+      const quotaPayload = await fetchWithRetry(quotaUrl, { headers, timeout: requestTimeout, proxy, insecureSkipVerify: tlsSkip, signal: opts.signal },
         { retries, tag, what: '配额查询' });
       const value = Number(valueAtPath(quotaPayload, provider.quotaValuePath || 'remaining'));
       if (Number.isFinite(value)) {
@@ -441,38 +408,35 @@ async function detect(provider, opts = {}) {
   const t1 = Date.now();
   const probeOne = async (id) => {
     const ts = Date.now();
-    try {
-      const configured = Array.isArray(provider.capabilityModes) ? provider.capabilityModes : [];
-      const modes = configured.length ? configured : [probeMode];
-      const capabilities = {};
-      for (const mode of modes) {
+    const configured = Array.isArray(provider.capabilityModes) ? provider.capabilityModes : [];
+    const modes = configured.length ? configured : [probeMode];
+    const capabilities = {}, failures = [];
+    let code = 200;
+    const failedCodes = [];
+    for (const mode of modes) {
+      if (opts.signal && opts.signal.aborted) throw new Error('检测已取消');
+      try {
         const { url, body } = buildProbeRequest(base, id, { ...provider, probeMode: mode });
-        const payload = await fetchWithRetry(url, { method: 'POST', headers, body, timeout: probeTimeout, proxy, insecureSkipVerify: tlsSkip },
+        const payload = await fetchWithRetry(url, { method: 'POST', headers, body, timeout: probeTimeout, proxy, insecureSkipVerify: tlsSkip, signal: opts.signal },
           { retries, tag, what: `探测 [${id}/${mode}]` });
         assertProbeResponse(payload, provider);
         capabilities[mode] = true;
+      } catch (e) {
+        code = Number(e.statusCode) || 0;
+        // Reachability compatibility is opt-in and must never bypass a response assertion.
+        const routed = provider.probePolicy === 'reachable' && (!provider.assertType || provider.assertType === 'none')
+          && [400, 413, 422].includes(code) && !/quota|credit|balance|billing|余额|额度/i.test(JSON.stringify(e.apiError || e.responseBody || ''));
+        capabilities[mode] = routed;
+        if (!routed) {
+          const reason = code === 404 ? '模型不存在（HTTP 404）' : [401, 403].includes(code) ? `鉴权失败或无权限（HTTP ${code}）`
+            : code === 429 ? '请求速率受限（HTTP 429）' : e.apiError?.message ? `HTTP ${code}: ${String(e.apiError.message).slice(0, 160)}` : e.message;
+          failures.push(`${mode}: ${reason}`); failedCodes.push(code);
+        }
       }
-      logger.info(`${tag} 探测 [${id}] → 可用（HTTP 200，${Date.now() - ts} ms）`);
-      return { id, ok: true, note: '', code: 200, latencyMs: Date.now() - ts, capabilities };
-    } catch (e) {
-      const msg = String(e.message || e);
-      const codeMatch = /^HTTP (\d{3})\b/.exec(msg);
-      const code = codeMatch ? Number(codeMatch[1]) : 0;
-      // 400/413/422：请求已路由到模型但参数被拒 => 服务可用；404 = 模型不存在，401/403 = 鉴权失败
-      if (/^HTTP (400|413|422)\b/.test(msg)) {
-        logger.info(`${tag} 探测 [${id}] → 可用（${msg}，参数被拒但路由可达，${Date.now() - ts} ms）`);
-        return { id, ok: true, note: msg, code, latencyMs: Date.now() - ts };
-      }
-      let reason;
-      if (/^HTTP 404\b/.test(msg)) reason = '模型不存在（HTTP 404）';
-      else if (/^HTTP 40[13]\b/.test(msg)) reason = '鉴权失败或无权限（' + msg + '）';
-      else if (/^HTTP 429\b/.test(msg)) reason = '请求速率受限（HTTP 429）';
-      else if (/^HTTP 5\d\d\b/.test(msg)) reason = '服务端错误（' + msg + '）';
-      else if (/超时/.test(msg)) reason = '探测请求超时';
-      else reason = msg;
-      logger.warn(`${tag} 探测 [${id}] → 不可用（${reason}，${Date.now() - ts} ms）`);
-      return { id, ok: false, note: reason, code, latencyMs: Date.now() - ts };
     }
+    const ok = !failures.length;
+    logger[ok ? 'info' : 'warn'](`${tag} 探测 [${id}] → ${ok ? '可用' : '不可用'}（${Date.now() - ts} ms）`);
+    return { id, ok, note: failures.join('；'), code: failedCodes.length && failedCodes.every((n) => [401, 403].includes(n)) ? 401 : failedCodes[0] || code, latencyMs: Date.now() - ts, capabilities };
   };
 
   const settled = await mapPool(probe, probeConcurrency, (id) => probeOne(id), probeJitterMs);
@@ -498,7 +462,7 @@ async function detect(provider, opts = {}) {
   // 可选的 OpenAI 兼容流式性能探测，只选一个已验证模型，避免成倍放大请求量。
   if (provider.measureStreaming && result.modelsAvailable.length) {
     try {
-      const metrics = await measureOpenAIStream(base, result.modelsAvailable[0], provider, { headers, timeout: probeTimeout, proxy, insecureSkipVerify: tlsSkip });
+      const metrics = await measureOpenAIStream(base, result.modelsAvailable[0], provider, { headers, timeout: probeTimeout, proxy, insecureSkipVerify: tlsSkip, signal: opts.signal });
       result.firstTokenMs = metrics.firstTokenMs;
       result.throughputTokensPerSec = metrics.throughputTokensPerSec;
       logger.info(`${tag} 流式性能：首 Token ${metrics.firstTokenMs ?? '—'} ms，吞吐 ${metrics.throughputTokensPerSec ?? '—'} token/s`);

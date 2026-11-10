@@ -23,10 +23,15 @@ function register(ctx) {
     db.global = normalizeGlobal({ ...db.global, ...safePatch });
     const saved = ctx.persist();
     if (!saved.ok) { db.global = before; return saved; }
-    ctx.scheduler.setConcurrency(db.global.concurrency || 4);
-    ctx.logger.configure(db.global);
-    ctx.applyLoginItem(db.global);
-    ctx.registerHotkey();
+    const affected = {
+      weixinWebhook: 'weixin', qqWebhook: 'qq', qqToken: 'qq', qqTarget: 'qq', qqTargetType: 'qq',
+      dingtalkWebhook: 'dingtalk', dingtalkSecret: 'dingtalk', telegramToken: 'telegram', telegramChatId: 'telegram',
+      telegramApiBase: 'telegram', feishuWebhook: 'feishu', feishuSecret: 'feishu', slackWebhook: 'slack',
+      serverchanKey: 'serverchan', customWebhook: 'custom', customHeaders: 'custom', customTemplate: 'custom'
+    };
+    const channels = new Set(Object.keys(safePatch).filter((k) => before[k] !== db.global[k]).map((k) => affected[k]).filter(Boolean));
+    if (channels.size) ctx.notifier.resetHealth([...channels]);
+    ctx.applyGlobalConfig();
     ctx.logger.info('全局配置已更新');
     ctx.send('state-changed', ctx.publicState());
     return { ok: true };
@@ -44,13 +49,14 @@ function register(ctx) {
     if (!saved.ok) { db.global = before; return saved; }
     // 通道凭据被清空后，旧的成功/失败记录不再代表当前配置，一并清掉健康状态
     const AFFECTED = {
-      weixinWebhook: ['weixin'], qqWebhook: ['qq'], dingtalkWebhook: ['dingtalk'],
-      telegramToken: ['telegram'], feishuWebhook: ['feishu'], slackWebhook: ['slack'],
-      serverchanKey: ['serverchan'], customWebhook: ['custom']
+      weixinWebhook: ['weixin'], qqWebhook: ['qq'], qqToken: ['qq'], dingtalkWebhook: ['dingtalk'], dingtalkSecret: ['dingtalk'],
+      telegramToken: ['telegram'], feishuWebhook: ['feishu'], feishuSecret: ['feishu'], slackWebhook: ['slack'],
+      serverchanKey: ['serverchan'], customWebhook: ['custom'], customHeaders: ['custom']
     };
     const stale = new Set();
     for (const k of list) for (const ch of AFFECTED[k] || []) stale.add(ch);
     if (stale.size) ctx.notifier.resetHealth([...stale]);
+    ctx.applyGlobalConfig();
     ctx.logger.info(`[配置] 已清除 ${list.length} 项敏感配置（${list.join(', ')}）`);
     ctx.send('state-changed', ctx.publicState());
     return { ok: true };

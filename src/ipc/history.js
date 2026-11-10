@@ -8,13 +8,21 @@ const fs = require('fs');
 const report = require('../report');
 
 function register(ctx) {
-  ipcMain.handle('history:summary', async (e, { hours, providerId } = {}) => {
-    try { return { ok: true, ...(await ctx.history.summarize(ctx.DATA_DIR, { hours: Number(hours) || 24, providerId })) }; }
+  ipcMain.handle('history:slo', async (e, { providerId, includeHistorical = false } = {}) => {
+    try {
+      const db = ctx.getDb(), days = db.global.sloWindowDays || 30;
+      return { ok: true, windowDays: days, ...(await ctx.history.summarize(ctx.DATA_DIR,
+        { hours: days * 24, providerId, includeHistorical: includeHistorical === true, providers: db.providers, sloTarget: db.global.sloTarget })) };
+    } catch (err) { return { ok: false, error: err.message }; }
+  });
+
+  ipcMain.handle('history:summary', async (e, { hours, providerId, includeHistorical = false } = {}) => {
+    try { return { ok: true, ...(await ctx.history.summarize(ctx.DATA_DIR, { hours: Number(hours) || 24, providerId, includeHistorical: includeHistorical === true, providers: ctx.getDb().providers, sloTarget: ctx.getDb().global.sloTarget })) }; }
     catch (err) { return { ok: false, error: err.message }; }
   });
 
-  ipcMain.handle('history:series', async (e, { hours, providerId, buckets } = {}) => {
-    try { return { ok: true, ...(await ctx.history.series(ctx.DATA_DIR, { hours: Number(hours) || 24, providerId, buckets: Number(buckets) || 48 })) }; }
+  ipcMain.handle('history:series', async (e, { hours, providerId, buckets, includeHistorical = false } = {}) => {
+    try { return { ok: true, ...(await ctx.history.series(ctx.DATA_DIR, { hours: Number(hours) || 24, providerId, providers: ctx.getDb().providers, includeHistorical: includeHistorical === true, buckets: Number(buckets) || 48 })) }; }
     catch (err) { return { ok: false, error: err.message }; }
   });
 
@@ -24,9 +32,9 @@ function register(ctx) {
     catch (err) { return { ok: false, error: err.message }; }
   });
 
-  ipcMain.handle('history:exportCSV', async (e, { hours, providerId } = {}) => {
+  ipcMain.handle('history:exportCSV', async (e, { hours, providerId, includeHistorical = false } = {}) => {
     try {
-      const content = await ctx.history.exportCSV(ctx.DATA_DIR, { hours: Number(hours) || 24, providerId });
+      const content = await ctx.history.exportCSV(ctx.DATA_DIR, { hours: Number(hours) || 24, providerId, providers: ctx.getDb().providers, includeHistorical: includeHistorical === true });
       const r = await dialog.showSaveDialog(ctx.win(), {
         title: '导出历史记录',
         defaultPath: `aipm-history-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -39,8 +47,8 @@ function register(ctx) {
     } catch (err) { return { ok: false, error: err.message }; }
   });
 
-  ipcMain.handle('history:prune', (e, days) => {
-    try { return { ok: true, removed: ctx.history.prune(ctx.DATA_DIR, Number(days) || 30) }; }
+  ipcMain.handle('history:prune', async (e, days) => {
+    try { return { ok: true, removed: await ctx.history.prune(ctx.DATA_DIR, Number(days) || 90) }; }
     catch (err) { return { ok: false, error: err.message }; }
   });
 
@@ -50,9 +58,9 @@ function register(ctx) {
   });
 
   // ---------- 状态报告导出 ----------
-  ipcMain.handle('report:export', async (e, { format = 'html', hours = 24 } = {}) => {
+  ipcMain.handle('report:export', async (e, { format = 'html', hours = 24, includeHistorical = false } = {}) => {
     try {
-      const sum = await ctx.history.summarize(ctx.DATA_DIR, { hours: Number(hours) || 24 });
+      const sum = await ctx.history.summarize(ctx.DATA_DIR, { hours: Number(hours) || 24, includeHistorical: includeHistorical === true, providers: ctx.getDb().providers, sloTarget: ctx.getDb().global.sloTarget });
       const defExt = format === 'csv' ? 'csv' : 'html';
       const r = await dialog.showSaveDialog(ctx.win(), {
         title: '导出状态报告',
