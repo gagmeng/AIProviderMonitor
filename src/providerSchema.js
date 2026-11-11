@@ -157,6 +157,15 @@ function normalizeProvider(p) {
 
 const MERGE_SKIP = new Set(['id', ...RUNTIME_FIELDS]);
 
+/** Preserve the distinction between absent fields and explicit default values. */
+function providerConfigPatch(raw) {
+  const normalized = normalizeProvider(raw), patch = {};
+  for (const key of Object.keys(raw || {})) {
+    if (!MERGE_SKIP.has(key) && Object.hasOwn(normalized, key)) patch[key] = normalized[key];
+  }
+  return patch;
+}
+
 /**
  * 合并：incoming 的配置字段覆盖 exist（apiKey 为空不覆盖、运行态不碰）。
  * 返回 true 表示至少一个字段发生变化。
@@ -175,4 +184,4 @@ function mergeProvider(exist, incoming) {
   return changed;
 }
 
-module.exports = { RUNTIME_FIELDS, freshRuntime, boolVal, normalizeUrlKey, cleanUrl, normalizeProvider, mergeProvider, validateProviderConfig, ensureUniqueProviderIds, newNumericId, NOTIFY_CHANNELS };
+module.exports = { RUNTIME_FIELDS, freshRuntime, boolVal, normalizeUrlKey, cleanUrl, normalizeProvider, providerConfigPatch, mergeProvider, validateProviderConfig, ensureUniqueProviderIds, newNumericId, NOTIFY_CHANNELS };

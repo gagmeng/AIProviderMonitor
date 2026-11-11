@@ -1,4 +1,5 @@
 'use strict';
+const { redactText, redactUrl } = require('./redact');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -141,7 +142,7 @@ function noteResult(channel, ok, err) {
   } else {
     h.fails++;
     h.lastFailAt = Date.now();
-    h.lastError = String((err && err.message) || err || '').slice(0, 200);
+    h.lastError = redactText((err && err.message) || err || '').slice(0, 200);
     if (h.fails === 3) logger.error(`[自检] 通知通道「${CHANNEL_LABEL[channel] || channel}」连续失败 ${h.fails} 次，请检查配置与网络`);
     // 连续失败只有日志一行，不看界面永远不知道「告警发不出去」。
     // 首次跨过 3 次以及之后每多 5 次失败时回调主进程，转成未读告警 + 托盘气泡。
@@ -197,7 +198,7 @@ function buildModelChangeText(provider, prev, next, extra = {}) {
   if (totalChanged && !added.length && !removed.length) lines.push(`模型清单发生变化（总数 ${prev.modelsTotal} → ${next.modelsTotal}）`);
   if (statusChanged) lines.push(`状态变化：${prevStatus} → ${statusText(next.status)}`);
   lines.push(`时间：${new Date().toLocaleString('zh-CN')}`);
-  return lines.join('\n');
+  return redactText(lines.join('\n'));
 }
 
 /** 故障/恢复类告警文案 */
@@ -208,12 +209,12 @@ function buildAlertText(provider, alert) {
     : alert.kind === 'latency' ? '【AI Provider 延迟劣化】' : '【AI Provider 服务异常】';
   lines.push(head);
   lines.push(`服务商：${fmtProvider(provider)}`);
-  lines.push(`地址：${provider.url || '—'}`);
+  lines.push(`地址：${redactUrl(provider.url) || '—'}`);
   lines.push(`当前状态：${statusText(provider.status)}`);
   lines.push(`说明：${alert.reason}`);
   if (provider.latency != null) lines.push(`延迟：${provider.latency} ms`);
   lines.push(`时间：${new Date().toLocaleString('zh-CN')}`);
-  return lines.join('\n');
+  return redactText(lines.join('\n'));
 }
 
 // ---------- 各通道实现 ----------
@@ -320,6 +321,7 @@ async function sendServerChan(globalCfg, text, ctx = {}) {
  * 模板为空时退化为 { "text": "..." }
  */
 async function sendCustom(globalCfg, text, ctx = {}) {
+  text = redactText(text);
   const url = String(globalCfg.customWebhook || '').trim();
   if (!url) throw new Error('未配置通用 Webhook 地址');
   const tpl = String(globalCfg.customTemplate || '').trim();
@@ -330,7 +332,7 @@ async function sendCustom(globalCfg, text, ctx = {}) {
       .replace(/\{\{\s*text\s*\}\}/g, jsonEsc(text))
       .replace(/\{\{\s*name\s*\}\}/g, jsonEsc(ctx.name || ''))
       .replace(/\{\{\s*status\s*\}\}/g, jsonEsc(ctx.status || ''))
-      .replace(/\{\{\s*url\s*\}\}/g, jsonEsc(ctx.url || ''))
+      .replace(/\{\{\s*url\s*\}\}/g, jsonEsc(redactUrl(ctx.url)))
       .replace(/\{\{\s*time\s*\}\}/g, jsonEsc(new Date().toLocaleString('zh-CN')));
     // 校验模板渲染后仍是合法 JSON，避免把坏请求发出去
     try { JSON.parse(body); } catch (e) { throw new Error('通用 Webhook 模板渲染后不是合法 JSON'); }
@@ -377,10 +379,12 @@ function channelEnabled(globalCfg, ch) {
 
 /** 向所有已启用通道广播一段文本；任一通道失败只记日志不影响其它 */
 async function broadcast(globalCfg, text, ctx = {}) {
+  text = redactText(text);
   const jobs = [], eligible = [];
   const routes = ctx.provider && Array.isArray(ctx.provider.notifyChannels) ? ctx.provider.notifyChannels : [];
   for (const ch of CHANNELS) {
     if (routes.length && !routes.includes(ch)) continue;
+    if (Array.isArray(ctx.targets) && !ctx.targets.includes(ch)) continue;
     if (!channelEnabled(globalCfg, ch)) continue;
     eligible.push(ch);
     if ((ctx.delivered || []).includes(ch)) continue;
@@ -399,13 +403,13 @@ async function broadcast(globalCfg, text, ctx = {}) {
 /** 模型变化时推送（兼容旧签名） */
 async function notifyModelChange(globalCfg, provider, prev, next, extra = {}) {
   const text = buildModelChangeText(provider, prev, next, extra);
-  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider, delivered: extra.delivered || [] });
+  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: redactUrl(provider.url), provider, delivered: extra.delivered || [], targets: extra.targets });
 }
 
 /** 故障/恢复告警推送 */
 async function notifyAlert(globalCfg, provider, alert, extra = {}) {
   const text = buildAlertText(provider, alert);
-  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: provider.url, provider, delivered: extra.delivered || [] });
+  return broadcast(globalCfg, text, { name: provider.name, status: provider.status, url: redactUrl(provider.url), provider, delivered: extra.delivered || [], targets: extra.targets });
 }
 
 async function sendTest(globalCfg, channel) {

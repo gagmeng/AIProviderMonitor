@@ -3,7 +3,7 @@ const assert = require('assert/strict');
 const fs = require('fs'), os = require('os'), path = require('path'), http = require('http'), vm = require('vm');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'aipm-regress-'));
 process.env.AIPM_DATA_DIR = TMP;
-const { detect, fetchJSON, resolveProxy, measureOpenAIStream } = require('../src/detector');
+const { detect, fetchJSON, resolveProxy, measureOpenAIStream, validateProbeResponse } = require('../src/detector');
 const notifier = require('../src/notifier');
 const { Scheduler } = require('../src/scheduler');
 const history = require('../src/history'), alerts = require('../src/alerts');
@@ -332,6 +332,200 @@ test('mailer: TLS rejects untrusted certificate by default and accepts explicit 
     await sendMail({ ...config, smtpInsecureSkipVerify: true }, { subject: 'explicit TLS override', html: 'TLS_SMTP_FIXTURE' });
     assert.equal(smtp.messages.length, 1); assert.match(smtp.messages[0].body, /TLS_SMTP_FIXTURE/);
   } finally { smtp.close(); }
+});
+
+test('D01: strict inference requires protocol results and rejects HTTP 200 business errors', async () => {
+  const failures = [{ error: { message: 'quota exhausted' } }, {}, { choices: [] }, { choices: [{ message: { content: '' } }] }, null];
+  for (const payload of failures) assert.throws(() => validateProbeResponse(payload, 'chat'), /业务错误|无有效/);
+  for (const payload of [{ data: [] }, { data: [{ embedding: [] }] }, { data: [{ embedding: [null] }] }, { data: [{ embedding: 'not-base64' }] }]) {
+    assert.throws(() => validateProbeResponse(payload, 'embeddings'), /无有效/);
+  }
+  for (const payload of [{ choices: [{ message: { content: 'pong' } }] }, { choices: [{ message: { tool_calls: [{ function: { name: 'ping' } }] } }] },
+    { choices: [{ message: { content: '', reasoning_content: 'thinking' } }] }, { choices: [{ message: { content: '' }, finish_reason: 'length' }] }]) {
+    assert.doesNotThrow(() => validateProbeResponse(payload, 'chat'));
+  }
+  assert.doesNotThrow(() => validateProbeResponse({ choices: [{ text: 'pong' }] }, 'completions'));
+  assert.doesNotThrow(() => validateProbeResponse({ data: [{ embedding: [0, 0.5, -0.3] }] }, 'embeddings'));
+  assert.doesNotThrow(() => validateProbeResponse({ data: [{ embedding: 'AACAPw==' }] }, 'embeddings'));
+  assert.doesNotThrow(() => validateProbeResponse({ response: 'pong' }, 'custom'));
+  assert.doesNotThrow(() => validateProbeResponse({ done: true }, 'custom', { assertType: 'jsonPath', assertValue: 'done' }));
+  assert.doesNotThrow(() => validateProbeResponse([{ done: true }], 'custom', { assertType: 'jsonPath', assertValue: '0.done' }));
+  assert.throws(() => validateProbeResponse({ done: false }, 'custom', { assertType: 'jsonPath', assertValue: 'done' }), /断言失败/);
+  assert.throws(() => validateProbeResponse({ ok: false }, 'chat', { probePolicy: 'reachable' }), /业务错误/);
+  let payload = {};
+  const srv = await server((req, res) => { req.resume(); req.on('end', () => res.end(JSON.stringify(req.url.endsWith('/models') ? { data: [{ id: 'm' }] } : payload))); });
+  try {
+    for (const value of [{ error: { message: 'bad key' } }, {}, { choices: [] }]) {
+      payload = value;
+      const r = await detect({ id: 101, name: 'D01', url: srv.url }, { retries: 0, probeJitterMs: 0 });
+      assert.equal(r.status, 'degraded'); assert.deepEqual(r.modelsAvailable, []); assert.deepEqual(r.modelsUnavailable, ['m']);
+    }
+    payload = { choices: [{ message: { content: 'pong' } }] };
+    assert.equal((await detect({ id: 101, name: 'D01', url: srv.url }, { retries: 0, probeJitterMs: 0 })).status, 'up');
+  } finally { srv.close(); }
+});
+
+test('D02: in-flight configuration edits discard old results; metadata edits remain valid', async () => {
+  const { detectionKey } = require('../src/detectionConfig');
+  const base = normalizeProvider({ id: 102, name: 'D02', url: 'http://old', capabilityModes: ['chat'] });
+  const mutations = [
+    (p) => { p.url = 'http://new'; }, (p) => { p.apiKey = 'NEW_FAKE'; }, (p) => { p.assertType = 'contains'; p.assertValue = 'new'; },
+    (p) => { p.useProxy = false; }, (p) => { p.capabilityModes.push('embeddings'); }, (p, g) => { g.insecureSkipVerify = true; }
+  ];
+  for (const mutate of mutations) {
+    const p = structuredClone(base), g = { retries: 0 }; let release, input;
+    const scheduler = new Scheduler({ detector: (snapshot) => { input = snapshot; return new Promise((resolve) => { release = resolve; }); } });
+    scheduler.getProvider = () => p; scheduler.getGlobal = () => g; let accepted = 0;
+    scheduler.on('result', () => accepted++);
+    try {
+      const check = scheduler.runCheck(p.id), key = detectionKey(p, g);
+      mutate(p, g); assert.notEqual(detectionKey(p, g), key);
+      assert.deepEqual(input.capabilityModes, base.capabilityModes, 'nested detector input is a snapshot');
+      release({ status: 'up' }); assert.equal(await check, null); await turn();
+      assert.equal(accepted, 0); assert.equal(scheduler.circuits.size, 0);
+    } finally { scheduler.stop(); }
+  }
+  const p = structuredClone(base); let release;
+  const scheduler = new Scheduler({ detector: () => new Promise((resolve) => { release = resolve; }) });
+  scheduler.getProvider = () => p; let accepted = 0; scheduler.on('result', () => accepted++);
+  try {
+    const check = scheduler.runCheck(p.id); p.note = 'changed'; p.name = 'renamed'; p.intervalSec = 120;
+    release({ status: 'up' }); assert.equal((await check).status, 'up'); assert.equal(accepted, 1);
+  } finally { scheduler.stop(); }
+});
+
+test('D02: refresh aborts the old request and schedules one fresh check after unwinding', async () => {
+  const p = normalizeProvider({ id: 103, name: 'refresh', url: 'http://old' }); let release, signal;
+  const scheduler = new Scheduler({ detector: (snapshot, opts) => { signal = opts.signal; return new Promise((resolve) => { release = resolve; }); } });
+  scheduler.getProvider = () => p;
+  try {
+    const check = scheduler.runCheck(p.id); p.url = 'http://new'; scheduler.refresh(p);
+    assert.equal(signal.aborted, true); assert.equal(scheduler.timers.size, 0);
+    release({ status: 'up' }); await check; await turn();
+    assert.equal(scheduler.timers.size, 1); assert.ok(scheduler.scheduleInfo()[0].dueAt <= Date.now());
+  } finally { scheduler.stop(); }
+});
+
+test('D03: parseable malformed configuration retains the original and creates a recovery copy', () => {
+  const store = require('../src/store');
+  const shapes = [{}, { providers: {} }, { providers: null }, { providers: [null] }, { providers: ['invalid'] },
+    { providers: [[]] }, { providers: [], global: null }, { providers: [], global: [] }, { providers: [], global: 'invalid' }];
+  for (const shape of shapes) {
+    const text = JSON.stringify(shape); fs.writeFileSync(store.DATA_FILE, text);
+    assert.throws(() => store.loadAll(), (err) => err.code === 'CONFIG_PARSE_FAILED');
+    assert.equal(fs.readFileSync(store.DATA_FILE, 'utf8'), text);
+    assert.ok(fs.readdirSync(TMP).some((name) => name.startsWith('providers.json.corrupt-') && fs.readFileSync(path.join(TMP, name), 'utf8') === text));
+  }
+  fs.writeFileSync(store.DATA_FILE, '{"providers":[]}'); assert.deepEqual(store.loadAll().providers, []);
+  fs.unlinkSync(store.DATA_FILE); assert.deepEqual(store.loadAll().providers, []);
+});
+
+test('D07: sparse backup merge preserves every absent setting; explicit defaults still apply', () => {
+  const backup = require('../src/backup'), file = path.join(TMP, 'sparse-backup.json');
+  const p = normalizeProvider({ id: 107, name: 'original', url: 'http://backup', enabled: false, probeMode: 'embeddings',
+    apiKey: 'FAKE_BACKUP_KEY', customHeaders: '{"X-Auth":"FAKE"}', proxyUrl: 'http://local', maintEnabled: true,
+    maintWeekdays: [1, 3], maintDates: '2026-11-10', sloTarget: 99.99, notifyChannels: ['qq'], capabilityModes: ['embeddings'] });
+  p.status = 'up'; p.checkedAt = 123; p.modelBaseline = ['original'];
+  const before = structuredClone(p), db = { global: { sloTarget: 99.9 }, providers: [p] };
+  fs.writeFileSync(file, JSON.stringify({ providers: [{ name: 'renamed', url: p.url, apiKey: '', status: 'down', alertRuntime: { inAlarm: true } }] }));
+  assert.equal(backup.restoreFrom(db, file, 'merge').updated, 1); assert.deepEqual(p, { ...before, name: 'renamed' });
+  assert.equal(backup.restoreFrom(db, file, 'merge').skipped, 1);
+  fs.writeFileSync(file, JSON.stringify({ providers: [{ name: p.name, url: p.url, enabled: true, maintEnabled: false,
+    probeMode: 'chat', sloTarget: null, notifyChannels: [], capabilityModes: [], maintWeekdays: [] }, { id: 10701, name: 'new', url: 'http://new' }] }));
+  const r = backup.restoreFrom(db, file, 'merge'); assert.equal(r.updated, 1); assert.equal(r.added, 1);
+  assert.equal(p.enabled, true); assert.equal(p.maintEnabled, false); assert.equal(p.sloTarget, null); assert.deepEqual(p.notifyChannels, []);
+  assert.equal(p.apiKey, before.apiKey); assert.equal(p.status, 'up'); assert.equal(db.providers[1].probeMode, 'chat');
+  assert.equal(db.providers[1].status, 'unknown'); assert.equal(db.providers[1].id, 10701);
+});
+
+test('D08: URL credentials are redacted in exports, notifications and disk/subscriber logs; requests keep them', async () => {
+  const { redactUrl, redactText, urlPatch } = require('../src/redact'), logger = require('../src/logger');
+  const p = normalizeProvider({ name: 'URL credentials', url: 'https://FAKE_USER:FAKE_PASS@example.test/gateway?Api_Key=FAKE_QUERY&region=us&token=FAKE_DUP&token=FAKE_DUP2',
+    modelsPath: '/v1/models?access%5Ftoken=FAKE_MODELS&project=alpha', probePath: '/probe?SIGNATURE=FAKE_PROBE', quotaPath: '/quota?secret=FAKE_QUOTA' });
+  const secret = /FAKE_USER|FAKE_PASS|FAKE_QUERY|FAKE_DUP|FAKE_MODELS|FAKE_PROBE|FAKE_QUOTA/;
+  assert.doesNotMatch(redactUrl(p.url), secret); assert.match(redactUrl(p.url), /region=us/);
+  assert.doesNotMatch(redactText('error GET ' + p.url), secret);
+  assert.equal(urlPatch(redactUrl(p.url).replace('region=us', 'region=cn'), p.url), p.url.replace('region=us', 'region=cn'));
+  assert.equal(urlPatch('https://example.test?token=NEW_VALUE', p.url), 'https://example.test?token=NEW_VALUE');
+  assert.throws(() => urlPatch('https://example.test?token=***', 'https://example.test'), /凭据/);
+  for (const format of ['json', 'csv', 'text']) {
+    const redacted = exportProviders([p], { format }); assert.doesNotMatch(redacted, secret); assert.match(redacted, /region=us/);
+    assert.match(exportProviders([p], { format, withKey: true }), /FAKE_QUERY/);
+  }
+  assert.doesNotMatch(notifier.buildAlertText(p, { kind: 'down', reason: 'failed at ' + p.url }), secret);
+  let line; const unsubscribe = logger.subscribe((item) => { line = item; });
+  try { logger.info('D08: ' + p.url + ' route ' + p.modelsPath); logger.flushSync(); assert.doesNotMatch(line.msg, secret); }
+  finally { unsubscribe(); }
+  for (const file of logger.listFiles()) assert.doesNotMatch(fs.readFileSync(file.path, 'utf8'), secret);
+  const received = [];
+  const srv = await server((req, res) => {
+    let body = ''; req.on('data', (c) => { body += c; }); req.on('end', () => {
+      received.push({ url: req.url, body });
+      res.end(req.url.includes('/models') ? '{"data":[{"id":"m"}]}' : req.url.includes('/hook') ? '{}' : '{"choices":[{"message":{"content":"pong"}}]}');
+    });
+  });
+  try {
+    const r = await detect({ id: 108, name: 'D08', url: srv.url + '?API_key=REQUEST_ONLY&project=alpha' }, { retries: 0, probeJitterMs: 0 });
+    assert.equal(r.status, 'up'); assert.ok(received.filter((x) => !x.url.includes('/hook')).every((x) => x.url.includes('API_key=REQUEST_ONLY') && x.url.includes('project=alpha')));
+    await notifier.sendCustom({ customWebhook: srv.url + '/hook', customTemplate: '{"url":"{{url}}","text":"{{text}}"}' }, 'failure ' + p.url, { url: p.url });
+    assert.doesNotMatch(received.at(-1).body, secret);
+  } finally { srv.close(); }
+});
+
+test('D15: partial recovery cannot block the next incident; channel retries survive restart without duplicate delivery', () => {
+  alerts.resetState();
+  const p = { id: 115, name: 'multi-channel', status: 'down' };
+  const cfg = { alertFailThreshold: 1, alertRecoverNotify: true, notifyWeixinEnabled: true, weixinWebhook: 'http://local', notifyQQEnabled: true, qqWebhook: 'http://local', qqTarget: '1' };
+  const ack = (event, channels, failed = [], complete = false) => alerts.noteDelivery(p, event, { attempted: channels.length + failed.length, delivered: channels, failed, complete });
+  const fault = alerts.evaluate(cfg, p, null).alerts[0]; ack(fault, ['weixin', 'qq'], [], true);
+  p.status = 'up'; const recover = alerts.evaluate(cfg, p, null).alerts[0]; ack(recover, ['weixin'], [{ channel: 'qq' }]);
+  assert.equal(p.alertRuntime.inAlarm, true);
+  alerts.resetState(p.id); alerts.retryPending(p);
+  const retry = alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts[0];
+  assert.equal(retry.eventId, recover.eventId); assert.deepEqual(retry.delivered, ['weixin']);
+  p.status = 'down'; const next = alerts.evaluate(cfg, p, null).alerts[0];
+  assert.equal(next.kind, 'down'); assert.notEqual(next.incidentId, fault.incidentId); assert.notEqual(next.eventId, fault.eventId);
+  assert.deepEqual(next.delivered, []); assert.equal(p.alertRuntime.pending.recover, undefined);
+  ack(next, ['weixin'], [{ channel: 'qq' }]); alerts.resetState(p.id); alerts.retryPending(p);
+  const nextRetry = alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts[0];
+  assert.equal(nextRetry.eventId, next.eventId); assert.deepEqual(nextRetry.delivered, ['weixin']); ack(nextRetry, ['qq'], [], true);
+  ack(recover, ['weixin', 'qq'], [], true); assert.equal(p.alertRuntime.inAlarm, true, 'stale recovery cannot unlatch a new fault');
+  assert.ok(Object.values(p.alertRuntime.channels).every((c) => c.incidentId === next.incidentId && c.kind === 'down'));
+  p.status = 'up'; const lastRecovery = alerts.evaluate(cfg, p, null).alerts[0]; ack(lastRecovery, ['weixin', 'qq'], [], true);
+  ack(fault, ['weixin', 'qq'], [], true);
+  assert.equal(p.alertRuntime.inAlarm, false); assert.equal(alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts.length, 0);
+});
+
+test('D15: newly enabled or rerouted channels receive current state without resending successful channels', () => {
+  alerts.resetState();
+  const p = { id: 116, name: 'routing', status: 'down', notifyChannels: ['weixin'] };
+  const cfg = { alertFailThreshold: 1, notifyWeixinEnabled: true, weixinWebhook: 'http://local', notifyQQEnabled: true, qqWebhook: 'http://local', qqTarget: '1' };
+  const first = alerts.evaluate(cfg, p, null).alerts[0];
+  alerts.noteDelivery(p, first, { complete: true, delivered: ['weixin'], attempted: 1, failed: [] });
+  p.notifyChannels = [];
+  const broadened = alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts[0]; assert.deepEqual(broadened.delivered, ['weixin']);
+  alerts.noteDelivery(p, broadened, { complete: true, delivered: ['qq'], attempted: 1, failed: [] });
+  p.status = 'up'; cfg.notifyQQEnabled = false;
+  const recovery = alerts.evaluate(cfg, p, null).alerts[0];
+  alerts.noteDelivery(p, recovery, { complete: true, delivered: ['weixin'], attempted: 1, failed: [] });
+  assert.equal(alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts.length, 0);
+  cfg.notifyQQEnabled = true; alerts.resetState(p.id);
+  const lateRecovery = alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts[0];
+  assert.equal(lateRecovery.kind, 'recover'); assert.deepEqual(lateRecovery.delivered, ['weixin']);
+  alerts.noteDelivery(p, lateRecovery, { complete: true, delivered: ['qq'], attempted: 1, failed: [] });
+  assert.equal(alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts.length, 0);
+});
+
+test('D15: a legacy partial recovery migrates without replaying successful channels or losing recipients', () => {
+  alerts.resetState();
+  const p = { id: 117, name: 'legacy', status: 'up', alertRuntime: { inAlarm: true, pending: {
+    recover: { kind: 'recover', title: '服务恢复', reason: 'legacy', eventId: 'old-recover', delivered: ['weixin'], attempts: 1, nextRetryAt: 0 }
+  } } };
+  const cfg = { notifyWeixinEnabled: true, weixinWebhook: 'http://local', notifyQQEnabled: true, qqWebhook: 'http://local', qqTarget: '1' };
+  const recovery = alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts[0];
+  assert.deepEqual(recovery.delivered, ['weixin']); assert.equal(recovery.targets, undefined);
+  alerts.noteDelivery(p, recovery, { complete: true, delivered: ['qq'], attempted: 1, failed: [] });
+  assert.equal(p.alertRuntime.inAlarm, false); assert.equal(alerts.evaluate(cfg, p, null, { deliveryOnly: true }).alerts.length, 0);
 });
 
 (async () => {

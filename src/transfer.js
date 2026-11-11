@@ -1,6 +1,7 @@
 'use strict';
 const logger = require('./logger');
 const { normalizeProvider, mergeProvider, normalizeUrlKey, validateProviderConfig, ensureUniqueProviderIds } = require('./providerSchema');
+const { URL_FIELDS, redactUrl, redactValue } = require('./redact');
 
 /**
  * 服务商批量导入/导出模块
@@ -63,7 +64,12 @@ function toText(providers, delimiter = 'tab') {
  * opts: { format: 'json'|'csv'|'text', delimiter?: 'tab'|'comma'|'pipe'|'semicolon', withKey?: boolean }
  */
 function exportProviders(providers, opts = {}) {
-  const list = (providers || []).map((p) => (opts.withKey === true ? p : { ...p, apiKey: '', customHeaders: '', proxyUrl: '' }));
+  const list = (providers || []).map((p) => {
+    if (opts.withKey === true) return p;
+    const out = redactValue({ ...p, apiKey: '', customHeaders: '', proxyUrl: '' });
+    for (const key of URL_FIELDS) if (p[key] !== undefined) out[key] = redactUrl(p[key], { remove: true });
+    return out;
+  });
   let content;
   if (opts.format === 'csv') content = toCSV(list);
   else if (opts.format === 'text') content = toText(list, opts.delimiter);

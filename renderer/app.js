@@ -694,6 +694,16 @@ const fromSecondsUI = (sec) => window.durfmt.fromSeconds(sec);
 
 // ----- API Key 眼睛/复制/清除，及自定义请求头、专用代理的「清除已保存」 -----
 const pmClearState = { apiKey: false, customHeaders: false, proxyUrl: false };
+let providerSession = 0, providerFormRevision = 0, providerKeyRevision = 0, providerTestSequence = 0;
+function providerSessionActive(session, id) {
+  return session === providerSession && id === editingId && $('#providerModal').classList.contains('show');
+}
+function closeProviderModal() { providerSession++; $('#providerModal').classList.remove('show'); }
+function providerFormChanged() {
+  providerFormRevision++; providerTestSequence++;
+  $('#fTestHint').textContent = ''; $('#fTestHint').title = '';
+  $('#fTestConn').disabled = false;
+}
 
 function armClear(btn, armed, armedText) {
   btn.classList.toggle('armed', armed);
@@ -711,22 +721,25 @@ $('#fKeyClear').innerHTML = icon('trash');
 $('#fKeyEye').addEventListener('click', async () => {
   const inp = $('#fKey');
   if (inp.type === 'password') {
-    if (!inp.value && editingId) {
+    const session = providerSession, id = editingId, keyRevision = providerKeyRevision;
+    inp.type = 'text';
+    $('#fKeyEye').innerHTML = icon('eyeOff');
+    if (!inp.value && id && !pmClearState.apiKey) {
       try {
-        const r = await window.aipm.revealKey(editingId);
+        const r = await window.aipm.revealKey(id);
+        if (!providerSessionActive(session, id) || keyRevision !== providerKeyRevision || inp.type !== 'text' || pmClearState.apiKey) return;
         if (r && r.ok && r.apiKey) { inp.value = r.apiKey; inp.dataset.revealed = '1'; }
       } catch (e) { /* 取回失败则仅切换显隐 */ }
     }
-    inp.type = 'text';
-    $('#fKeyEye').innerHTML = icon('eyeOff');
   } else {
+    providerKeyRevision++;
     inp.type = 'password';
     if (inp.dataset.revealed === '1') { inp.value = ''; delete inp.dataset.revealed; }
     $('#fKeyEye').innerHTML = icon('eye');
   }
 });
 // 用户一旦手动编辑，回显内容视为已作主，收起时不再清空
-$('#fKey').addEventListener('input', () => { delete $('#fKey').dataset.revealed; });
+$('#fKey').addEventListener('input', () => { providerKeyRevision++; delete $('#fKey').dataset.revealed; });
 $('#fKeyCopy').addEventListener('click', async () => {
   const v = $('#fKey').value;
   if (v) { await navigator.clipboard.writeText(v); toast(tx('已复制')); return; }
@@ -742,23 +755,29 @@ $('#fKeyCopy').addEventListener('click', async () => {
   toast(tx('请先输入内容再复制'), 'err');
 });
 $('#fKeyClear').addEventListener('click', () => {
+  providerKeyRevision++; providerFormChanged();
   pmClearState.apiKey = !pmClearState.apiKey;
   if (pmClearState.apiKey) $('#fKey').value = '';
   armClear($('#fKeyClear'), pmClearState.apiKey);
   $('#fKey').placeholder = pmClearState.apiKey ? tx('保存时将清除已保存的密钥') : ($('#fKey').dataset.keepPh || 'sk-...');
 });
 $('#fHeadersClear').addEventListener('click', () => {
+  providerFormChanged();
   pmClearState.customHeaders = !pmClearState.customHeaders;
   if (pmClearState.customHeaders) $('#fCustomHeaders').value = '';
   armClear($('#fHeadersClear'), pmClearState.customHeaders);
 });
 $('#fProxyClear').addEventListener('click', () => {
+  providerFormChanged();
   pmClearState.proxyUrl = !pmClearState.proxyUrl;
   if (pmClearState.proxyUrl) $('#fProxyUrl').value = '';
   armClear($('#fProxyClear'), pmClearState.proxyUrl);
 });
 
 function openProviderModal(id = null) {
+  const session = ++providerSession;
+  providerFormRevision++; providerKeyRevision++; providerTestSequence++;
+  $('#fTestConn').disabled = false; $('#pmSave').disabled = false;
   editingId = id;
   $('#pmTitle').textContent = id ? tx('编辑服务商') : tx('新增服务商');
   $('#fError').textContent = '';
@@ -776,6 +795,7 @@ function openProviderModal(id = null) {
   $('#fProxyClear').style.display = p && p.hasProxyUrl ? '' : 'none';
   $('#fName').value = p ? p.name : '';
   $('#fUrl').value = p ? p.url : '';
+  $('#fUrlSecretHint').style.display = p && [p.url, p.modelsPath, p.probePath, p.quotaPath].some((value) => String(value || '').includes('***')) ? '' : 'none';
   $('#fKey').value = '';
   $('#fKey').type = 'password';
   delete $('#fKey').dataset.revealed;
@@ -830,7 +850,7 @@ function openProviderModal(id = null) {
   $('#fTlsVerify').value = !p || p.insecureSkipVerify == null ? 'follow' : p.insecureSkipVerify === true ? 'skip' : 'verify';
   syncProbeCustomVisibility(); updateRequestPreview();
   $('#providerModal').classList.add('show');
-  setTimeout(() => $('#fName').focus(), 120);
+  setTimeout(() => { if (providerSessionActive(session, id)) $('#fName').focus(); }, 120);
 }
 function syncProbeCustomVisibility() {
   const wrap = $('#fProbeCustomWrap');
@@ -861,17 +881,19 @@ function updateRequestPreview() {
 }
 $('#providerModal').addEventListener('input', updateRequestPreview);
 $('#providerModal').addEventListener('change', updateRequestPreview);
+$('#providerModal').addEventListener('input', providerFormChanged);
+$('#providerModal').addEventListener('change', providerFormChanged);
 $('#fProbeMode').addEventListener('change', syncProbeCustomVisibility);
 $('#btnAdd').addEventListener('click', () => openProviderModal());
-$('#pmClose').addEventListener('click', () => $('#providerModal').classList.remove('show'));
-$('#pmCancel').addEventListener('click', () => $('#providerModal').classList.remove('show'));
+$('#pmClose').addEventListener('click', closeProviderModal);
+$('#pmCancel').addEventListener('click', closeProviderModal);
 
 /** 表单 → 主进程 payload（保存与测试连接共用） */
 function collectProviderForm() {
   const data = {
     name: $('#fName').value.trim(),
     url: window.providerTemplates.normalizeBase($('#fUrl').value),
-    apiKey: $('#fKey').value.trim() || undefined,
+    apiKey: $('#fKey').dataset.revealed === '1' ? undefined : $('#fKey').value.trim() || undefined,
     intervalSec: toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value),
     notifyOnModelChange: $('#fNotify').checked,
     note: $('#fNote').value.trim(),
@@ -920,10 +942,15 @@ $('#fTestConn').addEventListener('click', async () => {
   $('#fError').textContent = '';
   const hint = $('#fTestHint');
   const btn = $('#fTestConn');
+  const session = providerSession, id = editingId, revision = providerFormRevision, sequence = ++providerTestSequence;
+  const data = collectProviderForm(), fingerprint = JSON.stringify(data);
+  const active = () => providerSessionActive(session, id) && revision === providerFormRevision
+    && sequence === providerTestSequence && fingerprint === JSON.stringify(collectProviderForm());
   btn.disabled = true;
   hint.textContent = tx('测试中…'); hint.className = 'hint';
   try {
-    const r = await window.aipm.testConnection({ id: editingId, data: collectProviderForm() });
+    const r = await window.aipm.testConnection({ id, data });
+    if (!active()) return;
     if (!r || !r.ok) { hint.textContent = tx('失败: ') + ((r && r.error) || ''); hint.className = 'hint bad'; return; }
     const s = r.result;
     const parts = [statusInfo(s.status).text];
@@ -935,14 +962,16 @@ $('#fTestConn').addEventListener('click', async () => {
     hint.className = 'hint ' + (s.status === 'up' ? 'ok' : 'bad');
     hint.title = (s.sampleFailures || []).join('\n');
   } catch (e) {
+    if (!active()) return;
     hint.textContent = tx('失败: ') + (e.message || e);
     hint.className = 'hint bad';
   } finally {
-    btn.disabled = false;
+    if (providerSessionActive(session, id) && sequence === providerTestSequence) btn.disabled = false;
   }
 });
 
 $('#pmSave').addEventListener('click', async () => {
+  const session = providerSession, id = editingId;
   const name = $('#fName').value.trim();
   let url = $('#fUrl').value.trim();
   const interval = toSecondsUI($('#fInterval').value, $('#fIntervalUnit').value);
@@ -955,19 +984,28 @@ $('#pmSave').addEventListener('click', async () => {
   const data = collectProviderForm();
   data.name = name;
   data.url = url;
-  if (editingId) {
-    const r = await window.aipm.updateProvider(editingId, data);
-    if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
-    toast(tx('已保存'));
-  } else {
-    if (!data.apiKey) data.apiKey = '';
-    const r = await window.aipm.addProvider(data);
-    if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
-    toast(tx('已添加'));
+  $('#pmSave').disabled = true;
+  try {
+    if (id) {
+      const r = await window.aipm.updateProvider(id, data);
+      if (!providerSessionActive(session, id)) return;
+      if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
+      toast(tx('已保存'));
+    } else {
+      if (!data.apiKey) data.apiKey = '';
+      const r = await window.aipm.addProvider(data);
+      if (!providerSessionActive(session, id)) return;
+      if (!r || !r.ok) { $('#fError').textContent = (r && r.error) || tx('保存失败'); return; }
+      toast(tx('已添加'));
+    }
+    closeProviderModal();
+  } catch (e) {
+    if (providerSessionActive(session, id)) $('#fError').textContent = e.message || tx('保存失败');
+  } finally {
+    if (providerSessionActive(session, id)) $('#pmSave').disabled = false;
   }
-  $('#providerModal').classList.remove('show');
 });
-$('#providerModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
+$('#providerModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeProviderModal(); });
 $('#detailModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
 
 // ---------- 详情弹窗 ----------
@@ -2277,6 +2315,7 @@ const modalObserver = new MutationObserver((changes) => {
       if (focusable) focusable.focus();
     } else if (!mask.classList.contains('show') && (change.oldValue || '').split(' ').includes('show')) {
       if (mask.id === 'detailModal') { detailSeq++; detailId = null; }
+      if (mask.id === 'providerModal') providerSession++;
       if (modalFocusOrigin?.isConnected) modalFocusOrigin.focus();
     }
   }
@@ -2285,7 +2324,7 @@ $$('.modal-mask').forEach((mask) => modalObserver.observe(mask, { attributes: tr
 document.addEventListener('keydown', (event) => {
   const modal = $('#confirmModal.show') || $$('.modal-mask.show').at(-1);
   if (!modal) return;
-  if (event.key === 'Escape') { event.preventDefault(); modal.classList.remove('show'); return; }
+  if (event.key === 'Escape') { event.preventDefault(); if (modal.id === 'providerModal') closeProviderModal(); else modal.classList.remove('show'); return; }
   if (event.key === 'Enter' && modal.id === 'providerModal' && event.target.tagName === 'INPUT') { event.preventDefault(); $('#pmSave').click(); return; }
   if (event.key !== 'Tab') return;
   const nodes = $$('button:not(:disabled),input:not(:disabled),textarea,select,summary,[tabindex="0"]', modal).filter((el) => el.getClientRects().length);

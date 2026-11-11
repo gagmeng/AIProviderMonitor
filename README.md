@@ -1,8 +1,8 @@
 # AI Provider Monitor
 
-当前版本：**1.6.0**。开发环境要求 Node.js **22.12+**；桌面运行时使用 Electron **45.2.3**。
+当前版本：**1.6.1**。开发环境要求 Node.js **22.12+**；桌面运行时使用 Electron **45.2.3**。
 
-本次缺陷修复、服务商模板、克隆、SLO 与桌面界面改进见 [v1.6.0 修改摘要与发布说明](RELEASE_NOTES_1.6.0.md)。缺陷修复对照、SLO 定义和测试记录见 [实施与验收说明](IMPLEMENTATION_1.6.0.md)，设计方向见 [桌面界面实施记录](UNSLOP_UI_2026-11-10.md)，各页面交互问题与处理见 [UI 检查记录](UI_REVIEW_2026-11-10.md)。[GitHub 正式版下载](https://github.com/gagmeng/AIProviderMonitor/releases/tag/v1.6.0)。
+本次七项 P1 缺陷修复（检测判定、配置变更、损坏保护、稀疏备份、凭据脱敏、编辑会话隔离、多通道告警交付）见 [v1.6.1 修改摘要与发布说明](RELEASE_NOTES_1.6.1.md)，修复实现与各项验证见 [七项 P1 修复记录](P1_FIXES_1.6.0_2026-11-10.md)，原始复现与剩余 P2/P3 见 [v1.6.0 系统审查](PROJECT_REVIEW_1.6.0_2026-11-10.md)。服务商模板、克隆、SLO 与桌面界面改进见 [v1.6.0 修改摘要与发布说明](RELEASE_NOTES_1.6.0.md)，缺陷修复对照、SLO 定义和测试记录见 [实施与验收说明](IMPLEMENTATION_1.6.0.md)，设计方向见 [桌面界面实施记录](UNSLOP_UI_2026-11-10.md)，各页面交互问题与处理见 [UI 检查记录](UI_REVIEW_2026-11-10.md)。[GitHub 正式版下载](https://github.com/gagmeng/AIProviderMonitor/releases/tag/v1.6.1)。
 
 一款基于 **Electron** 的 AI 服务商（AI Provider）状态与可用模型监控桌面应用。界面采用中性色、清晰的数据层级及浅色/深色主题，支持按服务商自定义周期自动轮循检测连接状态与模型可用性，并在**模型发生变动**时通过微信、QQ、钉钉、Telegram、飞书、Slack、Server酱或自定义 Webhook 推送通知。
 
@@ -217,6 +217,18 @@
 
 通知恢复/模型变动在静默、维护或发送失败后持久保留，按通道记录成功交付，30 秒起退避重试、最大间隔 5 分钟；没有启用通道也不会假定已发送。配置恢复后可自然补发。启动及跨日执行自动备份和历史清理，不依赖每日重启。
 
+### 14. v1.6.1：七项 P1 缺陷修复
+
+本版为 v1.6.0 系统审查结论的修复版本，不含新功能与界面改版。逐项复现材料与原始结论见 [v1.6.0 系统审查](PROJECT_REVIEW_1.6.0_2026-11-10.md)，实现与验证记录见 [七项 P1 修复记录](P1_FIXES_1.6.0_2026-11-10.md)。
+
+- **检测判定（D01）**：HTTP 200 不等于推理成功。严格模式按 chat / completions / embeddings / custom 校验最小有效结果，并先识别 `error`、非空 `errors`、`success:false`、`ok:false` 等业务错误，再执行用户断言；空对象、空 `choices`、空向量判失败，工具调用、推理内容与合法的长度截断仍通过。响应凭据同步脱敏。
+- **配置变更事务（D02）**：新增检测配置指纹，覆盖 URL、凭据、鉴权、模型路径、探测方式与请求体、断言、忽略规则、配额、流式测量、代理、TLS、各类超时及影响请求的全局网络设置。编辑、批量、导入、备份还原与全局设置在保存事务内重置运行态、取消在途检测并补检；完成时校验代次与指纹，旧结果不写状态、历史和告警，迟到回执丢弃；保存失败整体回滚且不打断运行中的检测，改名备注不废弃正常结果。
+- **损坏配置保护（D03）**：`providers` 非数组、数组内混入非对象、`global` 非对象时进入只读恢复流程，保留原文件并尝试建立 `.corrupt-*` 副本；新安装与合法空数组照常加载。
+- **稀疏备份合并（D07）**：按备份中显式出现的字段生成补丁，未提供的启用状态、探测方式、维护、独立 SLO、通知路由、能力矩阵与凭据继续保留；显式 `false` / `null` / 空数组仍可覆盖，运行态不从备份合并。
+- **凭据脱敏（D08）**：统一脱敏 URL userinfo 与 URL / 模型列表 / 探测 / 配额路径中的敏感查询参数（含大小写、重复参数与编码参数名）。公共状态、日志（含磁盘文件）、告警文案、自定义 Webhook `{{url}}`、检测错误与测试结果均用脱敏值，实际请求仍用原配置；默认导出与克隆移除 URL 凭据，完整导出保留。表单以 `***` 显示，保留掩码或改普通参数沿用原值，删除参数或填新值即替换。
+- **编辑会话隔离（D14）**：弹窗、密钥回显、连接测试与保存分别编号，回调校验会话、服务商 ID、表单修订与内容指纹；A 的延迟回显或测试结果不会落到 B，途中的手动输入与清空不被旧值覆盖。
+- **告警交付（D15）**：故障生命周期与消息交付分离，每次故障有独立 incident ID，按通道记录最后事件与顺序；部分通道恢复失败后再次故障会建立新事件，已恢复的通道同样收到新故障；成功通道重试时跳过，迟到回执不覆盖新状态，旧版全局状态可平滑迁移。同一服务商的通知按顺序发送。
+
 ## 界面预览
 
 ```
@@ -417,13 +429,13 @@ applyResult(provider, result):
 
 ### 方式一：安装版（推荐）
 
-1. 运行 `dist-v1.6.0/AIProviderMonitor-1.6.0.exe`（本次验收产物；默认 `npm run dist` 输出到 `dist/`）
+1. 运行 `dist-v1.6.1/AIProviderMonitor-1.6.1.exe`（本次验收产物；默认 `npm run dist` 输出到 `dist/`）
 2. 按向导选择安装目录（默认安装到用户目录）
 3. 完成后从桌面 / 开始菜单启动「AI Provider Monitor」
 
 ### 方式二：便携版
 
-直接运行 `dist-v1.6.0/AIProviderMonitor-Portable-1.6.0.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
+直接运行 `dist-v1.6.1/AIProviderMonitor-Portable-1.6.1.exe`，无需安装。数据保存在 exe 同级 `AIPM-Data/` 目录，整个目录拷贝到 U 盘即可随行。
 
 ### 方式三：开发模式
 
@@ -442,7 +454,7 @@ npm test                # 模块冒烟测试（35 用例，mock HTTP 服务器�
 npm run test:unit       # 单元测试（定时器、基线、健康落盘、日报去重等）
 npm run test:regression # 审计缺陷与 SLO 口径回归（本地模拟端点）
 npm run test:integration # 正常 main.js 启动 + 真实 preload/IPC + 页面业务路径
-npm run test:package -- dist-v1.6.0 # 对本轮打包应用执行隔离启动与 IPC 验收
+npm run test:package -- dist-v1.6.1 # 对本轮打包应用执行隔离启动与 IPC 验收
 npm run app-test        # Electron 应用级自检（主进程 + 模块加载 + 资源存在性）
 npm run renderer-test   # 渲染层自检（真实 BrowserWindow，校验 CSP 与共享模块加载）
 npm run ui-check        # 七页布局、对比度、键盘交互及表单检查（隔离数据）
@@ -457,11 +469,11 @@ npm run format          # Prettier 格式化
 npm run dist
 ```
 
-普通修复、界面调整和重复编译保持当前版本号；只有明确发布新版本时再调整 `package.json` 与锁文件版本。当前同版本重编译命令如下，安装版与便携版文件名均保持 1.6.0：
+普通修复、界面调整和重复编译保持当前版本号；只有明确发布新版本时再调整 `package.json` 与锁文件版本。当前同版本重编译命令如下，安装版与便携版文件名均保持 1.6.1：
 
 ```powershell
-npm run dist -- --config.electronDist=node_modules/electron/dist --config.directories.output=dist-v1.6.0
-npm run test:package -- dist-v1.6.0
+npm run dist -- --config.electronDist=node_modules/electron/dist --config.directories.output=dist-v1.6.1
+npm run test:package -- dist-v1.6.1
 ```
 
 当前 UI 约定：设置默认显示「外观与启动」，使用分类标签切换检测、告警、SLO、网络、历史及邮件配置；可切至「全部设置」。切换分类保留输入内容，跨页面返回时恢复本次会话的滚动位置。服务商列表显示筛选结果与选中数量，可一键清空筛选；通知健康卡可直接定位对应配置。服务商宽表在自身容器内横向滚动，日志使用独立筛选栏。
@@ -602,10 +614,10 @@ AIProviderMonitor/
 ├── build/
 │   ├── icon.ico             # 多尺寸应用图标（构建期：安装器 / exe 资源）
 │   └── icon.png             # 256×256 PNG
-└── dist-v1.6.0/          # 本次验收产物（npm run dist 默认输出 dist/）
-    ├── AIProviderMonitor-1.6.0.exe          # NSIS 安装包
-    ├── AIProviderMonitor-Portable-1.6.0.exe # 便携版
-    └── SHA256SUMS-1.6.0.txt                 # 校验和
+└── dist-v1.6.1/          # 本次验收产物（npm run dist 默认输出 dist/）
+    ├── AIProviderMonitor-1.6.1.exe          # NSIS 安装包
+    ├── AIProviderMonitor-Portable-1.6.1.exe # 便携版
+    └── SHA256SUMS-1.6.1.txt                 # 校验和
 ```
 
 ## 数据文件格式

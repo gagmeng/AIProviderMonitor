@@ -8,6 +8,8 @@ const { validateProviderConfig, newNumericId, freshRuntime } = require('../provi
 const { normalizeBase } = require('../providerTemplates');
 const { detect } = require('../detector');
 const { formatDuration } = require('../durfmt');
+const { prepareDetectionChanges, restoreProvider } = require('../detectionConfig');
+const { URL_FIELDS, redactUrl, redactText, redactValue, urlPatch } = require('../redact');
 
 /** 渲染层表单 → Provider 配置对象（provider:add 与连接测试共用同一套默认值） */
 function buildProviderInput(data) {
@@ -65,6 +67,13 @@ function buildProviderInput(data) {
 
 /** 编辑表单覆盖到已有 Provider（provider:update 与连接测试共用）：undefined=保留，空串=清除 */
 function applyProviderPatch(p, data) {
+  data = { ...data };
+  // Display sanitization also covers URLs inside custom bodies/notes. Leaving those
+  // fields untouched must not write the display mask back into request configuration.
+  for (const [key, value] of Object.entries(data)) {
+    if (typeof value === 'string' && typeof p[key] === 'string' && value === redactText(p[key])) data[key] = p[key];
+  }
+  for (const key of URL_FIELDS) data[key] = urlPatch(data[key], p[key]);
   Object.assign(p, {
     name: String(data.name || p.name).trim(),
     url: normalizeBase(data.url ?? p.url).replace(/\/+$/, ''),
@@ -128,6 +137,7 @@ function register(ctx) {
     const p = { ...JSON.parse(JSON.stringify(source)), ...freshRuntime(),
       id: newNumericId(new Set(db.providers.map((x) => x.id))), enabled: false };
     delete p.alertRuntime; p.apiKey = ''; p.customHeaders = ''; p.proxyUrl = '';
+    for (const key of URL_FIELDS) if (p[key] !== undefined) p[key] = redactUrl(p[key], { remove: true });
     const stem = `${source.name.slice(0, 180)} 副本`;
     p.name = stem; let suffix = 2;
     while (db.providers.some((x) => x.name === p.name)) p.name = `${stem} ${suffix++}`;
@@ -144,11 +154,13 @@ function register(ctx) {
     const p = db.providers.find((x) => x.id === Number(id));
     if (!p) return { ok: false, error: 'Provider 不存在' };
     const periodChanged = data.intervalSec !== undefined && Number(data.intervalSec) !== Number(p.intervalSec);
-    const before = { ...p, tags: [...(p.tags || [])] };
-    applyProviderPatch(p, data);
-    try { validateProviderConfig(p); } catch (err) { Object.assign(p, before); return { ok: false, error: err.message }; }
+    const before = JSON.parse(JSON.stringify(p));
+    try { applyProviderPatch(p, data); validateProviderConfig(p); }
+    catch (err) { restoreProvider(p, before); return { ok: false, error: err.message }; }
+    const changed = prepareDetectionChanges(db, { global: db.global, providers: [before] });
     const saved = ctx.persist();
-    if (!saved.ok) { Object.assign(p, before); return saved; }
+    if (!saved.ok) { restoreProvider(p, before); return saved; }
+    ctx.commitDetectionChanges(changed);
     // 仅在周期变化时重排定时器（schedule 内部也会保护未变化的定时器），
     // 避免编辑名称/备注等操作把轮循从头计时
     if (p.enabled !== false && periodChanged) ctx.scheduler.schedule(p);
@@ -212,17 +224,18 @@ function register(ctx) {
   ipcMain.handle('provider:testConn', async (e, { id, data } = {}) => {
     const existing = Number(id) ? ctx.getDb().providers.find((x) => x.id === Number(id)) : null;
     let p;
-    if (existing) {
-      p = JSON.parse(JSON.stringify(existing));
-      applyProviderPatch(p, data || {});
-    } else {
-      p = { id: 0, ...buildProviderInput(data || {}) };
-    }
-    p.enabled = true;
-    try { validateProviderConfig(p); } catch (err) { return { ok: false, error: err.message }; }
+    try {
+      if (existing) {
+        p = JSON.parse(JSON.stringify(existing));
+        applyProviderPatch(p, data || {});
+      } else {
+        p = { id: 0, ...buildProviderInput(data || {}) };
+      }
+      p.enabled = true; validateProviderConfig(p);
+    } catch (err) { return { ok: false, error: err.message }; }
     try {
       const r = await detect(p, { globalCfg: ctx.getDb().global });
-      return {
+      return redactValue({
         ok: true,
         result: {
           status: r.status, latency: r.latency, modelsTotal: r.modelsTotal,
@@ -233,9 +246,9 @@ function register(ctx) {
           durationMs: r.durationMs,
           sampleFailures: (r.modelDetails || []).filter((d) => d && d.ok === false).slice(0, 3).map((d) => `${d.id}：${d.note || ''}`)
         }
-      };
+      });
     } catch (err) {
-      return { ok: false, error: err.message };
+      return redactValue({ ok: false, error: err.message });
     }
   });
 
@@ -285,7 +298,7 @@ function register(ctx) {
     }
     if (patch && typeof patch.group === 'string') clean.group = patch.group.trim();
     if (!Object.keys(clean).length) return { ok: false, error: '没有要修改的字段' };
-    const before = new Map(targets.map((p) => [p, { intervalSec: p.intervalSec, notifyOnModelChange: p.notifyOnModelChange, group: p.group, useProxy: p.useProxy }]));
+    const before = new Map(targets.map((p) => [p, JSON.parse(JSON.stringify(p))]));
     let invalid = null;
     for (const p of targets) {
       Object.assign(p, clean);
@@ -293,11 +306,13 @@ function register(ctx) {
       catch (err) { invalid = `[${p.name}] ${err.message}`; break; }
     }
     if (invalid) {
-      for (const p of targets) Object.assign(p, before.get(p));
+      for (const p of targets) restoreProvider(p, before.get(p));
       return { ok: false, error: invalid };
     }
+    const changed = prepareDetectionChanges(db, { global: db.global, providers: [...before.values()] });
     const saved = ctx.persist();
-    if (!saved.ok) { for (const p of targets) Object.assign(p, before.get(p)); return saved; }
+    if (!saved.ok) { for (const p of targets) restoreProvider(p, before.get(p)); return saved; }
+    ctx.commitDetectionChanges(changed);
     // 周期变了才重排定时器，其余字段改动不打扰既有节奏
     if (clean.intervalSec !== undefined) {
       for (const p of targets) { if (p.enabled !== false) ctx.scheduler.schedule(p); }

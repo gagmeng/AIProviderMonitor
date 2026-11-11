@@ -5,6 +5,18 @@
  */
 const { ipcMain } = require('electron');
 const { normalizeGlobal } = require('../store');
+const { prepareDetectionChanges, restoreProvider } = require('../detectionConfig');
+
+function saveConfig(ctx, db, before) {
+  const oldProviders = db.providers.map((p) => JSON.parse(JSON.stringify(p)));
+  const changed = prepareDetectionChanges(db, { global: before, providers: oldProviders });
+  const saved = ctx.persist();
+  if (!saved.ok) {
+    db.global = before;
+    db.providers.forEach((p, i) => restoreProvider(p, oldProviders[i]));
+  } else ctx.commitDetectionChanges(changed);
+  return saved;
+}
 
 function register(ctx) {
   ipcMain.handle('global:set', (e, patch) => {
@@ -21,7 +33,7 @@ function register(ctx) {
     }
     // 归一化兜底：钳位数值、校验时间与枚举格式（前端约束之外的最后一道防线）
     db.global = normalizeGlobal({ ...db.global, ...safePatch });
-    const saved = ctx.persist();
+    const saved = saveConfig(ctx, db, before);
     if (!saved.ok) { db.global = before; return saved; }
     const affected = {
       weixinWebhook: 'weixin', qqWebhook: 'qq', qqToken: 'qq', qqTarget: 'qq', qqTargetType: 'qq',
@@ -45,7 +57,7 @@ function register(ctx) {
     const before = db.global;
     db.global = { ...db.global };
     for (const k of list) db.global[k] = '';
-    const saved = ctx.persist();
+    const saved = saveConfig(ctx, db, before);
     if (!saved.ok) { db.global = before; return saved; }
     // 通道凭据被清空后，旧的成功/失败记录不再代表当前配置，一并清掉健康状态
     const AFFECTED = {

@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
-const { normalizeProvider, mergeProvider, normalizeUrlKey, ensureUniqueProviderIds, validateProviderConfig } = require('./providerSchema');
+const { normalizeProvider, providerConfigPatch, mergeProvider, normalizeUrlKey, ensureUniqueProviderIds, validateProviderConfig } = require('./providerSchema');
 const { normalizeGlobal } = require('./store');
 
 /**
@@ -52,14 +52,14 @@ function parseBackupFile(filePath) {
 }
 
 /** 过滤掉校验不通过的条目（normalizeProvider 归一后仍非法的说明源数据有问题），返回 { valid, invalid } */
-function partitionValid(list) {
+function partitionValid(list, sparse = false) {
   const valid = [];
   let invalid = 0;
   for (const raw of Array.isArray(list) ? list : []) {
     const p = normalizeProvider(raw);
     try {
       validateProviderConfig(p);
-      valid.push(p);
+      valid.push(sparse ? { ...providerConfigPatch(raw), id: p.id } : p);
     } catch (e) {
       invalid++;
       logger.warn(`[还原] 条目校验失败，已丢弃「${p.name || '未命名'}」: ${e.message}`);
@@ -87,7 +87,7 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
 
   // merge
   let added = 0, updated = 0, skipped = 0;
-  const { valid, invalid } = partitionValid(backup.providers);
+  const { valid, invalid } = partitionValid(backup.providers, true);
   const urlIndex = new Map(data.providers.map((p) => [normalizeUrlKey(p.url), p]));
   for (const p of valid) {
     if (!p.name && !p.url) { skipped++; continue; }
@@ -98,8 +98,9 @@ function restoreFrom(data, filePath, mode = 'overwrite') {
       if (mergeProvider(exist, p)) updated++;
       else skipped++;
     } else {
-      data.providers.push(p);
-      urlIndex.set(key, p);
+      const addedProvider = normalizeProvider(p);
+      data.providers.push(addedProvider);
+      urlIndex.set(key, addedProvider);
       added++;
     }
   }

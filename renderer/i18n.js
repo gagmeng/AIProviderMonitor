@@ -5,6 +5,7 @@
 // 操作指南正文暂仅中文（v1 范围）。
 (function () {
   const EN = {
+    'URL 凭据已隐藏；保留 *** 可沿用，删除参数或填写新值可替换。': 'URL credentials are hidden. Keep *** to retain them, or remove the parameter or enter a new value to replace them.',
     '掌握服务健康状态，及时发现异常': 'Monitor service health and spot issues early',
     '集中管理 API 端点、检测周期与模型状态': 'Manage API endpoints, check intervals and model status',
     '配置告警通道，点击健康状态可快速定位配置': 'Configure alert channels. Select a health card to open its settings.',

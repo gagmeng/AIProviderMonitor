@@ -5,6 +5,7 @@
 const { ipcMain, dialog } = require('electron');
 const fs = require('fs');
 const transfer = require('../transfer');
+const { prepareDetectionChanges } = require('../detectionConfig');
 
 function register(ctx) {
   ipcMain.handle('transfer:export', (e, { format, delimiter, withKey, filePath }) => {
@@ -55,9 +56,11 @@ function register(ctx) {
     let committed = false;
     try {
       const res = transfer.applyImport(db, items || [], mode === 'append' ? 'append' : 'merge');
+      const changed = prepareDetectionChanges(db, JSON.parse(before));
       const saved = ctx.persist();
       if (!saved.ok) { ctx.replaceDb(JSON.parse(before)); return saved; }
       committed = true;
+      ctx.commitDetectionChanges(changed);
       // 全量重排：新增的补上定时器，合并更新过周期的也按新周期重排
       // （schedule 内部对周期未变化的已有定时器是 no-op，不会打扰既有节奏）
       for (const p of db.providers) {

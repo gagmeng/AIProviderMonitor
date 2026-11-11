@@ -2,6 +2,7 @@
 const path = require('path');
 const fs = require('fs');
 const { DATA_DIR } = require('./store');
+const { redactText } = require('./redact');
 
 // 日志目录跟随数据目录（便携版 exe 旁 AIPM-Data、AIPM_DATA_DIR 覆盖、默认 APPDATA），
 // 与 store.js 保持同一来源，避免便携版出现「数据在 U 盘、日志在 APPDATA」的分裂。
@@ -83,7 +84,7 @@ function flushPendingSync() {
 
 function write(level, msg) {
   if ((LEVELS[level] || 0) < (LEVELS[minLevel] || 0)) return;
-  const line = { t: stamp(), level, msg: String(msg) };
+  const line = { t: stamp(), level, msg: redactText(msg) };
   buffer.push(line);
   if (buffer.length > MAX_IN_MEMORY) buffer.shift();
   pendingDisk.push({ day: dayTag(), text: `[${line.t}] [${level.toUpperCase()}] ${line.msg}\n` });

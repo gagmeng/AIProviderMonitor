@@ -1,12 +1,14 @@
 'use strict';
 const logger = require('./logger');
 const { detect } = require('./detector');
+const { detectionKey } = require('./detectionConfig');
 const MAX_TIMER_MS = 2147483647;
 function clampTimerMs(ms) { return Math.min(MAX_TIMER_MS, Math.max(0, Math.floor(Number(ms) || 0))); }
 class Scheduler {
   constructor({ concurrency = 4, detector = detect } = {}) {
     this.timers = new Map(); this.generations = new Map(); this.running = new Set();
     this.controllers = new Map(); this.queued = new Set(); this.queue = []; this.circuits = new Map();
+    this.revisions = new Map(); this.refreshing = new Set();
     this.active = 0; this.concurrency = Math.max(1, concurrency); this.handlers = {};
     this.stopped = false; this.paused = false; this.getProvider = null; this.getGlobal = null; this.detector = detector;
   }
@@ -43,8 +45,17 @@ class Scheduler {
   }
   cancel(id) {
     this._clearTimer(id); this.generations.set(id, this._generation(id) + 1);
+    this.revisions.set(id, this.revision(id) + 1); this.refreshing.delete(id);
     this.queue = this.queue.filter((j) => { if (j.id !== id) return true; this.queued.delete(id); j.resolve(null); return false; });
     if (this.controllers.has(id)) this.controllers.get(id).abort();
+  }
+  revision(id) { return this.revisions.get(id) || 0; }
+  refresh(p) {
+    this.cancel(p.id); this.resetCircuit(p.id);
+    if (this.stopped || p.enabled === false) return;
+    // An aborted detector may still be unwinding. Start the replacement after it releases the slot.
+    if (this.running.has(p.id)) this.refreshing.add(p.id);
+    else this._armAt(p.id, Date.now(), this._periodOf(p), this._generation(p.id));
   }
   resetCircuit(id) { this.circuits.delete(id); }
   resetAllCircuits() { this.circuits.clear(); }
@@ -74,16 +85,24 @@ class Scheduler {
       const controller = new AbortController(); this.controllers.set(job.id, controller);
       this.running.add(job.id); this.active++; this.emit('state');
       this._exec(job, p, controller).catch((e) => logger.error(e.message)).finally(() => {
-        this.controllers.delete(job.id); this.running.delete(job.id); this.active--; this.emit('state'); this._drain();
+        this.controllers.delete(job.id); this.running.delete(job.id); this.active--;
+        if (this.refreshing.delete(job.id)) {
+          const latest = this.getProvider && this.getProvider(job.id);
+          if (latest && latest.enabled !== false) this._armAt(job.id, Date.now(), this._periodOf(latest), this._generation(job.id));
+        }
+        this.emit('state'); this._drain();
       });
     }
   }
   async _exec(job, p, controller) {
     try {
       logger.info(`开始检测 [${p.name}] (${job.reason})`);
-      const globalCfg = this.getGlobal ? this.getGlobal() : {};
-      const result = await this.detector({ ...p }, { globalCfg, signal: controller.signal });
-      if (controller.signal.aborted || this.stopped || (this.getProvider && !this.getProvider(job.id))) return;
+      const globalCfg = JSON.parse(JSON.stringify(this.getGlobal ? this.getGlobal() : {}));
+      const input = JSON.parse(JSON.stringify(p)), key = detectionKey(input, globalCfg), revision = this.revision(job.id);
+      const result = await this.detector(input, { globalCfg, signal: controller.signal });
+      const latest = this.getProvider ? this.getProvider(job.id) : p;
+      if (controller.signal.aborted || this.stopped || !latest || revision !== this.revision(job.id)
+        || key !== detectionKey(latest, this.getGlobal ? this.getGlobal() : {})) return;
       if (result.status === 'up') this.circuits.delete(p.id);
       else {
         const c = this.circuits.get(p.id) || { failures: 0, openUntil: 0 }; c.failures++;
@@ -92,7 +111,7 @@ class Scheduler {
         }
         this.circuits.set(p.id, c);
       }
-      this.emit('result', this.getProvider ? this.getProvider(job.id) : p, result, job.reason); job.resolve(result);
+      this.emit('result', latest, result, job.reason); job.resolve(result);
     } catch (e) { if (!controller.signal.aborted) logger.error(`检测异常 [${p.name}]: ${e.message}`); }
     finally { job.resolve(null); }
   }

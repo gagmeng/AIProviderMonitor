@@ -22,12 +22,22 @@ async function check(name, fn) { await fn(); checks.push(name); console.log('PAS
 let win, runtime, srv;
 const errors = [], requests = [], deliveries = [];
 let inferenceDown = false;
+const alertTrace = [];
+let releaseRecovery = null;
 async function js(script) { return win.webContents.executeJavaScript(script.includes('await ') ? `(async () => { ${script} })()` : script, true); }
 async function closeModal() { await js('document.querySelectorAll(\'.modal-mask.show\').forEach((m) => m.classList.remove(\'show\'));'); }
 (async () => {
   srv = http.createServer((req, res) => {
     let body = ''; req.on('data', (c) => { body += c; }); req.on('end', () => {
       requests.push({ url: req.url, headers: req.headers, body });
+      if (req.url === '/alert-wx' || req.url === '/alert-qq/send_private_msg') {
+        const channel = req.url === '/alert-wx' ? 'weixin' : 'qq';
+        const data = JSON.parse(body), text = channel === 'weixin' ? data.text.content : data.message;
+        alertTrace.push({ channel, kind: text.includes('服务恢复') ? 'recover' : 'down' });
+        if (channel === 'qq' && text.includes('服务恢复')) releaseRecovery = (success = false) => res.end(JSON.stringify({ retcode: success ? 0 : 1, message: 'fixture delivery' }));
+        else res.end(JSON.stringify(channel === 'weixin' ? { errcode: 0 } : { retcode: 0 }));
+        return;
+      }
       if (req.url === '/hook') { deliveries.push(JSON.parse(body)); res.end('{"errcode":0}'); return; }
       if (req.url === '/v1/models') { res.end('{"data":[{"id":"m1"},{"id":"m2"}]}'); return; }
       if (req.url === '/v1/chat/completions') {
@@ -203,6 +213,168 @@ async function closeModal() { await js('document.querySelectorAll(\'.modal-mask.
       await until(() => js('document.querySelector(\'#wxHint\').textContent.includes(\'SAVE_REJECTED\')'), 'test save failure');
       assert.equal(deliveries.length, before);
     } finally { runtime.ctx.persist = old; }
+  });
+  await check('D02: real edit/bulk/import/global IPC invalidate old detection and preserve state on save failure', async () => {
+    const { normalizeProvider } = require('../src/providerSchema');
+    await js('await window.aipm.setGlobal({ notifyWeixinEnabled: false });');
+    const db = runtime.ctx.getDb(), p = normalizeProvider({ id: 202, name: 'revision fixture', url: base, intervalSec: 3600 });
+    db.providers.push(p);
+    const original = runtime.scheduler.detector, originalPersist = runtime.ctx.persist;
+    runtime.scheduler.pause();
+    try {
+      const actions = [
+        'window.aipm.updateProvider(202, { url: "' + base + '/new" })',
+        'window.aipm.updateProvider(202, { apiKey: "FAKE_REVISION" })',
+        'window.aipm.bulkUpdateProviders([202], { useProxy: false })',
+        'window.aipm.transferApply({ items: [{ name: "revision fixture", url: "' + base + '/new", assertType: "contains", assertValue: "pong" }], mode: "merge" })',
+        'window.aipm.setGlobal({ requestTimeoutMs: 21000 })'
+      ];
+      for (const action of actions) {
+        let release, signal;
+        runtime.scheduler.detector = (input, opts) => { signal = opts.signal; return new Promise((resolve) => { release = resolve; }); };
+        const pending = runtime.scheduler.runCheck(p.id);
+        const result = await js(action); assert.equal(result.ok, true, action); assert.equal(signal.aborted, true);
+        assert.equal(p.status, 'unknown'); assert.deepEqual(p.modelBaseline, []);
+        release({ status: 'up', checkedAt: Date.now(), modelsTotal: 1, modelsAvailable: ['OLD_ENDPOINT_RESULT'] });
+        await pending; await delay(20);
+        assert.equal(p.checkedAt, null); assert.deepEqual(p.modelsAvailable, []);
+      }
+      let release, signal;
+      runtime.scheduler.detector = (input, opts) => { signal = opts.signal; return new Promise((resolve) => { release = resolve; }); };
+      const pending = runtime.scheduler.runCheck(p.id), before = JSON.stringify(p), revision = runtime.scheduler.revision(p.id);
+      runtime.ctx.persist = () => ({ ok: false, error: 'D02_SAVE_REJECTED' });
+      assert.equal((await js('window.aipm.updateProvider(202, { apiKey: "REJECTED_KEY" })')).ok, false);
+      assert.equal(JSON.stringify(p), before); assert.equal(runtime.scheduler.revision(p.id), revision); assert.equal(signal.aborted, false);
+      runtime.ctx.persist = originalPersist;
+      assert.equal((await js('window.aipm.updateProvider(202, { note: "keep running" })')).ok, true);
+      assert.equal(signal.aborted, false);
+      release({ status: 'up', latency: 1, modelsTotal: 1, modelsAvailable: ['CURRENT_RESULT'], checkedAt: Date.now() });
+      await pending; await delay(20); assert.deepEqual(p.modelsAvailable, ['CURRENT_RESULT']);
+      const rows = await runtime.ctx.history.readRange(TMP, 0, Date.now());
+      assert.equal(rows.filter((r) => r.id === p.id).length, 1, 'discarded generations never reach history');
+    } finally {
+      runtime.ctx.persist = originalPersist; runtime.scheduler.detector = original;
+      await js('await window.aipm.deleteProvider(202);'); runtime.scheduler.resume();
+    }
+  });
+  await check('D15/D02: real multi-channel recovery/new fault stays ordered; old notification replies cannot revive reset state', async () => {
+    const { normalizeProvider } = require('../src/providerSchema');
+    const db = runtime.ctx.getDb(), before = structuredClone(db.global);
+    const p = normalizeProvider({ id: 203, name: 'delivery fixture', url: base, intervalSec: 3600 });
+    p.status = 'up'; p.modelBaseline = ['m1']; p.modelCatalog = ['m1']; db.providers.push(p);
+    Object.assign(db.global, { alertFailThreshold: 1, alertQuietEnabled: false, alertRecoverNotify: true, alertEscalateMin: 0,
+      notifyWeixinEnabled: true, weixinWebhook: base + '/alert-wx', notifyQQEnabled: true, qqWebhook: base + '/alert-qq', qqTarget: '1' });
+    const sample = (status) => runtime.applyResult(p, { status, checkedAt: Date.now(), modelsTotal: status === 'up' ? 1 : 0,
+      modelsAvailable: status === 'up' ? ['m1'] : [], modelDetails: [] }, 'D15 fixture');
+    runtime.scheduler.pause(); alertTrace.length = 0;
+    try {
+      sample('down'); await until(() => p.alertRuntime?.inAlarm && !p.alertRuntime.pending.down, 'initial fault delivered');
+      const firstIncident = p.alertRuntime.incident.id;
+      sample('up'); await until(() => !!releaseRecovery, 'delayed QQ recovery');
+      sample('down'); const newIncident = p.alertRuntime.incident.id; assert.notEqual(newIncident, firstIncident);
+      const recoveryReply = releaseRecovery; releaseRecovery = null; recoveryReply(false);
+      await until(() => p.alertRuntime.inAlarm && !p.alertRuntime.pending.down, 'new fault delivered after old partial recovery');
+      for (const channel of ['weixin', 'qq']) assert.deepEqual(alertTrace.filter((r) => r.channel === channel).map((r) => r.kind), ['down', 'recover', 'down']);
+      assert.ok(Object.values(p.alertRuntime.channels).every((r) => r.incidentId === newIncident && r.kind === 'down'));
+      sample('up'); await until(() => !!releaseRecovery, 'old recovery pending during edit');
+      assert.equal((await js('window.aipm.updateProvider(203, { apiKey: "FAKE_NEW_GENERATION" })')).ok, true);
+      assert.equal(p.status, 'unknown'); assert.equal(p.alertRuntime, undefined);
+      const oldReply = releaseRecovery; releaseRecovery = null; oldReply(true); await delay(80);
+      assert.equal(p.alertRuntime, undefined, 'delivery acknowledgement from the old revision is ignored');
+    } finally {
+      if (releaseRecovery) { releaseRecovery(true); releaseRecovery = null; }
+      runtime.scheduler.cancel(p.id); runtime.ctx.alerts.resetState(p.id);
+      db.providers.splice(db.providers.indexOf(p), 1); Object.assign(db.global, before); runtime.scheduler.resume();
+    }
+  });
+  await check('D08: public state and unchanged form preserve URL secrets without exposing them', async () => {
+    const p = runtime.ctx.getDb().providers[1];
+    const saved = structuredClone(p);
+    const raw = base + '?Api_Key=FAKE_URL_KEY&region=cn';
+    const patch = { url: raw, modelsPath: '/v1/models?token=FAKE_MODELS_KEY', probePath: '/probe?secret=FAKE_PROBE_KEY', quotaPath: '/quota?signature=FAKE_QUOTA_KEY',
+      probeBody: '{"endpoint":"' + base + '?api_key=FAKE_BODY_KEY"}', note: 'Endpoint ' + base + '?token=FAKE_NOTE_KEY' };
+    Object.assign(p, patch);
+    try {
+      const publicSnapshot = runtime.publicState(); assert.doesNotMatch(JSON.stringify(publicSnapshot), /FAKE_URL_KEY|FAKE_MODELS_KEY|FAKE_PROBE_KEY|FAKE_QUOTA_KEY|FAKE_BODY_KEY|FAKE_NOTE_KEY/);
+      assert.match(publicSnapshot.providers[1].url, /region=cn/);
+      await js(`state = await window.aipm.getState(); openProviderModal(${p.id});`);
+      const form = await js('collectProviderForm()');
+      assert.doesNotMatch(JSON.stringify(form), /FAKE_URL_KEY|FAKE_MODELS_KEY|FAKE_PROBE_KEY|FAKE_QUOTA_KEY/);
+      assert.equal((await js(`window.aipm.updateProvider(${p.id}, collectProviderForm())`)).ok, true);
+      for (const [key, value] of Object.entries(patch)) assert.equal(p[key], value);
+      await js('document.querySelector("#fUrl").value = document.querySelector("#fUrl").value.replace("region=cn", "region=us");');
+      assert.equal((await js(`window.aipm.updateProvider(${p.id}, collectProviderForm())`)).ok, true);
+      assert.equal(p.url, raw.replace('region=cn', 'region=us'), 'ordinary URL edits keep masked credentials');
+      const cloneResult = await js(`window.aipm.cloneProvider(${p.id})`);
+      const clone = runtime.ctx.getDb().providers.find((x) => x.id === cloneResult.id);
+      assert.doesNotMatch(JSON.stringify(clone), /FAKE_URL_KEY|FAKE_MODELS_KEY|FAKE_PROBE_KEY|FAKE_QUOTA_KEY/);
+      await js(`await window.aipm.deleteProvider(${clone.id});`);
+      await js(`document.querySelector('#fUrl').value = '${base}?region=us';`);
+      assert.equal((await js(`window.aipm.updateProvider(${p.id}, collectProviderForm())`)).ok, true);
+      assert.equal(p.url, base + '?region=us', 'explicit replacement can remove credentials');
+    } finally { Object.keys(p).forEach((key) => delete p[key]); Object.assign(p, saved); await closeModal(); }
+  });
+  await check('D14: delayed key reveal cannot cross sessions, override typing/clear or affect a reopened form', async () => {
+    const { ipcMain } = require('electron');
+    const releases = [];
+    ipcMain.removeHandler('provider:revealKey');
+    ipcMain.handle('provider:revealKey', (e, id) => new Promise((resolve) => releases.push(() => resolve({ ok: true, apiKey: 'FAKE_DELAYED_KEY_' + id }))));
+    const otherId = runtime.ctx.getDb().providers[1].id;
+    const reveal = async () => {
+      await js(`state = await window.aipm.getState(); openProviderModal(${providerId}); document.querySelector('#fKeyEye').click();`);
+      await until(() => releases.length === 1, 'delayed reveal pending');
+    };
+    try {
+      await reveal(); await closeModal(); await js(`openProviderModal(${otherId});`); releases.shift()(); await delay(40);
+      assert.equal(await js('document.querySelector("#fKey").value'), ''); assert.equal(await js('collectProviderForm().apiKey'), undefined);
+      await reveal(); await closeModal(); await js('openProviderModal();'); releases.shift()(); await delay(40);
+      assert.equal(await js('document.querySelector("#fKey").value'), '');
+      await reveal(); await closeModal(); await js(`openProviderModal(${providerId});`); releases.shift()(); await delay(40);
+      assert.equal(await js('document.querySelector("#fKey").value'), '');
+      await reveal();
+      await js('document.querySelector("#fKey").value = "MANUAL_KEY"; document.querySelector("#fKey").dispatchEvent(new Event("input", { bubbles: true }));');
+      releases.shift()(); await delay(40); assert.equal(await js('document.querySelector("#fKey").value'), 'MANUAL_KEY');
+      await reveal(); await js('document.querySelector("#fKeyClear").click();'); releases.shift()(); await delay(40);
+      assert.equal(await js('document.querySelector("#fKey").value'), ''); assert.equal(await js('collectProviderForm().apiKey'), '');
+      await reveal(); await js('document.querySelector("#fKey").value = "typed"; document.querySelector("#fKey").dispatchEvent(new Event("input", { bubbles:true })); document.querySelector("#fKey").value = ""; document.querySelector("#fKey").dispatchEvent(new Event("input", { bubbles:true }));');
+      releases.shift()(); await delay(40); assert.equal(await js('document.querySelector("#fKey").value'), '');
+    } finally {
+      ipcMain.removeHandler('provider:revealKey');
+      ipcMain.handle('provider:revealKey', (e, id) => ({ ok: true, apiKey: runtime.ctx.getDb().providers.find((p) => p.id === Number(id))?.apiKey || '' }));
+      await closeModal();
+    }
+  });
+  await check('D14: delayed connection test and save responses cannot repaint or close a different form', async () => {
+    const { ipcMain } = require('electron');
+    const releases = [], otherId = runtime.ctx.getDb().providers[1].id;
+    ipcMain.removeHandler('provider:testConn');
+    ipcMain.handle('provider:testConn', () => new Promise((resolve) => releases.push(() => resolve({ ok: true, result: { status: 'up', latency: 777, available: 7, modelsTotal: 7 } }))));
+    try {
+      await js(`openProviderModal(${providerId}); document.querySelector('#fTestConn').click();`); await until(() => releases.length === 1, 'old test');
+      await closeModal(); await js(`openProviderModal(${otherId}); document.querySelector('#fTestConn').click();`); await until(() => releases.length === 2, 'new test');
+      releases.shift()(); await delay(40);
+      assert.equal(await js('document.querySelector("#fTestHint").textContent'), '测试中…');
+      assert.equal(await js('document.querySelector("#fTestConn").disabled'), true);
+      releases.shift()(); await until(() => js('document.querySelector("#fTestHint").textContent.includes("777")'), 'current test result');
+      await js('document.querySelector("#fTestConn").click();'); await until(() => releases.length === 1, 'edited test');
+      await js('document.querySelector("#fUrl").value += "/changed"; document.querySelector("#fUrl").dispatchEvent(new Event("input", { bubbles:true }));');
+      releases.shift()(); await delay(40);
+      assert.equal(await js('document.querySelector("#fTestHint").textContent'), ''); assert.equal(await js('document.querySelector("#fTestConn").disabled'), false);
+    } finally { ipcMain.removeHandler('provider:testConn'); await closeModal(); }
+    let release;
+    // Delay a successful IPC acknowledgement to exercise the renderer save callback.
+    ipcMain.removeHandler('provider:update');
+    ipcMain.handle('provider:update', () => new Promise((resolve) => { release = () => resolve({ ok: true }); }));
+    try {
+      await js(`openProviderModal(${providerId}); document.querySelector('#pmSave').click();`); await until(() => !!release, 'delayed save');
+      await closeModal(); await js(`openProviderModal(${otherId});`); release(); await delay(40);
+      assert.equal(await js('document.querySelector("#providerModal").classList.contains("show")'), true);
+      assert.equal(await js('editingId'), otherId); assert.equal(await js('document.querySelector("#pmSave").disabled'), false);
+    } finally {
+      // Restore the production handlers for the rest of this process.
+      for (const name of ['add', 'clone', 'update', 'delete', 'deleteMany', 'revealKey', 'copyKey', 'testConn', 'checkNow', 'checkAll', 'toggleEnabled', 'bulkUpdate', 'reorder']) require('electron').ipcMain.removeHandler('provider:' + name);
+      require('../src/ipc/providers').register(runtime.ctx); await closeModal();
+    }
   });
   await check('renderer has no errors across exercised views', async () => { assert.deepEqual(errors, []); });
   // Keep useful screenshots without changing the user's desktop or actual data.

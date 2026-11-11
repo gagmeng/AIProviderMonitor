@@ -1,5 +1,6 @@
 'use strict';
 const logger = require('./logger');
+const { CHANNELS, channelEnabled } = require('./notifier');
 
 /**
  * 告警策略引擎。
@@ -30,7 +31,7 @@ const DEFAULTS = {
 const runtime = new Map();
 
 function freshState() {
-  return { consecutiveFail: 0, inAlarm: false, latencyHigh: 0, lastSent: {}, pending: {} };
+  return { consecutiveFail: 0, inAlarm: false, latencyHigh: 0, lastSent: {}, pending: {}, incident: null, channels: {}, sequence: 0 };
 }
 
 function stateOf(id) {
@@ -51,6 +52,24 @@ function bindState(provider) {
     st.inAlarm = Boolean(saved.inAlarm);
     if (saved.pending && typeof saved.pending === 'object') st.pending = JSON.parse(JSON.stringify(saved.pending));
     if (saved.lastSent && typeof saved.lastSent === 'object') st.lastSent = { ...saved.lastSent };
+    if (saved.incident && typeof saved.incident.id === 'string') st.incident = JSON.parse(JSON.stringify(saved.incident));
+    if (saved.channels && typeof saved.channels === 'object') st.channels = JSON.parse(JSON.stringify(saved.channels));
+    st.sequence = Math.max(Number(saved.sequence) || 0, ...Object.values(st.pending).map((p) => Number(p.order) || 0),
+      ...Object.values(st.channels).map((c) => Number(c.order) || 0));
+    // Older installations have only the delivery latch. Preserve it during migration.
+    if (!st.incident && (st.inAlarm || st.pending.down || st.pending.authfail || st.pending.recover)) {
+      st.incident = { id: nextEventId(), open: provider.status !== 'up' };
+    }
+    for (const pending of Object.values(st.pending)) {
+      if (!pending.order) pending.order = ++st.sequence;
+      if (['down', 'authfail', 'recover'].includes(pending.kind) && !pending.incidentId) pending.incidentId = st.incident?.id;
+      if (!saved.incident && pending.kind === 'recover' && !pending.targets) pending.legacyTargets = true;
+      if (['down', 'authfail', 'recover'].includes(pending.kind)) {
+        for (const ch of pending.delivered || []) if (!st.channels[ch]) st.channels[ch] = {
+          kind: pending.kind, incidentId: pending.incidentId, eventId: pending.eventId, order: pending.order
+        };
+      }
+    }
   }
   runtime.set(id, st);
   return st;
@@ -63,7 +82,9 @@ function writeState(provider, st) {
     inAlarm: Boolean(st.inAlarm),
     latencyHigh: st.latencyHigh || 0,
     pending: JSON.parse(JSON.stringify(st.pending || {})),
-    lastSent: { ...st.lastSent }
+    lastSent: { ...st.lastSent },
+    incident: st.incident ? JSON.parse(JSON.stringify(st.incident)) : null,
+    channels: JSON.parse(JSON.stringify(st.channels)), sequence: st.sequence
   };
 }
 
@@ -107,9 +128,10 @@ function inMaintWindow(provider, now = new Date()) {
 }
 
 let eventSequence = 0;
+function nextEventId() { return `${Date.now()}-${++eventSequence}`; }
 function queueAlert(st, kind, title, reason, extra = {}) {
   if (!st.pending[kind]) {
-    st.pending[kind] = { kind, title, reason, eventId: `${Date.now()}-${++eventSequence}`, delivered: [], attempts: 0, nextRetryAt: 0, ...extra };
+    st.pending[kind] = { kind, title, reason, eventId: nextEventId(), order: ++st.sequence, delivered: [], attempts: 0, nextRetryAt: 0, ...extra };
   } else if (kind === 'modelChange') {
     const pending = st.pending[kind];
     // Coalesce opposite transitions while muted into the final net change.
@@ -119,11 +141,27 @@ function queueAlert(st, kind, title, reason, extra = {}) {
     pending.added = [...added]; pending.lost = [...lost];
     pending.reason = reason;
     if (pending.presented) {
-      pending.eventId = `${Date.now()}-${++eventSequence}`; pending.delivered = [];
+      pending.eventId = nextEventId(); pending.order = ++st.sequence; pending.delivered = [];
       pending.presented = false; pending.attempts = 0; pending.nextRetryAt = 0;
     }
     if (!added.size && !lost.size && ((extra.added || []).length || (extra.lost || []).length)) delete st.pending[kind];
   }
+}
+
+function eligibleChannels(globalCfg, provider) {
+  const routes = Array.isArray(provider.notifyChannels) ? provider.notifyChannels : [];
+  return CHANNELS.filter((ch) => (!routes.length || routes.includes(ch)) && channelEnabled(globalCfg, ch));
+}
+function faultChannels(st) { return Object.keys(st.channels).filter((ch) => ['down', 'authfail'].includes(st.channels[ch].kind)); }
+function queueRecovery(st, reason) {
+  const incidentId = st.incident?.id;
+  const delivered = Object.keys(st.channels).filter((ch) => st.channels[ch].kind === 'recover' && st.channels[ch].incidentId === incidentId);
+  const targets = [...new Set([...faultChannels(st), ...delivered])];
+  queueAlert(st, 'recover', '服务恢复', reason, { incidentId, delivered, ...(targets.length ? { targets } : {}) });
+  // A late fault acknowledgement can make a previously successful recovery channel pending again.
+  st.pending.recover.delivered = delivered;
+  if (st.pending.recover.legacyTargets) delete st.pending.recover.targets;
+  else if (targets.length) st.pending.recover.targets = targets;
 }
 
 /** Evaluation creates durable pending events; delivery is committed separately. */
@@ -135,21 +173,30 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
   if (firstCheck) { writeState(provider, st); return { alerts: output, suppressed, consecutiveFail: st.consecutiveFail, inAlarm: st.inAlarm }; }
   const failKind = provider.status === 'authfail' ? 'authfail' : 'down';
   const threshold = Math.max(1, Number(cfg(globalCfg, 'alertFailThreshold')) || 1);
-  if (!deliveryOnly && !isUp) {
+  const eligible = eligibleChannels(globalCfg, provider);
+  if (!isUp && (!deliveryOnly || st.incident?.open)) {
+    if (!st.incident || !st.incident.open) {
+      st.incident = { id: nextEventId(), open: true };
+      // A new observed fault has its own delivery lifecycle, even if an older recovery failed.
+      st.inAlarm = false;
+    }
     delete st.pending.recover;
     delete st.pending[failKind === 'down' ? 'authfail' : 'down'];
-    if (st.consecutiveFail >= threshold && !st.inAlarm) {
+    const delivered = Object.keys(st.channels).filter((ch) => ['down', 'authfail'].includes(st.channels[ch].kind) && st.channels[ch].incidentId === st.incident.id);
+    if (st.consecutiveFail >= threshold && (!st.inAlarm || eligible.some((ch) => !delivered.includes(ch)))) {
       queueAlert(st, failKind, failKind === 'authfail' ? '密钥失效' : '服务异常',
-        `连续 ${st.consecutiveFail} 轮检测未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`);
+        `连续 ${st.consecutiveFail} 轮检测未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`,
+        { incidentId: st.incident.id, delivered });
     }
     const escalation = Number(cfg(globalCfg, 'alertEscalateMin')) || 0;
-    if (st.inAlarm && escalation > 0 && timestamp - Math.max(st.lastSent.down || 0, st.lastSent.authfail || 0) >= escalation * 60000) {
-      queueAlert(st, failKind, '服务异常（持续未恢复）', `故障持续未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`);
+    if (!deliveryOnly && st.inAlarm && escalation > 0 && timestamp - Math.max(st.lastSent.down || 0, st.lastSent.authfail || 0) >= escalation * 60000) {
+      queueAlert(st, failKind, '服务异常（持续未恢复）', `故障持续未恢复（当前 ${provider.status}）${provider.lastError ? '：' + provider.lastError : ''}`, { incidentId: st.incident.id });
     }
-  } else if (!deliveryOnly) {
+  } else if (isUp) {
+    if (st.incident) st.incident.open = false;
     delete st.pending.down; delete st.pending.authfail;
-    if (st.inAlarm) {
-      if (cfg(globalCfg, 'alertRecoverNotify')) queueAlert(st, 'recover', '服务恢复', `已恢复在线，可用模型 ${(provider.modelsAvailable || []).length}/${provider.modelsTotal || 0}`);
+    if (st.inAlarm || eligible.some((ch) => faultChannels(st).includes(ch))) {
+      if (cfg(globalCfg, 'alertRecoverNotify')) queueRecovery(st, `已恢复在线，可用模型 ${(provider.modelsAvailable || []).length}/${provider.modelsTotal || 0}`);
       else { st.inAlarm = false; delete st.pending.recover; }
     }
   }
@@ -178,24 +225,28 @@ function evaluate(globalCfg, provider, prev, { modelChanged = false, firstCheck 
 
 function noteDelivery(provider, alert, result, timestamp = Date.now()) {
   const st = bindState(provider), pending = st.pending[alert.kind];
-  const delivered = result && Array.isArray(result.delivered) ? result.delivered : [];
+  const fault = ['down', 'authfail'].includes(alert.kind), lifecycle = fault || alert.kind === 'recover';
+  const delivered = (result && Array.isArray(result.delivered) ? result.delivered : [])
+    .filter((ch) => !lifecycle || (Number(alert.order) || 0) >= (st.channels[ch]?.order || 0));
+  if (lifecycle) for (const ch of delivered) st.channels[ch] = { kind: alert.kind, incidentId: alert.incidentId || st.incident?.id, eventId: alert.eventId, order: alert.order || 0 };
   if (!pending || pending.eventId !== alert.eventId) {
     // A slow fault delivery may complete after the next sample already recovered.
     // Retain that acknowledgement so recipients also receive a recovery.
-    if (delivered.length && ['down', 'authfail'].includes(alert.kind)) {
-      st.inAlarm = true; st.lastSent[alert.kind] = timestamp;
-      if (provider.status === 'up') queueAlert(st, 'recover', '服务恢复', '故障通知送达时服务已恢复在线');
-      writeState(provider, st);
+    if (delivered.length && fault) {
+      if (alert.incidentId === st.incident?.id || provider.status === 'up') st.inAlarm = true;
+      if (alert.incidentId === st.incident?.id) st.lastSent[alert.kind] = timestamp;
+      if (provider.status === 'up') queueRecovery(st, '故障通知送达时服务已恢复在线');
     }
+    writeState(provider, st);
     return;
   }
   pending.delivered = [...new Set([...(pending.delivered || []), ...delivered])];
   if (delivered.length) {
     st.lastSent[alert.kind] = timestamp;
-    if (['down', 'authfail'].includes(alert.kind)) st.inAlarm = true;
+    if (fault) st.inAlarm = true;
   }
   if (result && (result.complete === true || result.attempted > 0 && !(result.failed || []).length)) {
-    if (alert.kind === 'recover' && provider.status === 'up') st.inAlarm = false;
+    if (alert.kind === 'recover' && provider.status === 'up' && alert.incidentId === st.incident?.id) st.inAlarm = false;
     delete st.pending[alert.kind];
   } else {
     pending.attempts++;

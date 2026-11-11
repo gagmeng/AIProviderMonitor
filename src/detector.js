@@ -4,6 +4,7 @@ const logger = require('./logger');
 const { headersForRedirect } = require('./httpguard');
 const { requestRaw } = require('./httpRequest');
 const { endpoint } = require('./providerTemplates');
+const { redactValue } = require('./redact');
 
 const DEFAULT_REQUEST_TIMEOUT = 20000;
 const DEFAULT_PROBE_TIMEOUT = 15000;
@@ -234,6 +235,36 @@ function assertProbeResponse(payload, provider) {
   throw new Error(`不支持的响应断言类型: ${type}`);
 }
 
+/** A 2xx JSON document alone does not prove that inference succeeded. */
+function validateProbeResponse(payload, mode, provider = {}) {
+  const object = payload && typeof payload === 'object' && !Array.isArray(payload);
+  if (object && (payload.error || Array.isArray(payload.errors) && payload.errors.length || payload.success === false || payload.ok === false)) {
+    const detail = payload.error?.message || payload.error || payload.errors || payload.message || 'success=false';
+    throw new Error(`推理返回业务错误：${String(typeof detail === 'string' ? detail : JSON.stringify(detail)).slice(0, 160)}`);
+  }
+  if (provider.probePolicy !== 'reachable') {
+    const text = (v) => typeof v === 'string' && v.trim().length > 0;
+    const chat = (choice) => {
+      const m = choice && choice.message;
+      return m && (text(m.content) || Array.isArray(m.content) && m.content.some((p) => text(p?.text))
+        || Array.isArray(m.tool_calls) && m.tool_calls.some((t) => text(t?.function?.name))
+        || text(m.function_call?.name) || text(m.refusal) || text(m.reasoning_content) || text(m.reasoning)
+        // A one-token probe can consume its entire budget before emitting visible text.
+        || m.content === '' && choice.finish_reason === 'length');
+    };
+    const chatOK = Array.isArray(payload?.choices) && payload.choices.some(chat);
+    const completionOK = Array.isArray(payload?.choices) && payload.choices.some((c) => text(c?.text) || c?.text === '' && c.finish_reason === 'length');
+    const embeddingOK = Array.isArray(payload?.data) && payload.data.length > 0 && payload.data.every((d) =>
+      Array.isArray(d?.embedding) && d.embedding.length > 0 && d.embedding.every((n) => typeof n === 'number' && Number.isFinite(n))
+      || typeof d?.embedding === 'string' && d.embedding.length > 0 && d.embedding.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(d.embedding));
+    const customAssertion = provider.assertType && provider.assertType !== 'none' && String(provider.assertValue || '').trim();
+    const valid = mode === 'chat' ? chatOK : mode === 'completions' ? completionOK : mode === 'embeddings' ? embeddingOK
+      : customAssertion || object && (chatOK || completionOK || embeddingOK || text(payload.message?.content) || text(payload.response) || payload.ok === true || payload.success === true);
+    if (!valid) throw new Error(`推理响应无有效 ${mode} 结果${mode === 'custom' ? '，请配置自定义响应断言' : ''}`);
+  }
+  return assertProbeResponse(payload, provider);
+}
+
 /**
  * 构造单模型探测请求。probeMode 决定探测端点与请求体：
  * - chat（默认）：POST /v1/chat/completions
@@ -279,7 +310,7 @@ async function detect(provider, opts = {}) {
   let headers;
   try { headers = providerHeaders(provider); }
   catch (e) {
-    return { providerId: provider.id, checkedAt: Date.now(), status: 'down', latency: null, modelsTotal: 0, modelsAvailable: [], modelsUnavailable: [], modelsUnprobed: [], modelDetails: [], error: e.message, durationMs: 0, probeCursor: 0 };
+    return redactValue({ providerId: provider.id, checkedAt: Date.now(), status: 'down', latency: null, modelsTotal: 0, modelsAvailable: [], modelsUnavailable: [], modelsUnprobed: [], modelDetails: [], error: e.message, durationMs: 0, probeCursor: 0 });
   }
 
   const num = (...vals) => {
@@ -355,11 +386,11 @@ async function detect(provider, opts = {}) {
       result.status = 'authfail';
       result.error = `鉴权失败: ${e.message}（请检查 API Key）`;
       logger.error(`${tag} 鉴权失败（${e.message}）→ 状态 authfail`);
-      return result;
+      return redactValue(result);
     }
     result.error = `连接失败: ${e.message}`;
     logger.error(`${tag} 连接失败（耗时 ${Date.now() - t0} ms，已重试 ${retries} 次）: ${e.message} → 状态 down`);
-    return result;
+    return redactValue(result);
   }
 
   // 可选配额端点：失败不影响服务健康状态，仅记录日志；字段路径兼容嵌套 JSON。
@@ -386,7 +417,7 @@ async function detect(provider, opts = {}) {
     result.error = '模型列表为空';
     logger.warn(`${tag} 模型列表为空 → 状态 degraded（连接正常但无可用能力）`);
     stampDur();
-    return result;
+    return redactValue(result);
   }
 
   // probeMode=none：跳过单模型探测，模型全部视为可用
@@ -396,7 +427,7 @@ async function detect(provider, opts = {}) {
     result.status = 'up';
     logger.info(`${tag} 探测方式为 none，跳过单模型探测 → 状态 up，模型 ${models.length} 个`);
     stampDur();
-    return result;
+    return redactValue(result);
   }
 
   // --- 阶段 2：逐模型可用性探测 ---
@@ -419,7 +450,7 @@ async function detect(provider, opts = {}) {
         const { url, body } = buildProbeRequest(base, id, { ...provider, probeMode: mode });
         const payload = await fetchWithRetry(url, { method: 'POST', headers, body, timeout: probeTimeout, proxy, insecureSkipVerify: tlsSkip, signal: opts.signal },
           { retries, tag, what: `探测 [${id}/${mode}]` });
-        assertProbeResponse(payload, provider);
+        validateProbeResponse(payload, mode, provider);
         capabilities[mode] = true;
       } catch (e) {
         code = Number(e.statusCode) || 0;
@@ -489,7 +520,7 @@ async function detect(provider, opts = {}) {
   logger.info(`${tag} 检测结束 → 状态 ${result.status}${result.modelsAvailable.length > 0 ? '，可用: ' + result.modelsAvailable.join(', ') : ''}`);
 
   stampDur();
-  return result;
+  return redactValue(result);
 }
 
-module.exports = { detect, fetchJSON, fetchWithRetry, extractModelIds, extractContent, isRetryable, buildProbeRequest, resolveProxy, mapPool, providerHeaders, assertProbeResponse, valueAtPath, filterIgnoredModels, extractSSEDelta, measureOpenAIStream };
+module.exports = { detect, fetchJSON, fetchWithRetry, extractModelIds, extractContent, isRetryable, buildProbeRequest, resolveProxy, mapPool, providerHeaders, assertProbeResponse, validateProbeResponse, valueAtPath, filterIgnoredModels, extractSSEDelta, measureOpenAIStream };

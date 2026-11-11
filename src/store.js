@@ -238,8 +238,11 @@ function loadAll() {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       throw new Error('根节点不是对象');
     }
+    if (!Array.isArray(raw.providers)) throw new Error('providers 必须是数组');
+    if (raw.providers.some((p) => !p || typeof p !== 'object' || Array.isArray(p))) throw new Error('providers 包含非对象条目');
+    if (Object.hasOwn(raw, 'global') && (!raw.global || typeof raw.global !== 'object' || Array.isArray(raw.global))) throw new Error('global 必须是对象');
     const g = normalizeGlobal(raw.global);
-    const list = ensureUniqueProviderIds((Array.isArray(raw.providers) ? raw.providers : []).filter((p) => p && typeof p === 'object' && !Array.isArray(p)));
+    const list = ensureUniqueProviderIds(raw.providers);
     // 手改文件可能带来坏正则 / 坏 URL：逐条校验（校验用归一化副本，不改写已保存的运行态），
     // 非法条目停用而不是丢弃——保留用户数据，同时防止 detector 每轮在 filterIgnoredModels
     // 里抛异常导致该服务商状态永久卡在旧值。

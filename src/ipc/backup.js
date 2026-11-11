@@ -5,6 +5,7 @@
 const { ipcMain, dialog } = require('electron');
 const path = require('path');
 const backup = require('../backup');
+const { prepareDetectionChanges } = require('../detectionConfig');
 
 function register(ctx) {
   ipcMain.handle('backup:export', async (e, filePath) => {
@@ -58,6 +59,7 @@ function register(ctx) {
     let committed = false;
     try {
       const res = backup.restoreFrom(db, filePath, mode === 'merge' ? 'merge' : 'overwrite');
+      prepareDetectionChanges(db, JSON.parse(before));
       const saved = ctx.persist();
       if (!saved.ok) { ctx.replaceDb(JSON.parse(before)); return saved; }
       committed = true;

@@ -17,6 +17,7 @@ const history = require('./src/history');
 const alerts = require('./src/alerts');
 const { diffBaseline } = require('./src/baseline');
 const { statusText, buildReportHTML } = require('./src/report');
+const { redactValue, redactUrl, URL_FIELDS } = require('./src/redact');
 
 let db = { global: { ...DEFAULT_GLOBAL }, providers: [] };
 let persistBlocked = false;
@@ -178,30 +179,38 @@ function applyResult(provider, result, reason) {
   updateTrayStatus();
   return { modelChanged, alerts: decision.alerts.filter((a) => a.isNew), firstCheck: firstRealCheck };
 }
-const deliveryInFlight = new Set(), deliveryJobs = new Set();
+const deliveryInFlight = new Set(), deliveryJobs = new Set(), deliveryLanes = new Map();
 function dispatchAlerts(provider, events, prev = null) {
+  const revision = scheduler.revision(provider.id);
   for (const event of events) {
     const key = `${provider.id}:${event.eventId}`;
     if (deliveryInFlight.has(key)) continue;
     deliveryInFlight.add(key);
-    const extra = { added: event.added || [], lost: event.lost || [], delivered: event.delivered || [] };
-    const operation = event.kind === 'modelChange'
-      ? notifyModelChange(db.global, provider, prev, provider, extra) : notifyAlert(db.global, provider, event, extra);
-    const job = operation.then((result) => {
-      if (!db.providers.includes(provider) || provider.enabled === false) return;
+    // Keep messages for one provider in order, including slow multi-channel deliveries.
+    const job = (deliveryLanes.get(provider.id) || Promise.resolve()).catch(() => {}).then(async () => {
+      const pending = provider.alertRuntime?.pending?.[event.kind];
+      if (!db.providers.includes(provider) || provider.enabled === false || revision !== scheduler.revision(provider.id)
+        || pending?.eventId !== event.eventId) return;
+      const extra = { added: event.added || [], lost: event.lost || [], delivered: pending.delivered || [], targets: pending.targets };
+      const result = await (event.kind === 'modelChange'
+        ? notifyModelChange(db.global, provider, prev, provider, extra) : notifyAlert(db.global, provider, event, extra));
+      if (!db.providers.includes(provider) || provider.enabled === false || revision !== scheduler.revision(provider.id)) return;
       alerts.noteDelivery(provider, event, result);
       persistSoon(); send('state-changed', publicState());
     }).catch((e) => {
-      if (!db.providers.includes(provider) || provider.enabled === false) return;
+      if (!db.providers.includes(provider) || provider.enabled === false || revision !== scheduler.revision(provider.id)) return;
       alerts.noteDelivery(provider, event, { attempted: 0, delivered: [], failed: [{ error: e.message }] });
       persistSoon(); logger.error(`通知失败: ${e.message}`);
-    }).finally(() => { deliveryInFlight.delete(key); deliveryJobs.delete(job); });
-    deliveryJobs.add(job);
+    }).finally(() => {
+      deliveryInFlight.delete(key); deliveryJobs.delete(job);
+      if (deliveryLanes.get(provider.id) === job) deliveryLanes.delete(provider.id);
+    });
+    deliveryJobs.add(job); deliveryLanes.set(provider.id, job);
   }
 }
 function retryPendingAlerts() {
   for (const provider of db.providers) {
-    if (provider.enabled === false || !Object.keys(provider.alertRuntime?.pending || {}).length) continue;
+    if (provider.enabled === false || (!Object.keys(provider.alertRuntime?.pending || {}).length && !provider.alertRuntime?.incident)) continue;
     // Re-evaluate only delivery eligibility; do not count another failed sample.
     const decision = alerts.evaluate(db.global, provider, snapshot(provider), { deliveryOnly: true });
     dispatchAlerts(provider, decision.alerts);
@@ -467,8 +476,10 @@ function startAutoChecks() {
 // ---------- 状态快照 ----------
 function publicProvider(p) {
   const { apiKey, customHeaders, proxyUrl, ...rest } = p;
+  const display = redactValue(rest);
+  for (const key of URL_FIELDS) if (rest[key] !== undefined) display[key] = redactUrl(rest[key]);
   return {
-    ...rest,
+    ...display,
     hasApiKey: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : '',
     hasCustomHeaders: Boolean(customHeaders),
     // 代理地址常含 user:pass@ 凭据，与其它密钥同样掩码下发
@@ -486,14 +497,14 @@ function publicGlobal(g) {
     out[`${key}Configured`] = Boolean(out[key]);
     out[key] = '';
   }
-  return out;
+  return redactValue(out);
 }
 function maskKey(k) {
   if (k.length <= 8) return k.slice(0, 2) + '****';
   return k.slice(0, 4) + '****' + k.slice(-4);
 }
 function publicState() {
-  return {
+  return redactValue({
     providers: db.providers.map(publicProvider),
     global: publicGlobal(db.global),
     running: scheduler.runningList(),
@@ -504,7 +515,7 @@ function publicState() {
     logDir: logger.LOG_DIR,
     unread: { count: unreadAlerts.length, items: unreadAlerts.slice().reverse() },
     selfmon: { slowChecks: selfmon.slowChecks, queueWarns: selfmon.queueWarns, notifyHealth: getNotifyHealth(), circuits: scheduler.circuitInfo() }
-  };
+  });
 }
 function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -522,6 +533,14 @@ const ctx = {
   pkg,
   SECRET_GLOBAL_KEYS,
   applyLoginItem, registerHotkey, applyGlobalConfig,
+  commitDetectionChanges: (ids) => {
+    for (const id of ids) {
+      alerts.resetState(id);
+      const provider = db.providers.find((p) => p.id === id);
+      if (provider) scheduler.refresh(provider);
+    }
+    if (ids.length) updateTrayStatus();
+  },
   setHotkeyCapture: (active) => { hotkeyCaptureActive = Boolean(active); registerHotkey(); },
   updateTrayStatus,
   clearAllUnread: clearUnread,
